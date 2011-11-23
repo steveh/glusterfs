@@ -379,6 +379,21 @@ if test "x${have_linkat}" = "xyes"; then
    AC_DEFINE(HAVE_LINKAT, 1, [define if found linkat])
 fi
 AC_SUBST(HAVE_LINKAT)
+AC_CHECK_FUNC([openat], [have_openat=yes])
+if test "x${have_openat}" = "xyes"; then
+    AC_DEFINE(HAVE_OPENAT, 1, [define if found openat])
+fi
+AC_SUBST(HAVE_OPENAT)
+AC_CHECK_FUNC([mkdirat], [have_mkdirat=yes])
+if test "x${have_mkdirat}" = "xyes"; then
+   AC_DEFINE(HAVE_MKDIRAT, 1, [define if found mkdirat])
+fi
+AC_SUBST(HAVE_MKDIRAT)
+AC_CHECK_FUNC([fstatat], [have_fstatat=yes])
+if test "x${have_fstatat}" = "xyes"; then
+   AC_DEFINE(HAVE_FSTATAT, 1, [define if found fstatat])
+fi
+AC_SUBST(HAVE_FSTATAT)
 
 dnl Check for argp
 AC_CHECK_HEADER([argp.h], AC_DEFINE(HAVE_ARGP, 1, [have argp]))

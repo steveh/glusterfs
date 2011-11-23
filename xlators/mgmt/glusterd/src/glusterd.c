@@ -583,6 +583,14 @@ check_prepare_mountbroker_root (char *mountbroker_root)
         struct stat st2 = {0,};
         int ret         = 0;
 
+#if !defined(HAVE_OPENAT) || !defined(HAVE_MKDIRAT) || !defined(HAVE_FSTATAT)
+        char *basepath[MAXPATHLEN + 1];
+        char *curpath[MAXPATHLEN + 1];
+
+        (void)sprintf(basepath, MAXPATHLEN, "%s/%s", mountbroker_root, MB_HIVE);
+        (void)strncpy(curpath, mountbroker_root, MAXPATHLEN);
+#endif
+
         ret = open (mountbroker_root, O_RDONLY);
         if (ret != -1) {
                 dfd = ret;
@@ -607,7 +615,12 @@ check_prepare_mountbroker_root (char *mountbroker_root)
         dfd0 = dup (dfd);
 
         for (;;) {
+#ifdef HAVE_OPENAT
                 ret = openat (dfd, "..", O_RDONLY);
+#else /* HAVE_OPENAT */
+                (void)strcat(curpath, "/..", MAXPATHLEN);
+                ret = open(curpath, O_RDONLY, 0);
+#endif /* HAVE_OPENAT */
                 if (ret != -1) {
                         dfd2 = ret;
                         ret = fstat (dfd2, &st2);
@@ -636,24 +649,20 @@ check_prepare_mountbroker_root (char *mountbroker_root)
                 dfd = dfd2;
                 st = st2;
         }
-
-
-    #ifdef HAVE_LINKAT
-        ret = mkdirat (dfd0, MB_HIVE, 0711);        
-    #else
-        char tmppath[MAXPATHLEN + 1];
-        dfd0 = open(path, O_RDONLY)
-        (void)sprintf(tmppath,  MAXPATHLEN, "%s/%s", path, MB_HIVE);
-        ret = mkdir (tmppath, 0711);
-    #endif
+#ifdef HAVE_MKDIRAT
+        ret = mkdirat (dfd0, MB_HIVE, 0711);
+#else /* HAVE_MKDIRAT */
+        ret = mkdir(basepath, 0711);
+#endif /* HAVE_MKDIRAT */
         if (ret == -1 && errno == EEXIST)
                 ret = 0;
-        if (ret != -1)
-    #ifdef HAVE_LINKAT
+        if (ret != -1) {
+#if HAVE_FSTATAT
                 ret = fstatat (dfd0, MB_HIVE, &st, AT_SYMLINK_NOFOLLOW);
-    #else
-                ret = lstat(MB_HIVE, &st);
-    #endif
+#else /* HAVE_FSTATAT */
+                ret = lstat(basepath, &st);
+#endif /* HAVE_FSTATAT */
+        }
         if (ret == -1 || st.st_mode != (S_IFDIR|0711)) {
                 gf_log ("", GF_LOG_ERROR,
                         "failed to set up mountbroker-root directory %s",
