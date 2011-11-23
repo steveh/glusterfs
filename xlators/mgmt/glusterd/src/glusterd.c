@@ -637,11 +637,23 @@ check_prepare_mountbroker_root (char *mountbroker_root)
                 st = st2;
         }
 
-        ret = mkdirat (dfd0, MB_HIVE, 0711);
+
+    #ifdef HAVE_LINKAT
+        ret = mkdirat (dfd0, MB_HIVE, 0711);        
+    #else
+        char tmppath[MAXPATHLEN + 1];
+        dfd0 = open(path, O_RDONLY)
+        (void)sprintf(tmppath,  MAXPATHLEN, "%s/%s", path, MB_HIVE);
+        ret = mkdir (tmppath, 0711);
+    #endif
         if (ret == -1 && errno == EEXIST)
                 ret = 0;
         if (ret != -1)
+    #ifdef HAVE_LINKAT
                 ret = fstatat (dfd0, MB_HIVE, &st, AT_SYMLINK_NOFOLLOW);
+    #else
+                ret = lstat(MB_HIVE, &st);
+    #endif
         if (ret == -1 || st.st_mode != (S_IFDIR|0711)) {
                 gf_log ("", GF_LOG_ERROR,
                         "failed to set up mountbroker-root directory %s",
