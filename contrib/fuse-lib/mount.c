@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
+#include <signal.h>
 #ifndef __NetBSD__
 #include <mntent.h>
 #endif /* __NetBSD__ */
@@ -33,6 +34,12 @@
 #ifdef __NetBSD__
 #include <perfuse.h>
 #define umount2(dir, flags) unmount(dir, ((flags) != 0) ? MNT_FORCE : 0)
+#endif
+
+#ifdef linux
+#define _PATH_MOUNT "/bin/mount"
+#else /* NetBSD, MacOS X */
+#define _PATH_MOUNT "/sbin/mount"
 #endif
 
 #ifdef FUSE_UTIL
@@ -174,10 +181,10 @@ fuse_mnt_add_mount (const char *progname, const char *fsname,
                         exit (1);
                 }
                 rmdir (tmp);
-                execl ("/bin/mount", "/bin/mount", "-i", "-f", "-t", type,
+                execl (_PATH_MOUNT, _PATH_MOUNT, "-i", "-f", "-t", type,
                        "-o", opts, fsname, mnt, NULL);
-                GFFUSE_LOGERR ("%s: failed to execute /bin/mount: %s",
-                               progname, strerror (errno));
+                GFFUSE_LOGERR ("%s: failed to execute %s: %s",
+                               progname, _PATH_MOUNT, strerror (errno));
                 exit (1);
         }
         if (mtab_pid) {
