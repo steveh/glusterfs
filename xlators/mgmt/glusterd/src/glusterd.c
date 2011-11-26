@@ -26,6 +26,7 @@
 #include <grp.h>
 #include <sys/uio.h>
 #include <sys/resource.h>
+#include <sys/param.h>
 
 #include <libgen.h>
 #include "uuid.h"
