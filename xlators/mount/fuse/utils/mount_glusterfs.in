@@ -81,11 +81,11 @@ start_glusterfs ()
     if [ -z "$volfile_loc" ]; then
 	if [ -n "$transport" ]; then 
 	    cmd_line=$(echo "$cmd_line \
---volfile-server=$server_ip \
---volfile-server-transport=$transport");
+                --volfile-server=$server_ip \
+                --volfile-server-transport=$transport");
 	else
 	    cmd_line=$(echo "$cmd_line \
---volfile-server=$server_ip \
+                --volfile-server=$server_ip");
 	fi
     else
 	cmd_line=$(echo "$cmd_line --volfile=$volfile_loc");
