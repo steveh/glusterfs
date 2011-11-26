@@ -28,7 +28,11 @@
 #include "xlator.h"
 #include <sys/time.h>
 #include <pthread.h>
+
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE
 #include <ucontext.h>
+#endif
 
 
 struct synctask;

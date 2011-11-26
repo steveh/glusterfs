@@ -619,7 +619,7 @@ check_prepare_mountbroker_root (char *mountbroker_root)
 #ifdef HAVE_OPENAT
                 ret = openat (dfd, "..", O_RDONLY);
 #else /* HAVE_OPENAT */
-                (void)strcat(curpath, "/..", MAXPATHLEN);
+                (void)strncat(curpath, "/..", MAXPATHLEN);
                 ret = open(curpath, O_RDONLY, 0);
 #endif /* HAVE_OPENAT */
                 if (ret != -1) {
