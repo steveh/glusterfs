@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2010-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -59,6 +49,9 @@ cli_cmd_needs_connection (struct cli_cmd_word *word)
 
         if (!strcasecmp ("getwd", word->word))
                 return 1;
+
+        if (!strcasecmp ("exit", word->word))
+                return 0;
 
         return CLI_DEFAULT_CONN_TIMEOUT;
 }
@@ -208,8 +201,7 @@ cli_cmd_process_line (struct cli_state *state, const char *text)
 
         ret = cli_cmd_process (state, count, tokens);
 out:
-        if (copy)
-                free (copy);
+        free (copy);
 
         if (tokens)
                 cli_cmd_tokens_destroy (tokens);

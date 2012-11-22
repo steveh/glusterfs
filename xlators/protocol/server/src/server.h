@@ -28,9 +28,17 @@
 #include "protocol-common.h"
 #include "server-mem-types.h"
 #include "glusterfs3.h"
+#include "timer.h"
 
 #define DEFAULT_BLOCK_SIZE         4194304   /* 4MB */
 #define DEFAULT_VOLUME_FILE_PATH   CONFDIR "/glusterfs.vol"
+#define GF_MAX_SOCKET_WINDOW_SIZE  (1 * GF_UNIT_MB)
+#define GF_MIN_SOCKET_WINDOW_SIZE  (0)
+
+typedef enum {
+        INTERNAL_LOCKS = 1,
+        POSIX_LOCKS = 2,
+} server_lock_flags_t;
 
 typedef struct _server_state server_state_t;
 
@@ -39,15 +47,13 @@ struct _locker {
         char             *volume;
         loc_t             loc;
         fd_t             *fd;
-        uint64_t          owner;
+        gf_lkowner_t      owner;
         pid_t             pid;
 };
 
 struct _lock_table {
         struct list_head  inodelk_lockers;
         struct list_head  entrylk_lockers;
-        gf_lock_t         lock;
-        size_t            count;
 };
 
 /* private structure per connection (transport object)
@@ -57,13 +63,14 @@ struct _server_connection {
         struct list_head    list;
         char               *id;
         int                 ref;
-        int                 active_transports;
+        int                 bind_ref;
         pthread_mutex_t     lock;
-        char                disconnected;
         fdtable_t          *fdtable;
         struct _lock_table *ltable;
+        gf_timer_t         *timer;
         xlator_t           *bound_xl;
         xlator_t           *this;
+        uint32_t           lk_version;
 };
 
 typedef struct _server_connection server_connection_t;
@@ -72,11 +79,19 @@ typedef struct _server_connection server_connection_t;
 server_connection_t *
 server_connection_get (xlator_t *this, const char *id);
 
-void
-server_connection_put (xlator_t *this, server_connection_t *conn);
+server_connection_t *
+server_connection_put (xlator_t *this, server_connection_t *conn,
+                       gf_boolean_t *detached);
+
+server_connection_t*
+server_conn_unref (server_connection_t *conn);
+
+server_connection_t*
+server_conn_ref (server_connection_t *conn);
 
 int
-server_connection_cleanup (xlator_t *this, server_connection_t *conn);
+server_connection_cleanup (xlator_t *this, server_connection_t *conn,
+                           int32_t flags);
 
 int server_null (rpcsvc_request_t *req);
 
@@ -92,9 +107,11 @@ struct server_conf {
         int                     inode_lru_limit;
         gf_boolean_t            verify_volfile;
         gf_boolean_t            trace;
+        gf_boolean_t            lk_heal; /* If true means lock self
+                                            heal is on else off. */
         char                   *conf_dir;
         struct _volfile_ctx    *volfile;
-
+        struct timeval          grace_tv;
         dict_t                 *auth_modules;
         pthread_mutex_t         mutex;
         struct list_head        conns;
@@ -119,17 +136,14 @@ struct resolve_comp {
 
 typedef struct {
         server_resolve_type_t  type;
-        uint64_t               fd_no;
+        int64_t               fd_no;
         u_char                 gfid[16];
         u_char                 pargfid[16];
         char                  *path;
         char                  *bname;
-        char                  *resolved;
         int                    op_ret;
         int                    op_errno;
-        loc_t                  deep_loc;
-        struct resolve_comp   *components;
-        int                    comp_count;
+        loc_t                  resolve_loc;
 } server_resolve_t;
 
 
@@ -159,7 +173,7 @@ struct _server_state {
 
         fd_t             *fd;
         dict_t           *params;
-        int               flags;
+        int32_t           flags;
         int               wbflags;
         struct iovec      payload_vector[MAX_IOVEC];
         int               payload_count;
@@ -182,10 +196,13 @@ struct _server_state {
         struct gf_flock      flock;
         const char       *volume;
         dir_entry_t      *entry;
+
+        dict_t           *xdata;
+        mode_t            umask;
 };
 
 extern struct rpcsvc_program gluster_handshake_prog;
-extern struct rpcsvc_program glusterfs3_1_fop_prog;
+extern struct rpcsvc_program glusterfs3_3_fop_prog;
 extern struct rpcsvc_program gluster_ping_prog;
 
 int
@@ -195,5 +212,7 @@ server_submit_reply (call_frame_t *frame, rpcsvc_request_t *req, void *arg,
 
 int gf_server_check_setxattr_cmd (call_frame_t *frame, dict_t *dict);
 int gf_server_check_getxattr_cmd (call_frame_t *frame, const char *name);
+
+void ltable_dump (server_connection_t *conn);
 
 #endif /* !_SERVER_H */

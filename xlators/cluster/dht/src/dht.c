@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -43,8 +34,10 @@ dht_layout_dump (dht_layout_t  *layout, const char *prefix)
         char    key[GF_DUMP_MAX_BUF_LEN];
         int     i = 0;
 
-        GF_VALIDATE_OR_GOTO ("dht", layout, out);
-        GF_VALIDATE_OR_GOTO ("dht", prefix, out);
+        if (!layout)
+                goto out;
+        if (!prefix)
+                goto out;
 
         gf_proc_dump_build_key(key, prefix, "cnt");
         gf_proc_dump_write(key, "%d", layout->cnt);
@@ -52,8 +45,13 @@ dht_layout_dump (dht_layout_t  *layout, const char *prefix)
         gf_proc_dump_write(key, "%d", layout->preset);
         gf_proc_dump_build_key(key, prefix, "gen");
         gf_proc_dump_write(key, "%d", layout->gen);
-        gf_proc_dump_build_key(key, prefix, "type");
-        gf_proc_dump_write(key, "%d", layout->type);
+        if (layout->type != IA_INVAL) {
+                gf_proc_dump_build_key(key, prefix, "inode type");
+                gf_proc_dump_write(key, "%d", layout->type);
+        }
+
+        if  (!IA_ISDIR (layout->type))
+                goto out;
 
         for (i = 0; i < layout->cnt; i++) {
                 gf_proc_dump_build_key(key, prefix,"list[%d].err", i);
@@ -88,18 +86,15 @@ dht_priv_dump (xlator_t *this)
         dht_conf_t      *conf = NULL;
         int             ret = -1;
 
-        GF_VALIDATE_OR_GOTO ("dht", this, out);
+        if (!this)
+                goto out;
 
         conf = this->private;
-
         if (!conf)
-                return -1;
+                goto out;
 
         ret = TRY_LOCK(&conf->subvolume_lock);
-
         if (ret != 0) {
-                gf_log("", GF_LOG_WARNING, "Unable to lock dht subvolume %s",
-                       this->name);
                 return ret;
         }
 
@@ -144,7 +139,10 @@ dht_priv_dump (xlator_t *this)
                                    conf->du_stats->avail_inodes);
                 gf_proc_dump_write("du_stats.log", "%lu", conf->du_stats->log);
         }
-        gf_proc_dump_write("last_stat_fetch", "%s", ctime(&conf->last_stat_fetch.tv_sec));
+
+        if (conf->last_stat_fetch.tv_sec)
+                gf_proc_dump_write("last_stat_fetch", "%s",
+                                    ctime(&conf->last_stat_fetch.tv_sec));
 
         UNLOCK(&conf->subvolume_lock);
 
@@ -157,20 +155,16 @@ dht_inodectx_dump (xlator_t *this, inode_t *inode)
 {
         int             ret = -1;
         dht_layout_t    *layout = NULL;
-        uint64_t        tmp_layout = 0;
 
-        GF_VALIDATE_OR_GOTO ("dht", this, out);
-        GF_VALIDATE_OR_GOTO ("dht", inode, out);
+        if (!this)
+                goto out;
+        if (!inode)
+                goto out;
 
-        ret = inode_ctx_get (inode, this, &tmp_layout);
+        ret = dht_inode_ctx_layout_get (inode, this, &layout);
 
-        if (ret != 0)
+        if ((ret != 0) || !layout)
                 return ret;
-
-        layout = (dht_layout_t *)(long)tmp_layout;
-
-        if (!layout)
-                return -1;
 
         gf_proc_dump_add_section("xlator.cluster.dht.%s.inode", this->name);
         dht_layout_dump(layout, "layout");
@@ -182,11 +176,20 @@ out:
 int
 notify (xlator_t *this, int event, void *data, ...)
 {
-        int ret = -1;
+        int              ret = -1;
+        va_list          ap;
+        dict_t          *output = NULL;
 
         GF_VALIDATE_OR_GOTO ("dht", this, out);
 
-        ret = dht_notify (this, event, data);
+
+        if (!data)
+                goto out;
+
+        va_start (ap, data);
+        output = va_arg (ap, dict_t*);
+
+        ret = dht_notify (this, event, data, output);
 
 out:
         return ret;
@@ -210,11 +213,9 @@ fini (xlator_t *this)
                         GF_FREE (conf->file_layouts);
                 }
 
-                if (conf->subvolumes)
-                        GF_FREE (conf->subvolumes);
+                GF_FREE (conf->subvolumes);
 
-                if (conf->subvolume_status)
-                        GF_FREE (conf->subvolume_status);
+                GF_FREE (conf->subvolume_status);
 
                 GF_FREE (conf);
         }
@@ -275,9 +276,9 @@ dht_parse_decommissioned_bricks (xlator_t *this, dht_conf_t *conf,
         }
 
         ret = 0;
+        conf->decommission_in_progress = 1;
 out:
-        if (dup_brick)
-                GF_FREE (dup_brick);
+        GF_FREE (dup_brick);
 
         return ret;
 }
@@ -323,10 +324,23 @@ reconfigure (xlator_t *this, dict_t *options)
 
 	GF_OPTION_RECONF ("min-free-disk", conf->min_free_disk, options,
                           percent_or_size, out);
+        /* option can be any one of percent or bytes */
+        conf->disk_unit = 0;
+        if (conf->min_free_disk < 100)
+                conf->disk_unit = 'p';
+
 	GF_OPTION_RECONF ("min-free-inodes", conf->min_free_inodes, options,
                           percent, out);
+
         GF_OPTION_RECONF ("directory-layout-spread", conf->dir_spread_cnt,
                           options, uint32, out);
+
+        GF_OPTION_RECONF ("readdir-optimize", conf->readdir_optimize, options,
+                          bool, out);
+        if (conf->defrag) {
+                GF_OPTION_RECONF ("rebalance-stats", conf->defrag->stats,
+                                  options, bool, out);
+        }
 
         if (dict_get_str (options, "decommissioned-bricks", &temp_str) == 0) {
                 ret = dht_parse_decommissioned_bricks (this, conf, temp_str);
@@ -343,10 +357,14 @@ out:
 int
 init (xlator_t *this)
 {
-        dht_conf_t    *conf = NULL;
-        char          *temp_str = NULL;
-        int            ret = -1;
-        int            i = 0;
+        dht_conf_t                      *conf           = NULL;
+        char                            *temp_str       = NULL;
+        int                              ret            = -1;
+        int                              i              = 0;
+        gf_defrag_info_t                *defrag         = NULL;
+        int                              cmd            = 0;
+        char                            *node_uuid      = NULL;
+
 
         GF_VALIDATE_OR_GOTO ("dht", this, err);
 
@@ -364,6 +382,38 @@ init (xlator_t *this)
         conf = GF_CALLOC (1, sizeof (*conf), gf_dht_mt_dht_conf_t);
         if (!conf) {
                 goto err;
+        }
+
+        ret = dict_get_int32 (this->options, "rebalance-cmd", &cmd);
+
+        if (cmd) {
+                defrag = GF_CALLOC (1, sizeof (gf_defrag_info_t),
+                                    gf_defrag_info_mt);
+
+                GF_VALIDATE_OR_GOTO (this->name, defrag, err);
+
+                LOCK_INIT (&defrag->lock);
+
+                defrag->is_exiting = 0;
+
+                conf->defrag = defrag;
+
+                ret = dict_get_str (this->options, "node-uuid", &node_uuid);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "node-uuid not "
+                                "specified");
+                        goto err;
+                }
+
+                if (uuid_parse (node_uuid, defrag->node_uuid)) {
+                        gf_log (this->name, GF_LOG_ERROR, "Cannot parse "
+                                "glusterd node uuid");
+                        goto err;
+                }
+
+                defrag->cmd = cmd;
+
+                defrag->stats = _gf_false;
         }
 
         conf->search_unhashed = GF_DHT_LOOKUP_UNHASHED_ON;
@@ -393,6 +443,17 @@ init (xlator_t *this)
         GF_OPTION_INIT ("assert-no-child-down", conf->assert_no_child_down,
                         bool, err);
 
+        GF_OPTION_INIT ("readdir-optimize", conf->readdir_optimize, bool, err);
+
+        if (defrag) {
+                GF_OPTION_INIT ("rebalance-stats", defrag->stats, bool, err);
+        }
+
+        /* option can be any one of percent or bytes */
+        conf->disk_unit = 0;
+        if (conf->min_free_disk < 100)
+                conf->disk_unit = 'p';
+
         ret = dht_init_subvolumes (this, conf);
         if (ret == -1) {
                 goto err;
@@ -414,12 +475,10 @@ init (xlator_t *this)
 
         conf->gen = 1;
 
-        /* Create 'syncop' environment */
-	conf->env = syncenv_new (0);
-        if (!conf->env) {
+        this->local_pool = mem_pool_new (dht_local_t, 512);
+        if (!this->local_pool) {
                 gf_log (this->name, GF_LOG_ERROR,
-                        "failed to create sync environment %s",
-                        strerror (errno));
+                        "failed to create local_t's memory pool");
                 goto err;
         }
 
@@ -436,14 +495,13 @@ err:
                         GF_FREE (conf->file_layouts);
                 }
 
-                if (conf->subvolumes)
-                        GF_FREE (conf->subvolumes);
+                GF_FREE (conf->subvolumes);
 
-                if (conf->subvolume_status)
-                        GF_FREE (conf->subvolume_status);
+                GF_FREE (conf->subvolume_status);
 
-                if (conf->du_stats)
-                        GF_FREE (conf->du_stats);
+                GF_FREE (conf->du_stats);
+
+                GF_FREE (conf->defrag);
 
                 GF_FREE (conf);
         }
@@ -478,6 +536,7 @@ struct xlator_fops fops = {
         .access      = dht_access,
         .readlink    = dht_readlink,
         .getxattr    = dht_getxattr,
+        .fgetxattr    = dht_fgetxattr,
         .readv       = dht_readv,
         .flush       = dht_flush,
         .fsync       = dht_fsync,
@@ -486,6 +545,7 @@ struct xlator_fops fops = {
         .lk          = dht_lk,
 
         /* Inode write operations */
+        .fremovexattr = dht_fremovexattr,
         .removexattr = dht_removexattr,
         .setxattr    = dht_setxattr,
         .fsetxattr   = dht_fsetxattr,
@@ -548,5 +608,20 @@ struct volume_options options[] = {
         { .key  = {"decommissioned-bricks"},
           .type = GF_OPTION_TYPE_ANY,
         },
+        { .key  = {"rebalance-cmd"},
+          .type = GF_OPTION_TYPE_INT,
+        },
+        { .key = {"node-uuid"},
+          .type = GF_OPTION_TYPE_STR,
+        },
+        { .key = {"rebalance-stats"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "off",
+        },
+        { .key = {"readdir-optimize"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "off",
+        },
+
         { .key  = {NULL} },
 };

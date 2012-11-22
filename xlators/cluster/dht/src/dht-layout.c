@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -68,9 +59,7 @@ dht_layout_t *
 dht_layout_get (xlator_t *this, inode_t *inode)
 {
         dht_conf_t   *conf = NULL;
-        uint64_t      layout_int = 0;
         dht_layout_t *layout = NULL;
-        int           ret    = -1;
 
         conf = this->private;
         if (!conf)
@@ -78,9 +67,8 @@ dht_layout_get (xlator_t *this, inode_t *inode)
 
         LOCK (&conf->layout_lock);
         {
-                ret = inode_ctx_get (inode, this, &layout_int);
-                if (ret == 0) {
-                        layout = (dht_layout_t *) (unsigned long) layout_int;
+                dht_inode_ctx_layout_get (inode, this, &layout);
+                if (layout) {
                         layout->ref++;
                 }
         }
@@ -98,7 +86,6 @@ dht_layout_set (xlator_t *this, inode_t *inode, dht_layout_t *layout)
         int           oldret = -1;
         int           ret = 0;
         dht_layout_t *old_layout;
-        uint64_t      old_layout_int;
 
         conf = this->private;
         if (!conf)
@@ -106,16 +93,13 @@ dht_layout_set (xlator_t *this, inode_t *inode, dht_layout_t *layout)
 
         LOCK (&conf->layout_lock);
         {
-                oldret = inode_ctx_get (inode, this, &old_layout_int);
-
+                oldret = dht_inode_ctx_layout_get (inode, this, &old_layout);
                 layout->ref++;
-                ret = inode_ctx_put (inode, this, (uint64_t) (unsigned long)
-                                     layout);
+                dht_inode_ctx_layout_set (inode, this, layout);
         }
         UNLOCK (&conf->layout_lock);
 
-        if (oldret == 0) {
-                old_layout = (dht_layout_t *) (unsigned long) old_layout_int;
+        if (!oldret) {
                 dht_layout_unref (this, old_layout);
         }
 
@@ -176,7 +160,7 @@ dht_layout_search (xlator_t *this, dht_layout_t *layout, const char *name)
 
         ret = dht_hash_compute (layout->type, name, &hash);
         if (ret != 0) {
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_WARNING,
                         "hash computation failed for type=%d name=%s",
                         layout->type, name);
                 goto out;
@@ -191,7 +175,7 @@ dht_layout_search (xlator_t *this, dht_layout_t *layout, const char *name)
         }
 
         if (!subvol) {
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_WARNING,
                         "no subvolume for hash (value) = %u", hash);
         }
 
@@ -280,6 +264,9 @@ dht_disk_layout_extract (xlator_t *this, dht_layout_t *layout,
 
         if (disk_layout_p)
                 *disk_layout_p = disk_layout;
+        else
+                GF_FREE (disk_layout);
+
         ret = 0;
 
 out:
@@ -289,7 +276,7 @@ out:
 
 int
 dht_disk_layout_merge (xlator_t *this, dht_layout_t *layout,
-                       int pos, void *disk_layout_raw)
+		       int pos, void *disk_layout_raw, int disk_layout_len)
 {
         int      cnt = 0;
         int      type = 0;
@@ -297,19 +284,38 @@ dht_disk_layout_merge (xlator_t *this, dht_layout_t *layout,
         int      stop_off = 0;
         int      disk_layout[4];
 
-        /* TODO: assert disk_layout_ptr is of required length */
+	if (!disk_layout_raw) {
+		gf_log (this->name, GF_LOG_CRITICAL,
+                        "error no layout on disk for merge");
+		return -1;
+	}
 
-        memcpy (disk_layout, disk_layout_raw, sizeof (disk_layout));
+	GF_ASSERT (disk_layout_len == sizeof (disk_layout));
+
+        memcpy (disk_layout, disk_layout_raw, disk_layout_len);
 
         cnt  = ntoh32 (disk_layout[0]);
         if (cnt != 1) {
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_ERROR,
                         "disk layout has invalid count %d", cnt);
                 return -1;
         }
 
-        /* TODO: assert type is compatible */
-        type      = ntoh32 (disk_layout[1]);
+        type = ntoh32 (disk_layout[1]);
+	switch (type) {
+        case DHT_HASH_TYPE_DM_USER:
+                gf_log (this->name, GF_LOG_DEBUG, "found user-set layout");
+                layout->type = type;
+                /* Fall through. */
+	case DHT_HASH_TYPE_DM:
+		break;
+        default:
+		gf_log (this->name, GF_LOG_CRITICAL,
+			"Catastrophic error layout with unknown type found %d",
+			disk_layout[1]);
+		return -1;
+	}
+
         start_off = ntoh32 (disk_layout[2]);
         stop_off  = ntoh32 (disk_layout[3]);
 
@@ -333,7 +339,7 @@ dht_layout_merge (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
         int      ret   = -1;
         int      err   = -1;
         void    *disk_layout_raw = NULL;
-
+        int      disk_layout_len = 0;
 
         if (op_ret != 0) {
                 err = op_errno;
@@ -354,8 +360,8 @@ dht_layout_merge (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
 
         if (xattr) {
                 /* during lookup and not mkdir */
-                ret = dict_get_ptr (xattr, "trusted.glusterfs.dht",
-                                    &disk_layout_raw);
+                ret = dict_get_ptr_and_len (xattr, "trusted.glusterfs.dht",
+					    &disk_layout_raw, &disk_layout_len);
         }
 
         if (ret != 0) {
@@ -367,9 +373,10 @@ dht_layout_merge (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
                 goto out;
         }
 
-        ret = dht_disk_layout_merge (this, layout, i, disk_layout_raw);
+        ret = dht_disk_layout_merge (this, layout, i, disk_layout_raw,
+				     disk_layout_len);
         if (ret != 0) {
-                gf_log (this->name, GF_LOG_DEBUG,
+                gf_log (this->name, GF_LOG_WARNING,
                         "layout merge from subvolume %s failed",
                         subvol->name);
                 goto out;
@@ -555,7 +562,6 @@ dht_layout_normalize (xlator_t *this, loc_t *loc, dht_layout_t *layout)
         uint32_t     down = 0;
         uint32_t     misc = 0;
 
-
         ret = dht_layout_sort (layout);
         if (ret == -1) {
                 gf_log (this->name, GF_LOG_WARNING,
@@ -583,23 +589,27 @@ dht_layout_normalize (xlator_t *this, loc_t *loc, dht_layout_t *layout)
                                 "found anomalies in %s. holes=%d overlaps=%d",
                                 loc->path, holes, overlaps);
                 }
-                ret = 1;
+                ret = -1;
         }
 
         for (i = 0; i < layout->cnt; i++) {
-                /* TODO During DHT selfheal rewrite (almost) find a better place to
-                 * detect this - probably in dht_layout_anomalies()
+                /* TODO During DHT selfheal rewrite (almost) find a better place
+                 * to detect this - probably in dht_layout_anomalies()
                  */
                 if (layout->list[i].err > 0) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "path=%s err=%s on subvol=%s",
-                                loc->path, strerror (layout->list[i].err),
-                                (layout->list[i].xlator ?
-                                 layout->list[i].xlator->name : "<>"));
-                        if (layout->list[i].err == ENOENT)
-                                ret = 1;
+                        gf_log_callingfn (this->name, GF_LOG_DEBUG,
+                                          "path=%s err=%s on subvol=%s",
+                                          loc->path,
+                                          strerror (layout->list[i].err),
+                                          (layout->list[i].xlator ?
+                                           layout->list[i].xlator->name
+                                           : "<>"));
+                        if ((layout->list[i].err == ENOENT) && (ret >= 0)) {
+                                ret++;
+                        }
                 }
         }
+
 
 out:
         return ret;
@@ -665,7 +675,7 @@ dht_layout_dir_mismatch (xlator_t *this, dht_layout_t *layout, xlator_t *subvol,
 
         count  = ntoh32 (disk_layout[0]);
         if (count != 1) {
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_ERROR,
                         "%s - disk layout has invalid count %d",
                         loc->path, count);
                 ret = -1;
@@ -714,7 +724,7 @@ dht_layout_preset (xlator_t *this, xlator_t *subvol, inode_t *inode)
 
         LOCK (&conf->layout_lock);
         {
-                inode_ctx_put (inode, this, (uint64_t)(long)layout);
+                dht_inode_ctx_layout_set (inode, this, layout);
         }
         UNLOCK (&conf->layout_lock);
 

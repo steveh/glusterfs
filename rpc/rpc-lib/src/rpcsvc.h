@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _RPCSVC_H
@@ -43,10 +34,6 @@
 #include <rpc/rpc_msg.h>
 #include "compat.h"
 
-#ifndef NGRPS
-#define NGRPS 16
-#endif /* !NGRPS */
-
 #ifndef MAX_IOVEC
 #define MAX_IOVEC 16
 #endif
@@ -56,9 +43,9 @@
 
 #define RPCSVC_FRAGHDR_SIZE  4       /* 4-byte RPC fragment header size */
 #define RPCSVC_DEFAULT_LISTEN_PORT      GF_DEFAULT_BASE_PORT
-#define RPCSVC_DEFAULT_MEMFACTOR        15
+#define RPCSVC_DEFAULT_MEMFACTOR        8
 #define RPCSVC_EVENTPOOL_SIZE_MULT      1024
-#define RPCSVC_POOLCOUNT_MULT           35
+#define RPCSVC_POOLCOUNT_MULT           64
 #define RPCSVC_CONN_READ        (128 * GF_UNIT_KB)
 #define RPCSVC_PAGE_SIZE        (128 * GF_UNIT_KB)
 
@@ -115,8 +102,6 @@
 #define AUTH_KERB       4               /* kerberos style */
 #endif /* */
 
-#define AUTH_GLUSTERFS  5
-
 typedef struct rpcsvc_program rpcsvc_program_t;
 
 struct rpcsvc_notify_wrapper {
@@ -143,11 +128,10 @@ struct rpcsvc_config {
         int    max_block_size;
 };
 
-#define RPCSVC_MAX_AUTH_BYTES   400
 typedef struct rpcsvc_auth_data {
         int             flavour;
         int             datalen;
-        char            authdata[RPCSVC_MAX_AUTH_BYTES];
+        char            authdata[GF_MAX_AUTH_BYTES];
 } rpcsvc_auth_data_t;
 
 #define rpcsvc_auth_flavour(au)    ((au).flavour)
@@ -184,13 +168,13 @@ struct rpcsvc_request {
         gid_t                   gid;
         pid_t                   pid;
 
-        uint64_t                lk_owner;
+        gf_lkowner_t            lk_owner;
         uint64_t                gfs_id;
 
         /* Might want to move this to AUTH_UNIX specific state since this array
          * is not available for every authentication scheme.
          */
-        gid_t                   auxgids[NGRPS];
+        gid_t                   auxgids[GF_MAX_AUX_GROUPS];
         int                     auxgidcount;
 
 
@@ -240,6 +224,9 @@ struct rpcsvc_request {
          */
         rpcsvc_auth_data_t      verf;
 
+	/* Execute this request's actor function as a synctask? */
+	gf_boolean_t            synctask;
+
         /* Container for a RPC program wanting to store a temp
          * request-specific item.
          */
@@ -272,6 +259,7 @@ struct rpcsvc_request {
 #define rpcsvc_request_set_vecstate(req, state)  ((req)->vecstate = state)
 #define rpcsvc_request_vecstate(req) ((req)->vecstate)
 #define rpcsvc_request_transport(req) ((req)->trans)
+#define rpcsvc_request_transport_ref(req) (rpc_transport_ref((req)->trans))
 
 
 #define RPCSVC_ACTOR_SUCCESS    0
@@ -291,9 +279,8 @@ struct rpcsvc_request {
  *
  */
 typedef int (*rpcsvc_actor) (rpcsvc_request_t *req);
-typedef int (*rpcsvc_vector_actor) (rpcsvc_request_t *req, struct iovec *vec,
-                                    int count, struct iobref *iobref);
-typedef int (*rpcsvc_vector_sizer) (int state, ssize_t *readsize, char *addr);
+typedef int (*rpcsvc_vector_sizer) (int state, ssize_t *readsize,
+                                    char *base_addr, char *curr_addr);
 
 /* Every protocol actor will also need to specify the function the RPC layer
  * will use to serialize or encode the message into XDR format just before
@@ -325,9 +312,10 @@ typedef struct rpcsvc_actor_desc {
          * handler for letting the RPC program read the data from the network
          * directly into its aligned buffers.
          */
-        rpcsvc_vector_actor     vector_actor;
         rpcsvc_vector_sizer     vector_sizer;
 
+        /* Can actor be ran on behalf an unprivileged requestor? */
+        gf_boolean_t            unprivileged;
 } rpcsvc_actor_t;
 
 /* Describes a program and its version along with the function pointers
@@ -382,6 +370,9 @@ struct rpcsvc_program {
          */
         int                     min_auth;
 
+	/* Execute actor function as a synctask? */
+	gf_boolean_t            synctask;
+
         /* list member to link to list of registered services with rpcsvc */
         struct list_head        program;
 };
@@ -424,7 +415,8 @@ rpcsvc_register_portmap_enabled (rpcsvc_t *svc);
  * Called in main.
  */
 extern rpcsvc_t *
-rpcsvc_init (xlator_t *xl, glusterfs_ctx_t *ctx, dict_t *options);
+rpcsvc_init (xlator_t *xl, glusterfs_ctx_t *ctx, dict_t *options,
+             uint32_t poolcount);
 
 int
 rpcsvc_register_notify (rpcsvc_t *svc, rpcsvc_notify_t notify, void *mydata);

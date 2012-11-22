@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _OPTIONS_H
@@ -44,25 +35,38 @@ typedef enum {
         GF_OPTION_TYPE_TIME,
         GF_OPTION_TYPE_DOUBLE,
         GF_OPTION_TYPE_INTERNET_ADDRESS,
+        GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
+        GF_OPTION_TYPE_PRIORITY_LIST,
+        GF_OPTION_TYPE_SIZE_LIST,
         GF_OPTION_TYPE_MAX,
 } volume_option_type_t;
 
+typedef enum {
+        GF_OPT_VALIDATE_BOTH = 0,
+        GF_OPT_VALIDATE_MIN,
+        GF_OPT_VALIDATE_MAX,
+} opt_validate_type_t;
 
 #define ZR_VOLUME_MAX_NUM_KEY    4
 #define ZR_OPTION_MAX_ARRAY_SIZE 64
 
 /* Each translator should define this structure */
 typedef struct volume_options {
-        char                *key[ZR_VOLUME_MAX_NUM_KEY];
+        char                    *key[ZR_VOLUME_MAX_NUM_KEY];
         /* different key, same meaning */
-        volume_option_type_t type;
-        int64_t              min;  /* 0 means no range */
-        int64_t              max;  /* 0 means no range */
-        char                *value[ZR_OPTION_MAX_ARRAY_SIZE];
+        volume_option_type_t    type;
+        double                  min;  /* 0 means no range */
+        double                  max;  /* 0 means no range */
+        char                    *value[ZR_OPTION_MAX_ARRAY_SIZE];
         /* If specified, will check for one of
            the value from this array */
-        char                *default_value;
-        char                *description; /* about the key */
+        char                    *default_value;
+        char                    *description; /* about the key */
+        /* Required for int options where only the min value
+         * is given and is 0. This will cause validation not to
+         * happen
+         */
+        opt_validate_type_t     validate;
 } volume_option_t;
 
 
@@ -106,6 +110,7 @@ DECLARE_INIT_OPT(uint64_t, percent_or_size);
 DECLARE_INIT_OPT(gf_boolean_t, bool);
 DECLARE_INIT_OPT(xlator_t *, xlator);
 DECLARE_INIT_OPT(char *, path);
+DECLARE_INIT_OPT(double, double);
 
 
 #define DEFINE_INIT_OPT(type_t, type, conv)                             \
@@ -137,6 +142,7 @@ xlator_option_init_##type (xlator_t *this, dict_t *options, char *key,  \
         if (!value) {                                                   \
                 gf_log (this->name, GF_LOG_TRACE, "option %s not set",  \
                         key);                                           \
+                *val_p = (type_t)0;                                     \
                 return 0;                                               \
         }                                                               \
         if (value == def_value) {                                       \
@@ -184,6 +190,7 @@ DECLARE_RECONF_OPT(uint64_t, percent_or_size);
 DECLARE_RECONF_OPT(gf_boolean_t, bool);
 DECLARE_RECONF_OPT(xlator_t *, xlator);
 DECLARE_RECONF_OPT(char *, path);
+DECLARE_RECONF_OPT(double, double);
 
 
 #define DEFINE_RECONF_OPT(type_t, type, conv)                            \
@@ -215,6 +222,7 @@ xlator_option_reconf_##type (xlator_t *this, dict_t *options, char *key, \
         if (!value) {                                                   \
                 gf_log (this->name, GF_LOG_TRACE, "option %s not set",  \
                         key);                                           \
+                *val_p = (type_t)0;                                     \
                 return 0;                                               \
         }                                                               \
         if (value == def_value) {                                       \

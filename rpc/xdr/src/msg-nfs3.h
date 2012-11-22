@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _MSG_NFS3_H_
@@ -26,7 +17,8 @@
 #endif
 
 #include "xdr-nfs3.h"
-
+#include "nlm4-xdr.h"
+#include "acl3-xdr.h"
 #include <sys/types.h>
 #include <sys/uio.h>
 
@@ -183,4 +175,50 @@ xdr_serialize_mountstat3 (struct iovec outmsg, mountstat3 *m);
 
 extern ssize_t
 xdr_serialize_nfsstat3 (struct iovec outmsg, nfsstat3 *s);
+
+extern ssize_t
+xdr_to_nlm4_testargs (struct iovec inmsg, nlm4_testargs *args);
+
+extern ssize_t
+xdr_serialize_nlm4_testres (struct iovec outmsg, nlm4_testres *res);
+
+extern ssize_t
+xdr_to_nlm4_lockargs (struct iovec inmsg, nlm4_lockargs *args);
+
+extern ssize_t
+xdr_serialize_nlm4_res (struct iovec outmsg, nlm4_res *res);
+
+extern ssize_t
+xdr_to_nlm4_cancelargs (struct iovec inmsg, nlm4_cancargs *args);
+
+extern ssize_t
+xdr_to_nlm4_unlockargs (struct iovec inmsg, nlm4_unlockargs *args);
+
+extern ssize_t
+xdr_to_nlm4_shareargs (struct iovec inmsg, nlm4_shareargs *args);
+
+extern ssize_t
+xdr_serialize_nlm4_shareres (struct iovec outmsg, nlm4_shareres *res);
+
+extern ssize_t
+xdr_serialize_nlm4_testargs (struct iovec outmsg, nlm4_testargs *args);
+
+extern ssize_t
+xdr_to_nlm4_res (struct iovec inmsg, nlm4_res *args);
+
+extern ssize_t
+xdr_to_nlm4_freeallargs (struct iovec inmsg, nlm4_freeallargs *args);
+
+extern ssize_t
+xdr_to_getaclargs (struct iovec inmsg, getaclargs *args);
+
+extern ssize_t
+xdr_to_setaclargs (struct iovec inmsg, setaclargs *args);
+
+extern ssize_t
+xdr_serialize_getaclreply (struct iovec inmsg, getaclreply *res);
+
+extern ssize_t
+xdr_serialize_setaclreply (struct iovec inmsg, setaclreply *res);
+
 #endif

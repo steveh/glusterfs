@@ -1,25 +1,17 @@
 /*
-   Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include <unistd.h>
 #include <sys/time.h>
 #include <stdlib.h>
+#include <fnmatch.h>
 
 #ifndef _CONFIG_H
 #define _CONFIG_H
@@ -28,8 +20,16 @@
 
 #include "afr-common.c"
 #include "defaults.c"
+#include "glusterfs.h"
 
 static uint64_t pump_pid = 0;
+static inline void
+pump_fill_loc_info (loc_t *loc, struct iatt *iatt, struct iatt *parent)
+{
+        afr_update_loc_gfids (loc, iatt, parent);
+        uuid_copy (loc->inode->gfid, iatt->ia_gfid);
+}
+
 static int
 pump_mark_start_pending (xlator_t *this)
 {
@@ -140,9 +140,7 @@ pump_set_resume_path (xlator_t *this, const char *path)
 
         LOCK (&pump_priv->resume_path_lock);
         {
-                pump_priv->resume_path = strdup (path);
-                if (!pump_priv->resume_path)
-                        ret = -1;
+                strncpy (pump_priv->resume_path, path, strlen (path) + 1);
         }
         UNLOCK (&pump_priv->resume_path_lock);
 
@@ -167,7 +165,7 @@ pump_save_path (xlator_t *this, const char *path)
 
         GF_ASSERT (priv->root_inode);
 
-        afr_build_root_loc (priv->root_inode, &loc);
+        afr_build_root_loc (this, &loc);
 
         dict = dict_new ();
         dict_ret = dict_set_str (dict, PUMP_PATH, (char *)path);
@@ -187,6 +185,7 @@ pump_save_path (xlator_t *this, const char *path)
 
         dict_unref (dict);
 
+        loc_wipe (&loc);
         return 0;
 }
 
@@ -362,7 +361,7 @@ gf_pump_traverse_directory (loc_t *loc)
                 "pump opendir on %s returned=%d",
                 loc->path, ret);
 
-        while (syncop_readdirp (this, fd, 131072, offset, &entries)) {
+        while (syncop_readdirp (this, fd, 131072, offset, NULL, &entries)) {
                 free_entries = _gf_true;
 
                 if (list_empty (&entries.list)) {
@@ -384,8 +383,7 @@ gf_pump_traverse_directory (loc_t *loc)
                         }
                         loc_wipe (&entry_loc);
                         ret = afr_build_child_loc (this, &entry_loc, loc,
-                                                   entry->d_name,
-                                                   entry->d_stat.ia_gfid);
+                                                   entry->d_name);
                         if (ret)
                                 goto out;
 
@@ -407,7 +405,7 @@ gf_pump_traverse_directory (loc_t *loc)
                                                     entry_loc.path);
                                             continue;
                                     }
-                                    afr_fill_loc_info (&entry_loc, &iatt,
+                                    pump_fill_loc_info (&entry_loc, &iatt,
                                                        &parent);
 
                                     pump_update_resume_state (this, entry_loc.path);
@@ -430,7 +428,7 @@ gf_pump_traverse_directory (loc_t *loc)
                                                     gf_pump_traverse_directory (&entry_loc);
                                             }
                                     }
-                            }
+                        }
                 }
 
                 gf_dirent_free (&entries);
@@ -440,6 +438,10 @@ gf_pump_traverse_directory (loc_t *loc)
                         (int32_t ) offset);
 
         }
+
+        ret = syncop_close (fd);
+        if (ret < 0)
+                gf_log (this->name, GF_LOG_DEBUG, "closing the fd failed");
 
         if (is_directory_empty && IS_ROOT_PATH (loc->path)) {
                pump_change_state (this, PUMP_STATE_RUNNING);
@@ -453,7 +455,6 @@ out:
         if (free_entries)
                 gf_dirent_free (&entries);
         return 0;
-
 }
 
 static int
@@ -481,7 +482,7 @@ pump_update_resume_path (xlator_t *this)
 
 static int32_t
 pump_xattr_cleaner (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         afr_private_t  *priv      = NULL;
         loc_t           loc       = {0};
@@ -492,7 +493,7 @@ pump_xattr_cleaner (call_frame_t *frame, void *cookie, xlator_t *this,
 
         priv      = this->private;
 
-        afr_build_root_loc (priv->root_inode, &loc);
+        afr_build_root_loc (this, &loc);
 
         ret = syncop_removexattr (priv->children[source], &loc,
                                           PUMP_PATH);
@@ -508,6 +509,7 @@ pump_xattr_cleaner (call_frame_t *frame, void *cookie, xlator_t *this,
                                 "failed with %s", strerror (errno));
         }
 
+        loc_wipe (&loc);
         return pump_command_reply (frame, this);
 }
 
@@ -527,7 +529,7 @@ pump_complete_migration (xlator_t *this)
 
         GF_ASSERT (priv->root_inode);
 
-        afr_build_root_loc (priv->root_inode, &loc);
+        afr_build_root_loc (this, &loc);
 
         dict = dict_new ();
 
@@ -569,6 +571,7 @@ pump_complete_migration (xlator_t *this)
                 call_resume (pump_priv->cleaner);
         }
 
+        loc_wipe (&loc);
         return 0;
 }
 
@@ -624,7 +627,7 @@ pump_task (void *data)
 
         GF_ASSERT (priv->root_inode);
 
-        afr_build_root_loc (priv->root_inode, &loc);
+        afr_build_root_loc (this, &loc);
         xattr_req = dict_new ();
         if (!xattr_req) {
                 gf_log (this->name, GF_LOG_DEBUG,
@@ -662,6 +665,7 @@ out:
         if (xattr_req)
                 dict_unref (xattr_req);
 
+        loc_wipe (&loc);
 	return 0;
 }
 
@@ -695,7 +699,7 @@ pump_start (call_frame_t *pump_frame, xlator_t *this)
 	priv = this->private;
         pump_priv = priv->pump_private;
 
-	pump_frame->root->lk_owner = (uint64_t) (unsigned long)pump_frame->root;
+        afr_set_lk_owner (pump_frame, this, pump_frame->root);
 	pump_pid = (uint64_t) (unsigned long)pump_frame->root;
 
 	ret = synctask_new (pump_priv->env, pump_task,
@@ -709,8 +713,8 @@ pump_start (call_frame_t *pump_frame, xlator_t *this)
         }
 
         gf_log (this->name, GF_LOG_DEBUG,
-                "setting pump as started lk_owner: %"PRIu64" %"PRIu64,
-                pump_frame->root->lk_owner, pump_pid);
+                "setting pump as started lk_owner: %s %"PRIu64,
+                lkowner_utoa (&pump_frame->root->lk_owner), pump_pid);
 
         priv->use_afr_in_pump = 1;
 out:
@@ -744,7 +748,7 @@ pump_cmd_start_setxattr_cbk (call_frame_t *frame,
                              void *cookie,
                              xlator_t *this,
                              int32_t op_ret,
-                             int32_t op_errno)
+                             int32_t op_errno, dict_t *xdata)
 
 {
         call_frame_t *prev = NULL;
@@ -796,9 +800,9 @@ pump_initiate_sink_connect (call_frame_t *frame, xlator_t *this)
 
         GF_ASSERT (priv->root_inode);
 
-        afr_build_root_loc (priv->root_inode, &loc);
+        afr_build_root_loc (this, &loc);
 
-        data = data_ref (dict_get (local->dict, PUMP_CMD_START));
+        data = data_ref (dict_get (local->dict, RB_PUMP_CMD_START));
         if (!data) {
                 ret = -1;
                 gf_log (this->name, GF_LOG_ERROR,
@@ -837,7 +841,7 @@ pump_initiate_sink_connect (call_frame_t *frame, xlator_t *this)
 		    PUMP_SINK_CHILD(this)->fops->setxattr,
 		    &loc,
 		    dict,
-		    0);
+		    0, NULL);
 
         ret = 0;
 
@@ -851,6 +855,7 @@ out:
         if (ret && clnt_cmd)
                 GF_FREE (clnt_cmd);
 
+        loc_wipe (&loc);
         return ret;
 }
 
@@ -870,7 +875,7 @@ pump_cmd_start_getxattr_cbk (call_frame_t *frame,
                              xlator_t *this,
                              int32_t op_ret,
                              int32_t op_errno,
-                             dict_t *dict)
+                             dict_t *dict, dict_t *xdata)
 {
         afr_local_t *local = NULL;
         char *path = NULL;
@@ -937,6 +942,7 @@ pump_execute_status (call_frame_t *frame, xlator_t *this)
         uint64_t number_files = 0;
 
         char filename[PATH_MAX];
+        char summary[PATH_MAX+256];
         char *dict_str = NULL;
 
         int32_t op_ret = 0;
@@ -965,16 +971,19 @@ pump_execute_status (call_frame_t *frame, xlator_t *this)
         }
 
         if (pump_priv->pump_finished) {
-        snprintf (dict_str, PATH_MAX + 256, "Number of files migrated = %"PRIu64"        Migration complete ",
-                  number_files);
+                snprintf (summary, PATH_MAX+256,
+                          "no_of_files=%"PRIu64, number_files);
         } else {
-        snprintf (dict_str, PATH_MAX + 256, "Number of files migrated = %"PRIu64"       Current file= %s ",
-                  number_files, filename);
+                snprintf (summary, PATH_MAX+256,
+                          "no_of_files=%"PRIu64":current_file=%s",
+                          number_files, filename);
         }
+        snprintf (dict_str, PATH_MAX+256, "status=%d:%s",
+                  (pump_priv->pump_finished)?1:0, summary);
 
         dict = dict_new ();
 
-        ret = dict_set_dynstr (dict, PUMP_CMD_STATUS, dict_str);
+        ret = dict_set_dynstr (dict, RB_PUMP_CMD_STATUS, dict_str);
         if (ret < 0) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "dict_set_dynstr returned negative value");
@@ -986,13 +995,12 @@ pump_execute_status (call_frame_t *frame, xlator_t *this)
 
 out:
 
-        AFR_STACK_UNWIND (getxattr, frame, op_ret, op_errno, dict);
+        AFR_STACK_UNWIND (getxattr, frame, op_ret, op_errno, dict, NULL);
 
         if (dict)
                 dict_unref (dict);
 
-        if (dict_str)
-                GF_FREE (dict_str);
+        GF_FREE (dict_str);
 
         return 0;
 }
@@ -1034,14 +1042,14 @@ pump_execute_start (call_frame_t *frame, xlator_t *this)
 
         GF_ASSERT (priv->root_inode);
 
-        afr_build_root_loc (priv->root_inode, &loc);
+        afr_build_root_loc (this, &loc);
 
 	STACK_WIND (frame,
 		    pump_cmd_start_getxattr_cbk,
 		    PUMP_SOURCE_CHILD(this),
 		    PUMP_SOURCE_CHILD(this)->fops->getxattr,
 		    &loc,
-		    PUMP_PATH);
+		    PUMP_PATH, NULL);
 
         ret = 0;
 
@@ -1051,6 +1059,7 @@ out:
                 pump_command_reply (frame, this);
         }
 
+        loc_wipe (&loc);
 	return 0;
 }
 
@@ -1058,7 +1067,7 @@ static int
 pump_cleanup_helper (void *data) {
         call_frame_t *frame = data;
 
-        pump_xattr_cleaner (frame, 0, frame->this, 0, 0);
+        pump_xattr_cleaner (frame, 0, frame->this, 0, 0, NULL);
 
         return 0;
 }
@@ -1140,7 +1149,7 @@ pump_execute_abort (call_frame_t *frame, xlator_t *this)
         } else {
                 pump_priv->cleaner = fop_setxattr_cbk_stub (frame,
                                                             pump_xattr_cleaner,
-                                                            0, 0);
+                                                            0, 0, NULL);
         }
 
         return 0;
@@ -1153,7 +1162,7 @@ pump_command_status (xlator_t *this, dict_t *dict)
         int dict_ret = -1;
         int ret = _gf_true;
 
-        dict_ret = dict_get_str (dict, PUMP_CMD_STATUS, &cmd);
+        dict_ret = dict_get_str (dict, RB_PUMP_CMD_STATUS, &cmd);
         if (dict_ret < 0) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "Not a pump status command");
@@ -1177,7 +1186,7 @@ pump_command_pause (xlator_t *this, dict_t *dict)
         int dict_ret = -1;
         int ret = _gf_true;
 
-        dict_ret = dict_get_str (dict, PUMP_CMD_PAUSE, &cmd);
+        dict_ret = dict_get_str (dict, RB_PUMP_CMD_PAUSE, &cmd);
         if (dict_ret < 0) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "Not a pump pause command");
@@ -1201,7 +1210,7 @@ pump_command_commit (xlator_t *this, dict_t *dict)
         int dict_ret = -1;
         int ret = _gf_true;
 
-        dict_ret = dict_get_str (dict, PUMP_CMD_COMMIT, &cmd);
+        dict_ret = dict_get_str (dict, RB_PUMP_CMD_COMMIT, &cmd);
         if (dict_ret < 0) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "Not a pump commit command");
@@ -1225,7 +1234,7 @@ pump_command_abort (xlator_t *this, dict_t *dict)
         int dict_ret = -1;
         int ret = _gf_true;
 
-        dict_ret = dict_get_str (dict, PUMP_CMD_ABORT, &cmd);
+        dict_ret = dict_get_str (dict, RB_PUMP_CMD_ABORT, &cmd);
         if (dict_ret < 0) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "Not a pump abort command");
@@ -1249,7 +1258,7 @@ pump_command_start (xlator_t *this, dict_t *dict)
         int dict_ret = -1;
         int ret = _gf_true;
 
-        dict_ret = dict_get_str (dict, PUMP_CMD_START, &cmd);
+        dict_ret = dict_get_str (dict, RB_PUMP_CMD_START, &cmd);
         if (dict_ret < 0) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "Not a pump start command");
@@ -1271,7 +1280,7 @@ struct _xattr_key {
         struct list_head list;
 };
 
-static void
+static int
 __gather_xattr_keys (dict_t *dict, char *key, data_t *value,
                      void *data)
 {
@@ -1283,13 +1292,14 @@ __gather_xattr_keys (dict_t *dict, char *key, data_t *value,
 
                 xkey = GF_CALLOC (1, sizeof (*xkey), gf_afr_mt_xattr_key);
                 if (!xkey)
-                        return;
+                        return -1;
 
                 xkey->key = key;
                 INIT_LIST_HEAD (&xkey->list);
 
                 list_add_tail (&xkey->list, list);
         }
+        return 0;
 }
 
 static void
@@ -1317,7 +1327,7 @@ __filter_xattrs (dict_t *dict)
 int32_t
 pump_getxattr_cbk (call_frame_t *frame, void *cookie,
 		  xlator_t *this, int32_t op_ret, int32_t op_errno,
-		  dict_t *dict)
+		  dict_t *dict, dict_t *xdata)
 {
 	afr_private_t   *priv           = NULL;
 	afr_local_t     *local          = NULL;
@@ -1352,7 +1362,7 @@ pump_getxattr_cbk (call_frame_t *frame, void *cookie,
 				   children[next_call_child],
 				   children[next_call_child]->fops->getxattr,
 				   &local->loc,
-				   local->cont.getxattr.name);
+				   local->cont.getxattr.name, NULL);
 	}
 
 out:
@@ -1360,7 +1370,7 @@ out:
                 if (op_ret >= 0 && dict)
                         __filter_xattrs (dict);
 
-		AFR_STACK_UNWIND (getxattr, frame, op_ret, op_errno, dict);
+		AFR_STACK_UNWIND (getxattr, frame, op_ret, op_errno, dict, NULL);
 	}
 
 	return 0;
@@ -1368,13 +1378,13 @@ out:
 
 int32_t
 pump_getxattr (call_frame_t *frame, xlator_t *this,
-	      loc_t *loc, const char *name)
+	      loc_t *loc, const char *name, dict_t *xdata)
 {
 	afr_private_t *   priv       = NULL;
 	xlator_t **       children   = NULL;
 	int               call_child = 0;
 	afr_local_t       *local     = NULL;
-	int32_t           op_ret     = -1;
+	int32_t           ret     = -1;
 	int32_t           op_errno   = 0;
         uint64_t          read_child = 0;
 
@@ -1387,15 +1397,21 @@ pump_getxattr (call_frame_t *frame, xlator_t *this,
 	VALIDATE_OR_GOTO (priv->children, out);
 
 	children = priv->children;
-
-	ALLOC_OR_GOTO (local, afr_local_t, out);
-	frame->local = local;
-
-        op_ret = AFR_LOCAL_INIT (local, priv);
-        if (op_ret < 0) {
-                op_errno = -op_ret;
-                goto out;
+        if (!priv->use_afr_in_pump) {
+                STACK_WIND (frame, default_getxattr_cbk,
+                            FIRST_CHILD (this),
+                            (FIRST_CHILD (this))->fops->getxattr,
+                            loc, name, xdata);
+                return 0;
         }
+
+
+	AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+	local = frame->local;
+
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
+                goto out;
 
         if (name) {
                 if (!strncmp (name, AFR_XATTR_PREFIX,
@@ -1405,39 +1421,31 @@ pump_getxattr (call_frame_t *frame, xlator_t *this,
                         goto out;
                 }
 
-                if (!strcmp (name, PUMP_CMD_STATUS)) {
+                if (!strcmp (name, RB_PUMP_CMD_STATUS)) {
                         gf_log (this->name, GF_LOG_DEBUG,
                                 "Hit pump command - status");
                         pump_execute_status (frame, this);
-                        op_ret = 0;
+                        ret = 0;
                         goto out;
                 }
-        }
-
-        if (!priv->use_afr_in_pump) {
-                STACK_WIND (frame, default_getxattr_cbk,
-                            FIRST_CHILD (this),
-                            (FIRST_CHILD (this))->fops->getxattr,
-                            loc, name);
-                return 0;
         }
 
         local->fresh_children = GF_CALLOC (priv->child_count,
                                           sizeof (*local->fresh_children),
                                           gf_afr_mt_int32_t);
-        if (local->fresh_children) {
+        if (!local->fresh_children) {
+                ret = -1;
                 op_errno = ENOMEM;
                 goto out;
         }
 
         read_child = afr_inode_get_read_ctx (this, loc->inode, local->fresh_children);
-        op_ret = afr_get_call_child (this, local->child_up, read_child,
+        ret = afr_get_call_child (this, local->child_up, read_child,
                                      local->fresh_children,
                                      &call_child,
                                      &local->cont.getxattr.last_index);
-        if (op_ret < 0) {
-                op_errno = -op_ret;
-                op_ret = -1;
+        if (ret < 0) {
+                op_errno = -ret;
                 goto out;
         }
 	loc_copy (&local->loc, loc);
@@ -1447,13 +1455,12 @@ pump_getxattr (call_frame_t *frame, xlator_t *this,
 	STACK_WIND_COOKIE (frame, pump_getxattr_cbk,
 			   (void *) (long) call_child,
 			   children[call_child], children[call_child]->fops->getxattr,
-			   loc, name);
+			   loc, name, xdata);
 
-	op_ret = 0;
+	ret = 0;
 out:
-	if (op_ret == -1) {
-		AFR_STACK_UNWIND (getxattr, frame, op_ret, op_errno, NULL);
-	}
+	if (ret < 0)
+		AFR_STACK_UNWIND (getxattr, frame, -1, op_errno, NULL, NULL);
 	return 0;
 }
 
@@ -1475,14 +1482,14 @@ afr_setxattr_unwind (call_frame_t *frame, xlator_t *this)
 
 	if (main_frame) {
 		AFR_STACK_UNWIND (setxattr, main_frame,
-                                  local->op_ret, local->op_errno)
+                                  local->op_ret, local->op_errno, NULL);
 	}
 	return 0;
 }
 
 static int
 afr_setxattr_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-		       int32_t op_ret, int32_t op_errno)
+		       int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
 	afr_local_t *   local = NULL;
 	afr_private_t * priv  = NULL;
@@ -1551,7 +1558,7 @@ afr_setxattr_wind (call_frame_t *frame, xlator_t *this)
 					   priv->children[i]->fops->setxattr,
 					   &local->loc,
 					   local->cont.setxattr.dict,
-					   local->cont.setxattr.flags);
+					   local->cont.setxattr.flags, NULL);
 
 			if (!--call_count)
 				break;
@@ -1579,11 +1586,9 @@ pump_setxattr_cbk (call_frame_t *frame,
 		      void *cookie,
 		      xlator_t *this,
 		      int32_t op_ret,
-		      int32_t op_errno)
+		      int32_t op_errno, dict_t *xdata)
 {
-	STACK_UNWIND (frame,
-		      op_ret,
-		      op_errno);
+	AFR_STACK_UNWIND (setxattr, frame, op_ret, op_errno, xdata);
 	return 0;
 }
 
@@ -1601,12 +1606,10 @@ pump_command_reply (call_frame_t *frame, xlator_t *this)
                 gf_log (this->name, GF_LOG_INFO,
                         "Command succeeded");
 
-        dict_unref (local->dict);
-
         AFR_STACK_UNWIND (setxattr,
                           frame,
                           local->op_ret,
-                          local->op_errno);
+                          local->op_errno, NULL);
 
         return 0;
 }
@@ -1643,50 +1646,53 @@ pump_parse_command (call_frame_t *frame, xlator_t *this,
 
 int
 pump_setxattr (call_frame_t *frame, xlator_t *this,
-               loc_t *loc, dict_t *dict, int32_t flags)
+               loc_t *loc, dict_t *dict, int32_t flags, dict_t *xdata)
 {
 	afr_private_t * priv  = NULL;
 	afr_local_t   * local = NULL;
 	call_frame_t   *transaction_frame = NULL;
-
 	int ret = -1;
-
-	int op_ret   = -1;
 	int op_errno = 0;
 
 	VALIDATE_OR_GOTO (frame, out);
 	VALIDATE_OR_GOTO (this, out);
 	VALIDATE_OR_GOTO (this->private, out);
 
+        GF_IF_INTERNAL_XATTR_GOTO ("trusted.glusterfs.pump*", dict,
+                                   op_errno, out);
+
 	priv = this->private;
-
-	ALLOC_OR_GOTO (local, afr_local_t, out);
-
-	ret = AFR_LOCAL_INIT (local, priv);
-	if (ret < 0) {
-		op_errno = -ret;
-		goto out;
-	}
-
-        ret = pump_parse_command (frame, this,
-                                  local, dict);
-        if (ret >= 0) {
-                op_ret = 0;
-                goto out;
-        }
-
         if (!priv->use_afr_in_pump) {
                 STACK_WIND (frame, default_setxattr_cbk,
                             FIRST_CHILD (this),
                             (FIRST_CHILD (this))->fops->setxattr,
-                            loc, dict, flags);
+                            loc, dict, flags, xdata);
                 return 0;
+        }
+
+
+	AFR_LOCAL_ALLOC_OR_GOTO (local, out);
+
+	ret = afr_local_init (local, priv, &op_errno);
+	if (ret < 0) {
+                afr_local_cleanup (local, this);
+		goto out;
+        }
+
+        ret = pump_parse_command (frame, this,
+                                  local, dict);
+        if (ret >= 0) {
+                ret = 0;
+                goto out;
         }
 
 	transaction_frame = copy_frame (frame);
 	if (!transaction_frame) {
 		gf_log (this->name, GF_LOG_ERROR,
 			"Out of memory.");
+                op_errno = ENOMEM;
+                ret = -1;
+                afr_local_cleanup (local, this);
 		goto out;
 	}
 
@@ -1709,12 +1715,12 @@ pump_setxattr (call_frame_t *frame, xlator_t *this,
 
 	afr_transaction (transaction_frame, this, AFR_METADATA_TRANSACTION);
 
-	op_ret = 0;
+	ret = 0;
 out:
-	if (op_ret == -1) {
+	if (ret < 0) {
 		if (transaction_frame)
 			AFR_STACK_DESTROY (transaction_frame);
-		AFR_STACK_UNWIND (setxattr, frame, op_ret, op_errno);
+		AFR_STACK_UNWIND (setxattr, frame, -1, op_errno, NULL);
 	}
 
 	return 0;
@@ -1748,7 +1754,7 @@ static int32_t
 pump_truncate (call_frame_t *frame,
                xlator_t *this,
                loc_t *loc,
-               off_t offset)
+               off_t offset, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1758,11 +1764,11 @@ pump_truncate (call_frame_t *frame,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->truncate,
                             loc,
-                            offset);
+                            offset, xdata);
                 return 0;
         }
 
-        afr_truncate (frame, this, loc, offset);
+        afr_truncate (frame, this, loc, offset, xdata);
         return 0;
 }
 
@@ -1771,7 +1777,7 @@ static int32_t
 pump_ftruncate (call_frame_t *frame,
                 xlator_t *this,
                 fd_t *fd,
-                off_t offset)
+                off_t offset, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1781,11 +1787,11 @@ pump_ftruncate (call_frame_t *frame,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->ftruncate,
                             fd,
-                            offset);
+                            offset, xdata);
                 return 0;
         }
 
-        afr_ftruncate (frame, this, fd, offset);
+        afr_ftruncate (frame, this, fd, offset, xdata);
         return 0;
 }
 
@@ -1794,7 +1800,7 @@ pump_ftruncate (call_frame_t *frame,
 
 int
 pump_mknod (call_frame_t *frame, xlator_t *this,
-            loc_t *loc, mode_t mode, dev_t rdev, dict_t *parms)
+            loc_t *loc, mode_t mode, dev_t rdev, mode_t umask, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1802,10 +1808,10 @@ pump_mknod (call_frame_t *frame, xlator_t *this,
                 STACK_WIND (frame, default_mknod_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->mknod,
-                            loc, mode, rdev, parms);
+                            loc, mode, rdev, umask, xdata);
                 return 0;
         }
-        afr_mknod (frame, this, loc, mode, rdev, parms);
+        afr_mknod (frame, this, loc, mode, rdev, umask, xdata);
         return 0;
 
 }
@@ -1814,7 +1820,7 @@ pump_mknod (call_frame_t *frame, xlator_t *this,
 
 int
 pump_mkdir (call_frame_t *frame, xlator_t *this,
-            loc_t *loc, mode_t mode, dict_t *params)
+            loc_t *loc, mode_t mode, mode_t umask, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1822,10 +1828,10 @@ pump_mkdir (call_frame_t *frame, xlator_t *this,
                 STACK_WIND (frame, default_mkdir_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->mkdir,
-                            loc, mode, params);
+                            loc, mode, umask, xdata);
                 return 0;
         }
-        afr_mkdir (frame, this, loc, mode, params);
+        afr_mkdir (frame, this, loc, mode, umask, xdata);
         return 0;
 
 }
@@ -1834,7 +1840,7 @@ pump_mkdir (call_frame_t *frame, xlator_t *this,
 static int32_t
 pump_unlink (call_frame_t *frame,
              xlator_t *this,
-             loc_t *loc)
+             loc_t *loc, int xflag, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1843,10 +1849,10 @@ pump_unlink (call_frame_t *frame,
                             default_unlink_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->unlink,
-                            loc);
+                            loc, xflag, xdata);
                 return 0;
         }
-        afr_unlink (frame, this, loc);
+        afr_unlink (frame, this, loc, xflag, xdata);
         return 0;
 
 }
@@ -1854,7 +1860,7 @@ pump_unlink (call_frame_t *frame,
 
 static int
 pump_rmdir (call_frame_t *frame, xlator_t *this,
-            loc_t *loc, int flags)
+            loc_t *loc, int flags, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 
@@ -1864,11 +1870,11 @@ pump_rmdir (call_frame_t *frame, xlator_t *this,
                 STACK_WIND (frame, default_rmdir_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->rmdir,
-                            loc, flags);
+                            loc, flags, xdata);
                 return 0;
         }
 
-        afr_rmdir (frame, this, loc, flags);
+        afr_rmdir (frame, this, loc, flags, xdata);
         return 0;
 
 }
@@ -1877,7 +1883,7 @@ pump_rmdir (call_frame_t *frame, xlator_t *this,
 
 int
 pump_symlink (call_frame_t *frame, xlator_t *this,
-              const char *linkpath, loc_t *loc, dict_t *params)
+              const char *linkpath, loc_t *loc, mode_t umask, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1885,10 +1891,10 @@ pump_symlink (call_frame_t *frame, xlator_t *this,
                 STACK_WIND (frame, default_symlink_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->symlink,
-                            linkpath, loc, params);
+                            linkpath, loc, umask, xdata);
                 return 0;
         }
-        afr_symlink (frame, this, linkpath, loc, params);
+        afr_symlink (frame, this, linkpath, loc, umask, xdata);
         return 0;
 
 }
@@ -1898,7 +1904,7 @@ static int32_t
 pump_rename (call_frame_t *frame,
              xlator_t *this,
              loc_t *oldloc,
-             loc_t *newloc)
+             loc_t *newloc, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1907,10 +1913,10 @@ pump_rename (call_frame_t *frame,
                             default_rename_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->rename,
-                            oldloc, newloc);
+                            oldloc, newloc, xdata);
                 return 0;
         }
-        afr_rename (frame, this, oldloc, newloc);
+        afr_rename (frame, this, oldloc, newloc, xdata);
         return 0;
 
 }
@@ -1920,7 +1926,7 @@ static int32_t
 pump_link (call_frame_t *frame,
            xlator_t *this,
            loc_t *oldloc,
-           loc_t *newloc)
+           loc_t *newloc, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1929,10 +1935,10 @@ pump_link (call_frame_t *frame,
                             default_link_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->link,
-                            oldloc, newloc);
+                            oldloc, newloc, xdata);
                 return 0;
         }
-        afr_link (frame, this, oldloc, newloc);
+        afr_link (frame, this, oldloc, newloc, xdata);
         return 0;
 
 }
@@ -1941,7 +1947,7 @@ pump_link (call_frame_t *frame,
 static int32_t
 pump_create (call_frame_t *frame, xlator_t *this,
              loc_t *loc, int32_t flags, mode_t mode,
-             fd_t *fd, dict_t *params)
+             mode_t umask, fd_t *fd, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1949,10 +1955,10 @@ pump_create (call_frame_t *frame, xlator_t *this,
                 STACK_WIND (frame, default_create_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->create,
-                            loc, flags, mode, fd, params);
+                            loc, flags, mode, umask, fd, xdata);
                 return 0;
         }
-        afr_create (frame, this, loc, flags, mode, fd, params);
+        afr_create (frame, this, loc, flags, mode, umask, fd, xdata);
         return 0;
 
 }
@@ -1962,8 +1968,7 @@ static int32_t
 pump_open (call_frame_t *frame,
            xlator_t *this,
            loc_t *loc,
-           int32_t flags, fd_t *fd,
-           int32_t wbflags)
+           int32_t flags, fd_t *fd, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -1972,10 +1977,10 @@ pump_open (call_frame_t *frame,
                             default_open_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->open,
-                            loc, flags, fd, wbflags);
+                            loc, flags, fd, xdata);
                 return 0;
         }
-        afr_open (frame, this, loc, flags, fd, wbflags);
+        afr_open (frame, this, loc, flags, fd, xdata);
         return 0;
 
 }
@@ -1987,8 +1992,8 @@ pump_writev (call_frame_t *frame,
              fd_t *fd,
              struct iovec *vector,
              int32_t count,
-             off_t off,
-             struct iobref *iobref)
+             off_t off, uint32_t flags,
+             struct iobref *iobref, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2000,20 +2005,20 @@ pump_writev (call_frame_t *frame,
                             fd,
                             vector,
                             count,
-                            off,
-                            iobref);
+                            off, flags,
+                            iobref, xdata);
                 return 0;
         }
-        afr_writev (frame, this, fd, vector, count, off, iobref);
-        return 0;
 
+        afr_writev (frame, this, fd, vector, count, off, flags, iobref, xdata);
+        return 0;
 }
 
 
 static int32_t
 pump_flush (call_frame_t *frame,
             xlator_t *this,
-            fd_t *fd)
+            fd_t *fd, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2022,10 +2027,10 @@ pump_flush (call_frame_t *frame,
                             default_flush_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->flush,
-                            fd);
+                            fd, xdata);
                 return 0;
         }
-        afr_flush (frame, this, fd);
+        afr_flush (frame, this, fd, xdata);
         return 0;
 
 }
@@ -2035,7 +2040,7 @@ static int32_t
 pump_fsync (call_frame_t *frame,
             xlator_t *this,
             fd_t *fd,
-            int32_t flags)
+            int32_t flags, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2045,10 +2050,10 @@ pump_fsync (call_frame_t *frame,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->fsync,
                             fd,
-                            flags);
+                            flags, xdata);
                 return 0;
         }
-        afr_fsync (frame, this, fd, flags);
+        afr_fsync (frame, this, fd, flags, xdata);
         return 0;
 
 }
@@ -2057,7 +2062,7 @@ pump_fsync (call_frame_t *frame,
 static int32_t
 pump_opendir (call_frame_t *frame,
               xlator_t *this,
-              loc_t *loc, fd_t *fd)
+              loc_t *loc, fd_t *fd, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2066,10 +2071,10 @@ pump_opendir (call_frame_t *frame,
                             default_opendir_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->opendir,
-                            loc, fd);
+                            loc, fd, xdata);
                 return 0;
         }
-        afr_opendir (frame, this, loc, fd);
+        afr_opendir (frame, this, loc, fd, xdata);
         return 0;
 
 }
@@ -2079,7 +2084,7 @@ static int32_t
 pump_fsyncdir (call_frame_t *frame,
                xlator_t *this,
                fd_t *fd,
-               int32_t flags)
+               int32_t flags, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2089,10 +2094,10 @@ pump_fsyncdir (call_frame_t *frame,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->fsyncdir,
                             fd,
-                            flags);
+                            flags, xdata);
                 return 0;
         }
-        afr_fsyncdir (frame, this, fd, flags);
+        afr_fsyncdir (frame, this, fd, flags, xdata);
         return 0;
 
 }
@@ -2103,7 +2108,7 @@ pump_xattrop (call_frame_t *frame,
               xlator_t *this,
               loc_t *loc,
               gf_xattrop_flags_t flags,
-              dict_t *dict)
+              dict_t *dict, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2114,10 +2119,10 @@ pump_xattrop (call_frame_t *frame,
                             FIRST_CHILD(this)->fops->xattrop,
                             loc,
                             flags,
-                            dict);
+                            dict, xdata);
                 return 0;
         }
-        afr_xattrop (frame, this, loc, flags, dict);
+        afr_xattrop (frame, this, loc, flags, dict, xdata);
         return 0;
 
 }
@@ -2127,7 +2132,7 @@ pump_fxattrop (call_frame_t *frame,
                xlator_t *this,
                fd_t *fd,
                gf_xattrop_flags_t flags,
-               dict_t *dict)
+               dict_t *dict, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2138,10 +2143,10 @@ pump_fxattrop (call_frame_t *frame,
                             FIRST_CHILD(this)->fops->fxattrop,
                             fd,
                             flags,
-                            dict);
+                            dict, xdata);
                 return 0;
         }
-        afr_fxattrop (frame, this, fd, flags, dict);
+        afr_fxattrop (frame, this, fd, flags, dict, xdata);
         return 0;
 
 }
@@ -2151,9 +2156,17 @@ static int32_t
 pump_removexattr (call_frame_t *frame,
                   xlator_t *this,
                   loc_t *loc,
-                  const char *name)
+                  const char *name, dict_t *xdata)
 {
-        afr_private_t *priv  = NULL;
+        afr_private_t *priv     = NULL;
+        int            op_errno = -1;
+
+        VALIDATE_OR_GOTO (this, out);
+
+        GF_IF_NATIVE_XATTR_GOTO ("trusted.glusterfs.pump*",
+                                 name, op_errno, out);
+
+        op_errno = 0;
 	priv = this->private;
         if (!priv->use_afr_in_pump) {
                 STACK_WIND (frame,
@@ -2161,10 +2174,14 @@ pump_removexattr (call_frame_t *frame,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->removexattr,
                             loc,
-                            name);
+                            name, xdata);
                 return 0;
         }
-        afr_removexattr (frame, this, loc, name);
+        afr_removexattr (frame, this, loc, name, xdata);
+
+ out:
+        if (op_errno)
+                AFR_STACK_UNWIND (removexattr, frame, -1, op_errno, NULL);
         return 0;
 
 }
@@ -2176,7 +2193,7 @@ pump_readdir (call_frame_t *frame,
               xlator_t *this,
               fd_t *fd,
               size_t size,
-              off_t off)
+              off_t off, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2185,21 +2202,18 @@ pump_readdir (call_frame_t *frame,
                             default_readdir_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->readdir,
-                            fd, size, off);
+                            fd, size, off, xdata);
                 return 0;
         }
-        afr_readdir (frame, this, fd, size, off);
+        afr_readdir (frame, this, fd, size, off, xdata);
         return 0;
 
 }
 
 
 static int32_t
-pump_readdirp (call_frame_t *frame,
-               xlator_t *this,
-               fd_t *fd,
-               size_t size,
-               off_t off)
+pump_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd,
+               size_t size, off_t off, dict_t *dict)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2208,10 +2222,10 @@ pump_readdirp (call_frame_t *frame,
                             default_readdirp_cbk,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->readdirp,
-                            fd, size, off);
+                            fd, size, off, dict);
                 return 0;
         }
-        afr_readdirp (frame, this, fd, size, off);
+        afr_readdirp (frame, this, fd, size, off, dict);
         return 0;
 
 }
@@ -2242,13 +2256,24 @@ pump_release (xlator_t *this,
 
 }
 
+static int32_t
+pump_forget (xlator_t *this, inode_t *inode)
+{
+        afr_private_t  *priv  = NULL;
+
+        priv = this->private;
+        if (priv->use_afr_in_pump)
+                afr_forget (this, inode);
+
+        return 0;
+}
 
 static int32_t
 pump_setattr (call_frame_t *frame,
               xlator_t *this,
               loc_t *loc,
               struct iatt *stbuf,
-              int32_t valid)
+              int32_t valid, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2257,10 +2282,10 @@ pump_setattr (call_frame_t *frame,
                             default_setattr_cbk,
                             FIRST_CHILD (this),
                             FIRST_CHILD (this)->fops->setattr,
-                            loc, stbuf, valid);
+                            loc, stbuf, valid, xdata);
                 return 0;
         }
-        afr_setattr (frame, this, loc, stbuf, valid);
+        afr_setattr (frame, this, loc, stbuf, valid, xdata);
         return 0;
 
 }
@@ -2271,7 +2296,7 @@ pump_fsetattr (call_frame_t *frame,
                xlator_t *this,
                fd_t *fd,
                struct iatt *stbuf,
-               int32_t valid)
+               int32_t valid, dict_t *xdata)
 {
         afr_private_t *priv  = NULL;
 	priv = this->private;
@@ -2280,10 +2305,10 @@ pump_fsetattr (call_frame_t *frame,
                             default_fsetattr_cbk,
                             FIRST_CHILD (this),
                             FIRST_CHILD (this)->fops->fsetattr,
-                            fd, stbuf, valid);
+                            fd, stbuf, valid, xdata);
                 return 0;
         }
-        afr_fsetattr (frame, this, fd, stbuf, valid);
+        afr_fsetattr (frame, this, fd, stbuf, valid, xdata);
         return 0;
 
 }
@@ -2332,7 +2357,7 @@ notify (xlator_t *this, int32_t event,
 
         child_xl = (xlator_t *) data;
 
-        ret = afr_notify (this, event, data);
+        ret = afr_notify (this, event, data, NULL);
 
 	switch (event) {
 	case GF_EVENT_CHILD_DOWN:
@@ -2383,9 +2408,26 @@ init (xlator_t *this)
 			"Volume is dangling.");
 	}
 
-	ALLOC_OR_GOTO (this->private, afr_private_t, out);
+	this->private = GF_CALLOC (1, sizeof (afr_private_t),
+                                   gf_afr_mt_afr_private_t);
+        if (!this->private)
+                goto out;
 
 	priv = this->private;
+        LOCK_INIT (&priv->lock);
+        LOCK_INIT (&priv->read_child_lock);
+        //lock recovery is not done in afr
+        pthread_mutex_init (&priv->mutex, NULL);
+        INIT_LIST_HEAD (&priv->saved_fds);
+
+        child_count = xlator_subvolume_count (this);
+        if (child_count != 2) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "There should be exactly 2 children - one source "
+                        "and one sink");
+                return -1;
+        }
+	priv->child_count = child_count;
 
         priv->read_child = source_child;
         priv->favorite_child = source_child;
@@ -2411,31 +2453,9 @@ init (xlator_t *this)
            and the sink.
         */
 
-	priv->data_lock_server_count = 2;
-	priv->metadata_lock_server_count = 2;
-	priv->entry_lock_server_count = 2;
-
 	priv->strict_readdir = _gf_false;
 
-        trav = this->children;
-        while (trav) {
-                child_count++;
-                trav = trav->next;
-        }
-
 	priv->wait_count = 1;
-
-        if (child_count != 2) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "There should be exactly 2 children - one source "
-                        "and one sink");
-                return -1;
-        }
-	priv->child_count = child_count;
-
-	LOCK_INIT (&priv->lock);
-        LOCK_INIT (&priv->read_child_lock);
-
 	priv->child_up = GF_CALLOC (sizeof (unsigned char), child_count,
                                  gf_afr_mt_char);
 	if (!priv->child_up) {
@@ -2521,10 +2541,16 @@ init (xlator_t *this)
                 goto out;
         }
 
-	priv->pump_private = pump_priv;
+        /* keep more local here as we may need them for self-heal etc */
+        this->local_pool = mem_pool_new (afr_local_t, 128);
+        if (!this->local_pool) {
+                ret = -1;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to create local_t's memory pool");
+                goto out;
+        }
 
-        pthread_mutex_init (&priv->mutex, NULL);
-        INIT_LIST_HEAD (&priv->saved_fds);
+	priv->pump_private = pump_priv;
 
         pump_change_state (this, PUMP_STATE_ABORT);
 
@@ -2536,6 +2562,28 @@ out:
 int
 fini (xlator_t *this)
 {
+        afr_private_t * priv        = NULL;
+        pump_private_t *pump_priv = NULL;
+
+        priv      = this->private;
+        this->private = NULL;
+        if (!priv)
+                goto out;
+
+        pump_priv = priv->pump_private;
+        if (!pump_priv)
+                goto afr_priv;
+
+        if (pump_priv->env)
+                syncenv_destroy (pump_priv->env);
+
+        GF_FREE (pump_priv->resume_path);
+        LOCK_DESTROY (&pump_priv->resume_path_lock);
+        LOCK_DESTROY (&pump_priv->pump_state_lock);
+        GF_FREE (pump_priv);
+afr_priv:
+        afr_priv_destroy (priv);
+out:
 	return 0;
 }
 
@@ -2583,6 +2631,7 @@ struct xlator_dumpops dumpops = {
 struct xlator_cbks cbks = {
 	.release     = pump_release,
 	.releasedir  = pump_releasedir,
+        .forget      = pump_forget,
 };
 
 struct volume_options options[] = {

@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2011-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -101,20 +91,17 @@ glusterd_handle_quota (rpcsvc_request_t *req)
                 strncpy (operation, "remove", sizeof (operation));
                 break;
         }
-        gf_cmd_log ("volume quota", " %s command on %s", operation, volname);
         ret = glusterd_op_begin (req, GD_OP_QUOTA, dict);
-        gf_cmd_log ("volume quota", " %s command on %s %s", operation,volname,
-                    (ret != 0)? "FAILED" : "SUCCEEDED");
 
 out:
         glusterd_friend_sm ();
         glusterd_op_sm ();
 
         if (ret) {
+                ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
+                                                     dict, "operation failed");
                 if (dict)
                         dict_unref (dict);
-                ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
-                                                     NULL, "operation failed");
         }
 
         return ret;
@@ -237,8 +224,7 @@ _glusterd_quota_remove_limits (char **quota_limits, char *path,
         }
 
 out:
-        if (limits)
-                GF_FREE (limits);
+        GF_FREE (limits);
 
         return ret;
 }
@@ -246,11 +232,11 @@ out:
 int32_t
 glusterd_quota_initiate_fs_crawl (glusterd_conf_t *priv, char *volname)
 {
-        int32_t   ret = 0;
-        pid_t     pid;
-        char      mountdir [] = "/tmp/mntXXXXXX";
-        runner_t  runner = {0,};
-        int       status = 0;
+        pid_t                      pid;
+        int32_t                    ret              = 0;
+        int                        status           = 0;
+        char                       mountdir[]       = "/tmp/mntXXXXXX";
+        runner_t                   runner           = {0};
 
         if (mkdtemp (mountdir) == NULL) {
                 gf_log ("glusterd", GF_LOG_DEBUG,
@@ -260,9 +246,10 @@ glusterd_quota_initiate_fs_crawl (glusterd_conf_t *priv, char *volname)
         }
 
         runinit (&runner);
-        runner_add_args (&runner, SBIN_DIR"/glusterfs", "-s",
-                         "localhost", "--volfile-id", volname, "-l",
-                         DEFAULT_LOG_FILE_DIRECTORY"/quota-crawl.log",
+        runner_add_args (&runner, SBIN_DIR"/glusterfs",
+                         "-s", "localhost",
+                         "--volfile-id", volname,
+                         "-l", DEFAULT_LOG_FILE_DIRECTORY"/quota-crawl.log",
                          mountdir, NULL);
 
         ret = runner_run_reuse (&runner);
@@ -529,6 +516,13 @@ glusterd_quota_limit_usage (glusterd_volinfo_t *volinfo, dict_t *dict, char **op
         GF_VALIDATE_OR_GOTO ("glusterd", dict, out);
         GF_VALIDATE_OR_GOTO ("glusterd", volinfo, out);
         GF_VALIDATE_OR_GOTO ("glusterd", op_errstr, out);
+
+        ret = glusterd_check_if_quota_trans_enabled (volinfo);
+        if (ret == -1) {
+                *op_errstr = gf_strdup ("Quota is disabled, please enable "
+                                        "quota");
+                goto out;
+        }
 
         ret = glusterd_volinfo_get (volinfo, VKEY_FEATURES_LIMIT_USAGE,
                                     &quota_limits);

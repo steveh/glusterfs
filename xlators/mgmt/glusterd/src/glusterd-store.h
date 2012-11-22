@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _GLUSTERD_HA_H_
 #define _GLUSTERD_HA_H_
 
@@ -30,6 +20,7 @@
 
 #include "glusterfs.h"
 #include "xlator.h"
+#include "run.h"
 #include "logging.h"
 #include "call-stub.h"
 #include "fd.h"
@@ -40,6 +31,7 @@
 typedef enum glusterd_store_ver_ac_{
         GLUSTERD_VOLINFO_VER_AC_NONE = 0,
         GLUSTERD_VOLINFO_VER_AC_INCREMENT = 1,
+        GLUSTERD_VOLINFO_VER_AC_DECREMENT = 2,
 } glusterd_volinfo_ver_ac_t;
 
 
@@ -59,6 +51,9 @@ typedef enum glusterd_store_ver_ac_{
 #define GLUSTERD_STORE_KEY_RB_STATUS      "rb_status"
 #define GLUSTERD_STORE_KEY_RB_SRC_BRICK   "rb_src"
 #define GLUSTERD_STORE_KEY_RB_DST_BRICK   "rb_dst"
+#define GLUSTERD_STORE_KEY_VOL_DEFRAG     "rebalance_status"
+#define GLUSTERD_STORE_KEY_USERNAME       "username"
+#define GLUSTERD_STORE_KEY_PASSWORD       "password"
 
 #define GLUSTERD_STORE_KEY_BRICK_HOSTNAME "hostname"
 #define GLUSTERD_STORE_KEY_BRICK_PATH     "path"
@@ -82,6 +77,7 @@ typedef enum glusterd_store_ver_ac_{
                 }\
         } while (0); \
 
+
 typedef enum {
         GD_STORE_SUCCESS,
         GD_STORE_KEY_NULL,
@@ -97,9 +93,6 @@ glusterd_store_volinfo (glusterd_volinfo_t *volinfo, glusterd_volinfo_ver_ac_t a
 
 int32_t
 glusterd_store_delete_volume (glusterd_volinfo_t *volinfo);
-
-int32_t
-glusterd_store_uuid ();
 
 int32_t
 glusterd_store_handle_new (char *path, glusterd_store_handle_t **handle);
@@ -135,4 +128,14 @@ glusterd_perform_volinfo_version_action (glusterd_volinfo_t *volinfo,
                                          glusterd_volinfo_ver_ac_t ac);
 gf_boolean_t
 glusterd_store_is_valid_brickpath (char *volname, char *brick);
+
+int32_t
+glusterd_store_perform_node_state_store (glusterd_volinfo_t *volinfo);
+
+int
+glusterd_retrieve_op_version (xlator_t *this, int *op_version);
+
+int
+glusterd_store_global_info (xlator_t *this);
+
 #endif

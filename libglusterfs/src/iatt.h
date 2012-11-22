@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -102,6 +93,8 @@ struct iatt {
 #define IA_PROT_SUID(prot)      ((prot).suid == 1)
 #define IA_PROT_SGID(prot)      ((prot).sgid == 1)
 #define IA_PROT_STCKY(prot)     ((prot).sticky == 1)
+
+#define IA_FILE_OR_DIR(t)       (IA_ISREG(t) || IA_ISDIR(t))
 
 static inline uint32_t
 ia_major (uint64_t ia_dev)
@@ -271,6 +264,24 @@ iatt_from_stat (struct iatt *iatt, struct stat *stat)
         iatt->ia_size       = stat->st_size;
         iatt->ia_blksize    = stat->st_blksize;
         iatt->ia_blocks     = stat->st_blocks;
+
+        /* There is a possibility that the backend FS (like XFS) can
+           allocate blocks beyond EOF for better performance reasons, which
+           results in 'st_blocks' with higher values than what is consumed by
+           the file descriptor. This would break few logic inside GlusterFS,
+           like quota behavior etc, thus we need the exact number of blocks
+           which are consumed by the file to the higher layers inside GlusterFS.
+           Currently, this logic won't work for sparse files (ie, file with
+           holes)
+        */
+        {
+                uint64_t maxblocks;
+
+                maxblocks = (iatt->ia_size + 511) / 512;
+
+                if (iatt->ia_blocks > maxblocks)
+                        iatt->ia_blocks = maxblocks;
+        }
 
         iatt->ia_atime      = stat->st_atime;
         iatt->ia_atime_nsec = ST_ATIM_NSEC (stat);

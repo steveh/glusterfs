@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -22,9 +13,9 @@
 #include "config.h"
 #endif
 
+#include <openssl/md5.h>
 #include <inttypes.h>
 
-#include "md5.h"
 #include "call-stub.h"
 #include "mem-types.h"
 
@@ -55,7 +46,7 @@ call_stub_t *
 fop_lookup_stub (call_frame_t *frame,
                  fop_lookup_t fn,
                  loc_t *loc,
-                 dict_t *xattr_req)
+                 dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -67,10 +58,10 @@ fop_lookup_stub (call_frame_t *frame,
 
         stub->args.lookup.fn = fn;
 
-        if (xattr_req)
-                stub->args.lookup.xattr_req = dict_ref (xattr_req);
-
         loc_copy (&stub->args.lookup.loc, loc);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -83,7 +74,7 @@ fop_lookup_cbk_stub (call_frame_t *frame,
                      int32_t op_errno,
                      inode_t *inode,
                      struct iatt *buf,
-                     dict_t *dict,
+                     dict_t *xdata,
                      struct iatt *postparent)
 {
         call_stub_t *stub = NULL;
@@ -100,10 +91,11 @@ fop_lookup_cbk_stub (call_frame_t *frame,
                 stub->args.lookup_cbk.inode = inode_ref (inode);
         if (buf)
                 stub->args.lookup_cbk.buf = *buf;
-        if (dict)
-                stub->args.lookup_cbk.dict = dict_ref (dict);
         if (postparent)
                 stub->args.lookup_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -113,7 +105,7 @@ out:
 call_stub_t *
 fop_stat_stub (call_frame_t *frame,
                fop_stat_t fn,
-               loc_t *loc)
+               loc_t *loc, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -125,6 +117,9 @@ fop_stat_stub (call_frame_t *frame,
 
         stub->args.stat.fn = fn;
         loc_copy (&stub->args.stat.loc, loc);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -135,7 +130,7 @@ fop_stat_cbk_stub (call_frame_t *frame,
                    fop_stat_cbk_t fn,
                    int32_t op_ret,
                    int32_t op_errno,
-                   struct iatt *buf)
+                   struct iatt *buf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -149,6 +144,9 @@ fop_stat_cbk_stub (call_frame_t *frame,
         stub->args.stat_cbk.op_errno = op_errno;
         if (op_ret == 0)
                 stub->args.stat_cbk.buf = *buf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -157,7 +155,7 @@ out:
 call_stub_t *
 fop_fstat_stub (call_frame_t *frame,
                 fop_fstat_t fn,
-                fd_t *fd)
+                fd_t *fd, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -170,6 +168,9 @@ fop_fstat_stub (call_frame_t *frame,
 
         if (fd)
                 stub->args.fstat.fd = fd_ref (fd);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -180,7 +181,7 @@ fop_fstat_cbk_stub (call_frame_t *frame,
                     fop_fstat_cbk_t fn,
                     int32_t op_ret,
                     int32_t op_errno,
-                    struct iatt *buf)
+                    struct iatt *buf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -194,6 +195,9 @@ fop_fstat_cbk_stub (call_frame_t *frame,
         stub->args.fstat_cbk.op_errno = op_errno;
         if (buf)
                 stub->args.fstat_cbk.buf = *buf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -205,7 +209,7 @@ call_stub_t *
 fop_truncate_stub (call_frame_t *frame,
                    fop_truncate_t fn,
                    loc_t *loc,
-                   off_t off)
+                   off_t off, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -218,6 +222,9 @@ fop_truncate_stub (call_frame_t *frame,
         stub->args.truncate.fn = fn;
         loc_copy (&stub->args.truncate.loc, loc);
         stub->args.truncate.off = off;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -229,7 +236,7 @@ fop_truncate_cbk_stub (call_frame_t *frame,
                        int32_t op_ret,
                        int32_t op_errno,
                        struct iatt *prebuf,
-                       struct iatt *postbuf)
+                       struct iatt *postbuf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -245,6 +252,9 @@ fop_truncate_cbk_stub (call_frame_t *frame,
                 stub->args.truncate_cbk.prebuf = *prebuf;
         if (postbuf)
                 stub->args.truncate_cbk.postbuf = *postbuf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -254,7 +264,7 @@ call_stub_t *
 fop_ftruncate_stub (call_frame_t *frame,
                     fop_ftruncate_t fn,
                     fd_t *fd,
-                    off_t off)
+                    off_t off, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -268,6 +278,9 @@ fop_ftruncate_stub (call_frame_t *frame,
                 stub->args.ftruncate.fd = fd_ref (fd);
 
         stub->args.ftruncate.off = off;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -279,7 +292,7 @@ fop_ftruncate_cbk_stub (call_frame_t *frame,
                         int32_t op_ret,
                         int32_t op_errno,
                         struct iatt *prebuf,
-                        struct iatt *postbuf)
+                        struct iatt *postbuf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -295,6 +308,9 @@ fop_ftruncate_cbk_stub (call_frame_t *frame,
                 stub->args.ftruncate_cbk.prebuf = *prebuf;
         if (postbuf)
                 stub->args.ftruncate_cbk.postbuf = *postbuf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -304,7 +320,7 @@ call_stub_t *
 fop_access_stub (call_frame_t *frame,
                  fop_access_t fn,
                  loc_t *loc,
-                 int32_t mask)
+                 int32_t mask, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -317,6 +333,9 @@ fop_access_stub (call_frame_t *frame,
         stub->args.access.fn = fn;
         loc_copy (&stub->args.access.loc, loc);
         stub->args.access.mask = mask;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -326,7 +345,7 @@ call_stub_t *
 fop_access_cbk_stub (call_frame_t *frame,
                      fop_access_cbk_t fn,
                      int32_t op_ret,
-                     int32_t op_errno)
+                     int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -338,6 +357,9 @@ fop_access_cbk_stub (call_frame_t *frame,
         stub->args.access_cbk.fn = fn;
         stub->args.access_cbk.op_ret = op_ret;
         stub->args.access_cbk.op_errno = op_errno;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -347,7 +369,7 @@ call_stub_t *
 fop_readlink_stub (call_frame_t *frame,
                    fop_readlink_t fn,
                    loc_t *loc,
-                   size_t size)
+                   size_t size, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -360,6 +382,9 @@ fop_readlink_stub (call_frame_t *frame,
         stub->args.readlink.fn = fn;
         loc_copy (&stub->args.readlink.loc, loc);
         stub->args.readlink.size = size;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -371,7 +396,7 @@ fop_readlink_cbk_stub (call_frame_t *frame,
                        int32_t op_ret,
                        int32_t op_errno,
                        const char *path,
-                       struct iatt *sbuf)
+                       struct iatt *sbuf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -387,14 +412,17 @@ fop_readlink_cbk_stub (call_frame_t *frame,
                 stub->args.readlink_cbk.buf = gf_strdup (path);
         if (sbuf)
                 stub->args.readlink_cbk.sbuf = *sbuf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
 
 
 call_stub_t *
-fop_mknod_stub (call_frame_t *frame, fop_mknod_t fn,
-                loc_t *loc, mode_t mode, dev_t rdev, dict_t *params)
+fop_mknod_stub (call_frame_t *frame, fop_mknod_t fn, loc_t *loc, mode_t mode,
+                dev_t rdev, mode_t umask, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -408,8 +436,10 @@ fop_mknod_stub (call_frame_t *frame, fop_mknod_t fn,
         loc_copy (&stub->args.mknod.loc, loc);
         stub->args.mknod.mode = mode;
         stub->args.mknod.rdev = rdev;
-        if (params)
-                stub->args.mknod.params = dict_ref (params);
+        stub->args.mknod.umask = umask;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -423,7 +453,7 @@ fop_mknod_cbk_stub (call_frame_t *frame,
                     inode_t *inode,
                     struct iatt *buf,
                     struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -443,6 +473,9 @@ fop_mknod_cbk_stub (call_frame_t *frame,
                 stub->args.mknod_cbk.preparent = *preparent;
         if (postparent)
                 stub->args.mknod_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -450,7 +483,7 @@ out:
 
 call_stub_t *
 fop_mkdir_stub (call_frame_t *frame, fop_mkdir_t fn,
-                loc_t *loc, mode_t mode, dict_t *params)
+                loc_t *loc, mode_t mode, mode_t umask, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -462,9 +495,12 @@ fop_mkdir_stub (call_frame_t *frame, fop_mkdir_t fn,
 
         stub->args.mkdir.fn = fn;
         loc_copy (&stub->args.mkdir.loc, loc);
-        stub->args.mkdir.mode = mode;
-        if (params)
-                stub->args.mkdir.params = dict_ref (params);
+        stub->args.mkdir.mode  = mode;
+        stub->args.mkdir.umask = umask;
+
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -478,7 +514,7 @@ fop_mkdir_cbk_stub (call_frame_t *frame,
                     inode_t *inode,
                     struct iatt *buf,
                     struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -498,6 +534,9 @@ fop_mkdir_cbk_stub (call_frame_t *frame,
                 stub->args.mkdir_cbk.preparent = *preparent;
         if (postparent)
                 stub->args.mkdir_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -506,7 +545,7 @@ out:
 call_stub_t *
 fop_unlink_stub (call_frame_t *frame,
                  fop_unlink_t fn,
-                 loc_t *loc)
+                 loc_t *loc, int xflag, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -518,6 +557,10 @@ fop_unlink_stub (call_frame_t *frame,
 
         stub->args.unlink.fn = fn;
         loc_copy (&stub->args.unlink.loc, loc);
+        stub->args.unlink.xflag = xflag;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -529,7 +572,7 @@ fop_unlink_cbk_stub (call_frame_t *frame,
                      int32_t op_ret,
                      int32_t op_errno,
                      struct iatt *preparent,
-                     struct iatt *postparent)
+                     struct iatt *postparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -545,6 +588,9 @@ fop_unlink_cbk_stub (call_frame_t *frame,
                 stub->args.unlink_cbk.preparent = *preparent;
         if (postparent)
                 stub->args.unlink_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -553,7 +599,7 @@ out:
 
 call_stub_t *
 fop_rmdir_stub (call_frame_t *frame, fop_rmdir_t fn,
-                loc_t *loc, int flags)
+                loc_t *loc, int flags, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -566,6 +612,9 @@ fop_rmdir_stub (call_frame_t *frame, fop_rmdir_t fn,
         stub->args.rmdir.fn = fn;
         loc_copy (&stub->args.rmdir.loc, loc);
         stub->args.rmdir.flags = flags;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -577,7 +626,7 @@ fop_rmdir_cbk_stub (call_frame_t *frame,
                     int32_t op_ret,
                     int32_t op_errno,
                     struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -593,6 +642,9 @@ fop_rmdir_cbk_stub (call_frame_t *frame,
                 stub->args.rmdir_cbk.preparent = *preparent;
         if (postparent)
                 stub->args.rmdir_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -600,7 +652,7 @@ out:
 
 call_stub_t *
 fop_symlink_stub (call_frame_t *frame, fop_symlink_t fn,
-                  const char *linkname, loc_t *loc, dict_t *params)
+                  const char *linkname, loc_t *loc, mode_t umask, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -613,9 +665,11 @@ fop_symlink_stub (call_frame_t *frame, fop_symlink_t fn,
 
         stub->args.symlink.fn = fn;
         stub->args.symlink.linkname = gf_strdup (linkname);
+        stub->args.symlink.umask = umask;
         loc_copy (&stub->args.symlink.loc, loc);
-        if (params)
-                stub->args.symlink.params = dict_ref (params);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -629,7 +683,7 @@ fop_symlink_cbk_stub (call_frame_t *frame,
                       inode_t *inode,
                       struct iatt *buf,
                       struct iatt *preparent,
-                      struct iatt *postparent)
+                      struct iatt *postparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -649,6 +703,9 @@ fop_symlink_cbk_stub (call_frame_t *frame,
                 stub->args.symlink_cbk.preparent = *preparent;
         if (postparent)
                 stub->args.symlink_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -658,7 +715,7 @@ call_stub_t *
 fop_rename_stub (call_frame_t *frame,
                  fop_rename_t fn,
                  loc_t *oldloc,
-                 loc_t *newloc)
+                 loc_t *newloc, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -672,6 +729,9 @@ fop_rename_stub (call_frame_t *frame,
         stub->args.rename.fn = fn;
         loc_copy (&stub->args.rename.old, oldloc);
         loc_copy (&stub->args.rename.new, newloc);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -686,7 +746,7 @@ fop_rename_cbk_stub (call_frame_t *frame,
                      struct iatt *preoldparent,
                      struct iatt *postoldparent,
                      struct iatt *prenewparent,
-                     struct iatt *postnewparent)
+                     struct iatt *postnewparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -708,6 +768,9 @@ fop_rename_cbk_stub (call_frame_t *frame,
                 stub->args.rename_cbk.prenewparent = *prenewparent;
         if (postnewparent)
                 stub->args.rename_cbk.postnewparent = *postnewparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -717,7 +780,7 @@ call_stub_t *
 fop_link_stub (call_frame_t *frame,
                fop_link_t fn,
                loc_t *oldloc,
-               loc_t *newloc)
+               loc_t *newloc, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -732,6 +795,9 @@ fop_link_stub (call_frame_t *frame,
         loc_copy (&stub->args.link.oldloc, oldloc);
         loc_copy (&stub->args.link.newloc, newloc);
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -745,7 +811,7 @@ fop_link_cbk_stub (call_frame_t *frame,
                    inode_t *inode,
                    struct iatt *buf,
                    struct iatt *preparent,
-                   struct iatt *postparent)
+                   struct iatt *postparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -765,6 +831,9 @@ fop_link_cbk_stub (call_frame_t *frame,
                 stub->args.link_cbk.preparent = *preparent;
         if (postparent)
                 stub->args.link_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -773,7 +842,7 @@ out:
 call_stub_t *
 fop_create_stub (call_frame_t *frame, fop_create_t fn,
                  loc_t *loc, int32_t flags, mode_t mode,
-                 fd_t *fd, dict_t *params)
+                 mode_t umask, fd_t *fd, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -787,10 +856,12 @@ fop_create_stub (call_frame_t *frame, fop_create_t fn,
         loc_copy (&stub->args.create.loc, loc);
         stub->args.create.flags = flags;
         stub->args.create.mode = mode;
+        stub->args.create.umask = umask;
         if (fd)
                 stub->args.create.fd = fd_ref (fd);
-        if (params)
-                stub->args.create.params = dict_ref (params);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -805,7 +876,7 @@ fop_create_cbk_stub (call_frame_t *frame,
                      inode_t *inode,
                      struct iatt *buf,
                      struct iatt *preparent,
-                     struct iatt *postparent)
+                     struct iatt *postparent, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -827,6 +898,9 @@ fop_create_cbk_stub (call_frame_t *frame,
                 stub->args.create_cbk.preparent = *preparent;
         if (postparent)
                 stub->args.create_cbk.postparent = *postparent;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -837,7 +911,7 @@ fop_open_stub (call_frame_t *frame,
                fop_open_t fn,
                loc_t *loc,
                int32_t flags, fd_t *fd,
-               int32_t wbflags)
+               dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -850,9 +924,11 @@ fop_open_stub (call_frame_t *frame,
         stub->args.open.fn = fn;
         loc_copy (&stub->args.open.loc, loc);
         stub->args.open.flags = flags;
-        stub->args.open.wbflags = wbflags;
         if (fd)
                 stub->args.open.fd = fd_ref (fd);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -863,8 +939,7 @@ fop_open_cbk_stub (call_frame_t *frame,
                    fop_open_cbk_t fn,
                    int32_t op_ret,
                    int32_t op_errno,
-                   fd_t *fd)
-
+                   fd_t *fd, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -878,6 +953,9 @@ fop_open_cbk_stub (call_frame_t *frame,
         stub->args.open_cbk.op_errno = op_errno;
         if (fd)
                 stub->args.open_cbk.fd = fd_ref (fd);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -888,7 +966,7 @@ fop_readv_stub (call_frame_t *frame,
                 fop_readv_t fn,
                 fd_t *fd,
                 size_t size,
-                off_t off)
+                off_t off, uint32_t flags, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -900,8 +978,13 @@ fop_readv_stub (call_frame_t *frame,
         stub->args.readv.fn = fn;
         if (fd)
                 stub->args.readv.fd = fd_ref (fd);
-        stub->args.readv.size = size;
-        stub->args.readv.off = off;
+        stub->args.readv.size  = size;
+        stub->args.readv.off   = off;
+        stub->args.readv.flags = flags;
+
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -915,8 +998,7 @@ fop_readv_cbk_stub (call_frame_t *frame,
                     struct iovec *vector,
                     int32_t count,
                     struct iatt *stbuf,
-                    struct iobref *iobref)
-
+                    struct iobref *iobref, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -934,6 +1016,9 @@ fop_readv_cbk_stub (call_frame_t *frame,
                 stub->args.readv_cbk.stbuf = *stbuf;
                 stub->args.readv_cbk.iobref = iobref_ref (iobref);
         }
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -945,8 +1030,8 @@ fop_writev_stub (call_frame_t *frame,
                  fd_t *fd,
                  struct iovec *vector,
                  int32_t count,
-                 off_t off,
-                 struct iobref *iobref)
+                 off_t off, uint32_t flags,
+                 struct iobref *iobref, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -960,9 +1045,13 @@ fop_writev_stub (call_frame_t *frame,
         if (fd)
                 stub->args.writev.fd = fd_ref (fd);
         stub->args.writev.vector = iov_dup (vector, count);
-        stub->args.writev.count = count;
-        stub->args.writev.off = off;
+        stub->args.writev.count  = count;
+        stub->args.writev.off    = off;
+        stub->args.writev.flags  = flags;
         stub->args.writev.iobref = iobref_ref (iobref);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -974,8 +1063,7 @@ fop_writev_cbk_stub (call_frame_t *frame,
                      int32_t op_ret,
                      int32_t op_errno,
                      struct iatt *prebuf,
-                     struct iatt *postbuf)
-
+                     struct iatt *postbuf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -991,6 +1079,9 @@ fop_writev_cbk_stub (call_frame_t *frame,
                 stub->args.writev_cbk.postbuf = *postbuf;
         if (prebuf)
                 stub->args.writev_cbk.prebuf = *prebuf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1000,7 +1091,7 @@ out:
 call_stub_t *
 fop_flush_stub (call_frame_t *frame,
                 fop_flush_t fn,
-                fd_t *fd)
+                fd_t *fd, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1012,6 +1103,9 @@ fop_flush_stub (call_frame_t *frame,
         stub->args.flush.fn = fn;
         if (fd)
                 stub->args.flush.fd = fd_ref (fd);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1021,8 +1115,7 @@ call_stub_t *
 fop_flush_cbk_stub (call_frame_t *frame,
                     fop_flush_cbk_t fn,
                     int32_t op_ret,
-                    int32_t op_errno)
-
+                    int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1034,6 +1127,9 @@ fop_flush_cbk_stub (call_frame_t *frame,
         stub->args.flush_cbk.fn = fn;
         stub->args.flush_cbk.op_ret = op_ret;
         stub->args.flush_cbk.op_errno = op_errno;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1045,7 +1141,7 @@ call_stub_t *
 fop_fsync_stub (call_frame_t *frame,
                 fop_fsync_t fn,
                 fd_t *fd,
-                int32_t datasync)
+                int32_t datasync, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1058,6 +1154,9 @@ fop_fsync_stub (call_frame_t *frame,
         if (fd)
                 stub->args.fsync.fd = fd_ref (fd);
         stub->args.fsync.datasync = datasync;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1069,7 +1168,7 @@ fop_fsync_cbk_stub (call_frame_t *frame,
                     int32_t op_ret,
                     int32_t op_errno,
                     struct iatt *prebuf,
-                    struct iatt *postbuf)
+                    struct iatt *postbuf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1085,6 +1184,9 @@ fop_fsync_cbk_stub (call_frame_t *frame,
                 stub->args.fsync_cbk.prebuf = *prebuf;
         if (postbuf)
                 stub->args.fsync_cbk.postbuf = *postbuf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1093,7 +1195,7 @@ out:
 call_stub_t *
 fop_opendir_stub (call_frame_t *frame,
                   fop_opendir_t fn,
-                  loc_t *loc, fd_t *fd)
+                  loc_t *loc, fd_t *fd, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1107,6 +1209,9 @@ fop_opendir_stub (call_frame_t *frame,
         loc_copy (&stub->args.opendir.loc, loc);
         if (fd)
                 stub->args.opendir.fd = fd_ref (fd);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1117,8 +1222,7 @@ fop_opendir_cbk_stub (call_frame_t *frame,
                       fop_opendir_cbk_t fn,
                       int32_t op_ret,
                       int32_t op_errno,
-                      fd_t *fd)
-
+                      fd_t *fd, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1133,6 +1237,9 @@ fop_opendir_cbk_stub (call_frame_t *frame,
 
         if (fd)
                 stub->args.opendir_cbk.fd = fd_ref (fd);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1142,7 +1249,7 @@ call_stub_t *
 fop_fsyncdir_stub (call_frame_t *frame,
                    fop_fsyncdir_t fn,
                    fd_t *fd,
-                   int32_t datasync)
+                   int32_t datasync, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1155,6 +1262,9 @@ fop_fsyncdir_stub (call_frame_t *frame,
         if (fd)
                 stub->args.fsyncdir.fd = fd_ref (fd);
         stub->args.fsyncdir.datasync = datasync;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1164,8 +1274,7 @@ call_stub_t *
 fop_fsyncdir_cbk_stub (call_frame_t *frame,
                        fop_fsyncdir_cbk_t fn,
                        int32_t op_ret,
-                       int32_t op_errno)
-
+                       int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1177,6 +1286,9 @@ fop_fsyncdir_cbk_stub (call_frame_t *frame,
         stub->args.fsyncdir_cbk.fn = fn;
         stub->args.fsyncdir_cbk.op_ret = op_ret;
         stub->args.fsyncdir_cbk.op_errno = op_errno;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1185,7 +1297,7 @@ out:
 call_stub_t *
 fop_statfs_stub (call_frame_t *frame,
                  fop_statfs_t fn,
-                 loc_t *loc)
+                 loc_t *loc, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1197,6 +1309,9 @@ fop_statfs_stub (call_frame_t *frame,
 
         stub->args.statfs.fn = fn;
         loc_copy (&stub->args.statfs.loc, loc);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1207,8 +1322,7 @@ fop_statfs_cbk_stub (call_frame_t *frame,
                      fop_statfs_cbk_t fn,
                      int32_t op_ret,
                      int32_t op_errno,
-                     struct statvfs *buf)
-
+                     struct statvfs *buf, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1222,6 +1336,9 @@ fop_statfs_cbk_stub (call_frame_t *frame,
         stub->args.statfs_cbk.op_errno = op_errno;
         if (op_ret == 0)
                 stub->args.statfs_cbk.buf = *buf;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1232,7 +1349,7 @@ fop_setxattr_stub (call_frame_t *frame,
                    fop_setxattr_t fn,
                    loc_t *loc,
                    dict_t *dict,
-                   int32_t flags)
+                   int32_t flags, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1248,6 +1365,9 @@ fop_setxattr_stub (call_frame_t *frame,
         if (dict)
                 stub->args.setxattr.dict = dict_ref (dict);
         stub->args.setxattr.flags = flags;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1257,7 +1377,7 @@ call_stub_t *
 fop_setxattr_cbk_stub (call_frame_t *frame,
                        fop_setxattr_cbk_t fn,
                        int32_t op_ret,
-                       int32_t op_errno)
+                       int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1269,6 +1389,9 @@ fop_setxattr_cbk_stub (call_frame_t *frame,
         stub->args.setxattr_cbk.fn = fn;
         stub->args.setxattr_cbk.op_ret = op_ret;
         stub->args.setxattr_cbk.op_errno = op_errno;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1277,7 +1400,7 @@ call_stub_t *
 fop_getxattr_stub (call_frame_t *frame,
                    fop_getxattr_t fn,
                    loc_t *loc,
-                   const char *name)
+                   const char *name, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1292,6 +1415,9 @@ fop_getxattr_stub (call_frame_t *frame,
 
         if (name)
                 stub->args.getxattr.name = gf_strdup (name);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1302,7 +1428,7 @@ fop_getxattr_cbk_stub (call_frame_t *frame,
                        fop_getxattr_cbk_t fn,
                        int32_t op_ret,
                        int32_t op_errno,
-                       dict_t *dict)
+                       dict_t *dict, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1317,6 +1443,9 @@ fop_getxattr_cbk_stub (call_frame_t *frame,
         /* TODO */
         if (dict)
                 stub->args.getxattr_cbk.dict = dict_ref (dict);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1327,7 +1456,7 @@ fop_fsetxattr_stub (call_frame_t *frame,
                     fop_fsetxattr_t fn,
                     fd_t *fd,
                     dict_t *dict,
-                    int32_t flags)
+                    int32_t flags, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1344,6 +1473,9 @@ fop_fsetxattr_stub (call_frame_t *frame,
         if (dict)
                 stub->args.fsetxattr.dict = dict_ref (dict);
         stub->args.fsetxattr.flags = flags;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1353,7 +1485,7 @@ call_stub_t *
 fop_fsetxattr_cbk_stub (call_frame_t *frame,
                         fop_fsetxattr_cbk_t fn,
                         int32_t op_ret,
-                        int32_t op_errno)
+                        int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1365,6 +1497,9 @@ fop_fsetxattr_cbk_stub (call_frame_t *frame,
         stub->args.fsetxattr_cbk.fn = fn;
         stub->args.fsetxattr_cbk.op_ret = op_ret;
         stub->args.fsetxattr_cbk.op_errno = op_errno;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1374,7 +1509,7 @@ call_stub_t *
 fop_fgetxattr_stub (call_frame_t *frame,
                     fop_fgetxattr_t fn,
                     fd_t *fd,
-                    const char *name)
+                    const char *name, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1389,6 +1524,9 @@ fop_fgetxattr_stub (call_frame_t *frame,
 
         if (name)
                 stub->args.fgetxattr.name = gf_strdup (name);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1399,7 +1537,7 @@ fop_fgetxattr_cbk_stub (call_frame_t *frame,
                         fop_fgetxattr_cbk_t fn,
                         int32_t op_ret,
                         int32_t op_errno,
-                        dict_t *dict)
+                        dict_t *dict, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1415,6 +1553,9 @@ fop_fgetxattr_cbk_stub (call_frame_t *frame,
         /* TODO */
         if (dict)
                 stub->args.fgetxattr_cbk.dict = dict_ref (dict);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1424,7 +1565,7 @@ call_stub_t *
 fop_removexattr_stub (call_frame_t *frame,
                       fop_removexattr_t fn,
                       loc_t *loc,
-                      const char *name)
+                      const char *name, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1438,6 +1579,9 @@ fop_removexattr_stub (call_frame_t *frame,
         stub->args.removexattr.fn = fn;
         loc_copy (&stub->args.removexattr.loc, loc);
         stub->args.removexattr.name = gf_strdup (name);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1447,7 +1591,7 @@ call_stub_t *
 fop_removexattr_cbk_stub (call_frame_t *frame,
                           fop_removexattr_cbk_t fn,
                           int32_t op_ret,
-                          int32_t op_errno)
+                          int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1459,17 +1603,68 @@ fop_removexattr_cbk_stub (call_frame_t *frame,
         stub->args.removexattr_cbk.fn = fn;
         stub->args.removexattr_cbk.op_ret = op_ret;
         stub->args.removexattr_cbk.op_errno = op_errno;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
+out:
+        return stub;
+}
+
+call_stub_t *
+fop_fremovexattr_stub (call_frame_t *frame,
+                       fop_fremovexattr_t fn,
+                       fd_t *fd,
+                       const char *name, dict_t *xdata)
+{
+        call_stub_t *stub = NULL;
+
+        GF_VALIDATE_OR_GOTO ("call-stub", frame, out);
+        GF_VALIDATE_OR_GOTO ("call-stub", fd, out);
+        GF_VALIDATE_OR_GOTO ("call-stub", name, out);
+
+        stub = stub_new (frame, 1, GF_FOP_FREMOVEXATTR);
+        GF_VALIDATE_OR_GOTO ("call-stub", stub, out);
+
+        stub->args.fremovexattr.fn = fn;
+        stub->args.fremovexattr.fd = fd_ref (fd);
+        stub->args.fremovexattr.name = gf_strdup (name);
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
 
 
 call_stub_t *
+fop_fremovexattr_cbk_stub (call_frame_t *frame,
+                           fop_fremovexattr_cbk_t fn,
+                           int32_t op_ret,
+                           int32_t op_errno, dict_t *xdata)
+{
+        call_stub_t *stub = NULL;
+
+        GF_VALIDATE_OR_GOTO ("call-stub", frame, out);
+
+        stub = stub_new (frame, 0, GF_FOP_FREMOVEXATTR);
+        GF_VALIDATE_OR_GOTO ("call-stub", stub, out);
+
+        stub->args.fremovexattr_cbk.fn = fn;
+        stub->args.fremovexattr_cbk.op_ret = op_ret;
+        stub->args.fremovexattr_cbk.op_errno = op_errno;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
+out:
+        return stub;
+}
+
+call_stub_t *
 fop_lk_stub (call_frame_t *frame,
              fop_lk_t fn,
              fd_t *fd,
              int32_t cmd,
-             struct gf_flock *lock)
+             struct gf_flock *lock, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1484,6 +1679,9 @@ fop_lk_stub (call_frame_t *frame,
                 stub->args.lk.fd = fd_ref (fd);
         stub->args.lk.cmd = cmd;
         stub->args.lk.lock = *lock;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1494,8 +1692,7 @@ fop_lk_cbk_stub (call_frame_t *frame,
                  fop_lk_cbk_t fn,
                  int32_t op_ret,
                  int32_t op_errno,
-                 struct gf_flock *lock)
-
+                 struct gf_flock *lock, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1509,13 +1706,17 @@ fop_lk_cbk_stub (call_frame_t *frame,
         stub->args.lk_cbk.op_errno = op_errno;
         if (op_ret == 0)
                 stub->args.lk_cbk.lock = *lock;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
 
 call_stub_t *
 fop_inodelk_stub (call_frame_t *frame, fop_inodelk_t fn,
-                  const char *volume, loc_t *loc, int32_t cmd, struct gf_flock *lock)
+                  const char *volume, loc_t *loc, int32_t cmd,
+                  struct gf_flock *lock, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1533,13 +1734,16 @@ fop_inodelk_stub (call_frame_t *frame, fop_inodelk_t fn,
         loc_copy (&stub->args.inodelk.loc, loc);
         stub->args.inodelk.cmd  = cmd;
         stub->args.inodelk.lock = *lock;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
 
 call_stub_t *
 fop_inodelk_cbk_stub (call_frame_t *frame, fop_inodelk_cbk_t fn,
-                      int32_t op_ret, int32_t op_errno)
+                      int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1552,6 +1756,9 @@ fop_inodelk_cbk_stub (call_frame_t *frame, fop_inodelk_cbk_t fn,
         stub->args.inodelk_cbk.op_ret   = op_ret;
         stub->args.inodelk_cbk.op_errno = op_errno;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1559,7 +1766,8 @@ out:
 
 call_stub_t *
 fop_finodelk_stub (call_frame_t *frame, fop_finodelk_t fn,
-                   const char *volume, fd_t *fd, int32_t cmd, struct gf_flock *lock)
+                   const char *volume, fd_t *fd, int32_t cmd,
+                   struct gf_flock *lock, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1580,6 +1788,9 @@ fop_finodelk_stub (call_frame_t *frame, fop_finodelk_t fn,
         stub->args.finodelk.cmd  = cmd;
         stub->args.finodelk.lock = *lock;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1587,7 +1798,7 @@ out:
 
 call_stub_t *
 fop_finodelk_cbk_stub (call_frame_t *frame, fop_inodelk_cbk_t fn,
-                       int32_t op_ret, int32_t op_errno)
+                       int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1600,6 +1811,9 @@ fop_finodelk_cbk_stub (call_frame_t *frame, fop_inodelk_cbk_t fn,
         stub->args.finodelk_cbk.op_ret   = op_ret;
         stub->args.finodelk_cbk.op_errno = op_errno;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1608,7 +1822,7 @@ out:
 call_stub_t *
 fop_entrylk_stub (call_frame_t *frame, fop_entrylk_t fn,
                   const char *volume, loc_t *loc, const char *name,
-                  entrylk_cmd cmd, entrylk_type type)
+                  entrylk_cmd cmd, entrylk_type type, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1629,13 +1843,16 @@ fop_entrylk_stub (call_frame_t *frame, fop_entrylk_t fn,
         if (name)
                 stub->args.entrylk.name = gf_strdup (name);
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
 
 call_stub_t *
 fop_entrylk_cbk_stub (call_frame_t *frame, fop_entrylk_cbk_t fn,
-                      int32_t op_ret, int32_t op_errno)
+                      int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1648,6 +1865,9 @@ fop_entrylk_cbk_stub (call_frame_t *frame, fop_entrylk_cbk_t fn,
         stub->args.entrylk_cbk.op_ret   = op_ret;
         stub->args.entrylk_cbk.op_errno = op_errno;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1656,7 +1876,7 @@ out:
 call_stub_t *
 fop_fentrylk_stub (call_frame_t *frame, fop_fentrylk_t fn,
                    const char *volume, fd_t *fd, const char *name,
-                   entrylk_cmd cmd, entrylk_type type)
+                   entrylk_cmd cmd, entrylk_type type, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1677,13 +1897,16 @@ fop_fentrylk_stub (call_frame_t *frame, fop_fentrylk_t fn,
         if (name)
                 stub->args.fentrylk.name = gf_strdup (name);
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
 
 call_stub_t *
 fop_fentrylk_cbk_stub (call_frame_t *frame, fop_fentrylk_cbk_t fn,
-                       int32_t op_ret, int32_t op_errno)
+                       int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1696,6 +1919,9 @@ fop_fentrylk_cbk_stub (call_frame_t *frame, fop_fentrylk_cbk_t fn,
         stub->args.fentrylk_cbk.op_ret   = op_ret;
         stub->args.fentrylk_cbk.op_errno = op_errno;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1706,7 +1932,7 @@ fop_readdirp_cbk_stub (call_frame_t *frame,
                        fop_readdirp_cbk_t fn,
                        int32_t op_ret,
                        int32_t op_errno,
-                       gf_dirent_t *entries)
+                       gf_dirent_t *entries, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
         gf_dirent_t *stub_entry = NULL, *entry = NULL;
@@ -1738,6 +1964,9 @@ fop_readdirp_cbk_stub (call_frame_t *frame,
                                        &stub->args.readdirp_cbk.entries.list);
                 }
         }
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1748,7 +1977,7 @@ fop_readdir_cbk_stub (call_frame_t *frame,
                       fop_readdir_cbk_t fn,
                       int32_t op_ret,
                       int32_t op_errno,
-                      gf_dirent_t *entries)
+                      gf_dirent_t *entries, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
         gf_dirent_t *stub_entry = NULL, *entry = NULL;
@@ -1780,6 +2009,9 @@ fop_readdir_cbk_stub (call_frame_t *frame,
                                        &stub->args.readdir_cbk.entries.list);
                 }
         }
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1789,7 +2021,7 @@ fop_readdir_stub (call_frame_t *frame,
                   fop_readdir_t fn,
                   fd_t *fd,
                   size_t size,
-                  off_t off)
+                  off_t off, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1801,6 +2033,9 @@ fop_readdir_stub (call_frame_t *frame,
         stub->args.readdir.size = size;
         stub->args.readdir.off = off;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1810,7 +2045,8 @@ fop_readdirp_stub (call_frame_t *frame,
                    fop_readdirp_t fn,
                    fd_t *fd,
                    size_t size,
-                   off_t off)
+                   off_t off,
+                   dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1821,6 +2057,8 @@ fop_readdirp_stub (call_frame_t *frame,
         stub->args.readdirp.fd = fd_ref (fd);
         stub->args.readdirp.size = size;
         stub->args.readdirp.off = off;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
 
 out:
         return stub;
@@ -1830,7 +2068,7 @@ call_stub_t *
 fop_rchecksum_stub (call_frame_t *frame,
                     fop_rchecksum_t fn,
                     fd_t *fd, off_t offset,
-                    int32_t len)
+                    int32_t len, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1844,6 +2082,9 @@ fop_rchecksum_stub (call_frame_t *frame,
         stub->args.rchecksum.fd = fd_ref (fd);
         stub->args.rchecksum.offset = offset;
         stub->args.rchecksum.len    = len;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1855,7 +2096,7 @@ fop_rchecksum_cbk_stub (call_frame_t *frame,
                         int32_t op_ret,
                         int32_t op_errno,
                         uint32_t weak_checksum,
-                        uint8_t *strong_checksum)
+                        uint8_t *strong_checksum, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1874,8 +2115,11 @@ fop_rchecksum_cbk_stub (call_frame_t *frame,
                         weak_checksum;
 
                 stub->args.rchecksum_cbk.strong_checksum =
-                        memdup (strong_checksum, MD5_DIGEST_LEN);
+                        memdup (strong_checksum, MD5_DIGEST_LENGTH);
         }
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1885,7 +2129,7 @@ call_stub_t *
 fop_xattrop_cbk_stub (call_frame_t *frame,
                       fop_xattrop_cbk_t fn,
                       int32_t op_ret,
-                      int32_t op_errno)
+                      int32_t op_errno, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1898,6 +2142,9 @@ fop_xattrop_cbk_stub (call_frame_t *frame,
         stub->args.xattrop_cbk.op_ret   = op_ret;
         stub->args.xattrop_cbk.op_errno = op_errno;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1908,7 +2155,7 @@ fop_fxattrop_cbk_stub (call_frame_t *frame,
                        fop_fxattrop_cbk_t fn,
                        int32_t op_ret,
                        int32_t op_errno,
-                       dict_t *xattr)
+                       dict_t *xattr, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
         GF_VALIDATE_OR_GOTO ("call-stub", frame, out);
@@ -1922,6 +2169,9 @@ fop_fxattrop_cbk_stub (call_frame_t *frame,
         if (xattr)
                 stub->args.fxattrop_cbk.xattr = dict_ref (xattr);
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1932,7 +2182,7 @@ fop_xattrop_stub (call_frame_t *frame,
                   fop_xattrop_t fn,
                   loc_t *loc,
                   gf_xattrop_flags_t optype,
-                  dict_t *xattr)
+                  dict_t *xattr, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1949,6 +2199,9 @@ fop_xattrop_stub (call_frame_t *frame,
         stub->args.xattrop.optype = optype;
         stub->args.xattrop.xattr = dict_ref (xattr);
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1958,7 +2211,7 @@ fop_fxattrop_stub (call_frame_t *frame,
                    fop_fxattrop_t fn,
                    fd_t *fd,
                    gf_xattrop_flags_t optype,
-                   dict_t *xattr)
+                   dict_t *xattr, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -1975,6 +2228,9 @@ fop_fxattrop_stub (call_frame_t *frame,
         stub->args.fxattrop.optype = optype;
         stub->args.fxattrop.xattr = dict_ref (xattr);
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -1986,7 +2242,7 @@ fop_setattr_cbk_stub (call_frame_t *frame,
                       int32_t op_ret,
                       int32_t op_errno,
                       struct iatt *statpre,
-                      struct iatt *statpost)
+                      struct iatt *statpost, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -2005,6 +2261,9 @@ fop_setattr_cbk_stub (call_frame_t *frame,
         if (statpost)
                 stub->args.setattr_cbk.statpost = *statpost;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -2015,7 +2274,7 @@ fop_fsetattr_cbk_stub (call_frame_t *frame,
                        int32_t op_ret,
                        int32_t op_errno,
                        struct iatt *statpre,
-                       struct iatt *statpost)
+                       struct iatt *statpost, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -2033,6 +2292,9 @@ fop_fsetattr_cbk_stub (call_frame_t *frame,
                 stub->args.setattr_cbk.statpre = *statpre;
         if (statpost)
                 stub->args.fsetattr_cbk.statpost = *statpost;
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -2042,7 +2304,7 @@ fop_setattr_stub (call_frame_t *frame,
                   fop_setattr_t fn,
                   loc_t *loc,
                   struct iatt *stbuf,
-                  int32_t valid)
+                  int32_t valid, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -2061,6 +2323,9 @@ fop_setattr_stub (call_frame_t *frame,
 
         stub->args.setattr.valid = valid;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -2070,7 +2335,7 @@ fop_fsetattr_stub (call_frame_t *frame,
                    fop_fsetattr_t fn,
                    fd_t *fd,
                    struct iatt *stbuf,
-                   int32_t valid)
+                   int32_t valid, dict_t *xdata)
 {
         call_stub_t *stub = NULL;
 
@@ -2090,6 +2355,9 @@ fop_fsetattr_stub (call_frame_t *frame,
 
         stub->args.fsetattr.valid = valid;
 
+        if (xdata)
+                stub->xdata = dict_ref (xdata);
+
 out:
         return stub;
 }
@@ -2106,7 +2374,7 @@ call_resume_wind (call_stub_t *stub)
                                     stub->frame->this,
                                     &stub->args.open.loc,
                                     stub->args.open.flags, stub->args.open.fd,
-                                    stub->args.open.wbflags);
+                                    stub->xdata);
                 break;
         }
         case GF_FOP_CREATE:
@@ -2116,15 +2384,16 @@ call_resume_wind (call_stub_t *stub)
                                       &stub->args.create.loc,
                                       stub->args.create.flags,
                                       stub->args.create.mode,
+                                      stub->args.create.umask,
                                       stub->args.create.fd,
-                                      stub->args.create.params);
+                                      stub->xdata);
                 break;
         }
         case GF_FOP_STAT:
         {
                 stub->args.stat.fn (stub->frame,
                                     stub->frame->this,
-                                    &stub->args.stat.loc);
+                                    &stub->args.stat.loc, stub->xdata);
                 break;
         }
         case GF_FOP_READLINK:
@@ -2132,7 +2401,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.readlink.fn (stub->frame,
                                         stub->frame->this,
                                         &stub->args.readlink.loc,
-                                        stub->args.readlink.size);
+                                        stub->args.readlink.size, stub->xdata);
                 break;
         }
 
@@ -2142,7 +2411,7 @@ call_resume_wind (call_stub_t *stub)
                                      &stub->args.mknod.loc,
                                      stub->args.mknod.mode,
                                      stub->args.mknod.rdev,
-                                     stub->args.mknod.params);
+                                     stub->args.mknod.umask, stub->xdata);
         }
         break;
 
@@ -2151,7 +2420,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.mkdir.fn (stub->frame, stub->frame->this,
                                      &stub->args.mkdir.loc,
                                      stub->args.mkdir.mode,
-                                     stub->args.mkdir.params);
+                                     stub->args.mkdir.umask, stub->xdata);
         }
         break;
 
@@ -2159,7 +2428,8 @@ call_resume_wind (call_stub_t *stub)
         {
                 stub->args.unlink.fn (stub->frame,
                                       stub->frame->this,
-                                      &stub->args.unlink.loc);
+                                      &stub->args.unlink.loc,
+                                      stub->args.unlink.xflag, stub->xdata);
         }
         break;
 
@@ -2167,7 +2437,7 @@ call_resume_wind (call_stub_t *stub)
         {
                 stub->args.rmdir.fn (stub->frame, stub->frame->this,
                                      &stub->args.rmdir.loc,
-                                     stub->args.rmdir.flags);
+                                     stub->args.rmdir.flags, stub->xdata);
         }
         break;
 
@@ -2177,7 +2447,7 @@ call_resume_wind (call_stub_t *stub)
                                        stub->frame->this,
                                        stub->args.symlink.linkname,
                                        &stub->args.symlink.loc,
-                                       stub->args.symlink.params);
+                                       stub->args.symlink.umask, stub->xdata);
         }
         break;
 
@@ -2186,7 +2456,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.rename.fn (stub->frame,
                                       stub->frame->this,
                                       &stub->args.rename.old,
-                                      &stub->args.rename.new);
+                                      &stub->args.rename.new, stub->xdata);
         }
         break;
 
@@ -2195,7 +2465,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.link.fn (stub->frame,
                                     stub->frame->this,
                                     &stub->args.link.oldloc,
-                                    &stub->args.link.newloc);
+                                    &stub->args.link.newloc, stub->xdata);
         }
         break;
 
@@ -2204,7 +2474,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.truncate.fn (stub->frame,
                                         stub->frame->this,
                                         &stub->args.truncate.loc,
-                                        stub->args.truncate.off);
+                                        stub->args.truncate.off, stub->xdata);
                 break;
         }
 
@@ -2214,7 +2484,8 @@ call_resume_wind (call_stub_t *stub)
                                      stub->frame->this,
                                      stub->args.readv.fd,
                                      stub->args.readv.size,
-                                     stub->args.readv.off);
+                                     stub->args.readv.off,
+                                     stub->args.readv.flags, stub->xdata);
                 break;
         }
 
@@ -2226,7 +2497,8 @@ call_resume_wind (call_stub_t *stub)
                                       stub->args.writev.vector,
                                       stub->args.writev.count,
                                       stub->args.writev.off,
-                                      stub->args.writev.iobref);
+                                      stub->args.writev.flags,
+                                      stub->args.writev.iobref, stub->xdata);
                 break;
         }
 
@@ -2234,14 +2506,14 @@ call_resume_wind (call_stub_t *stub)
         {
                 stub->args.statfs.fn (stub->frame,
                                       stub->frame->this,
-                                      &stub->args.statfs.loc);
+                                      &stub->args.statfs.loc, stub->xdata);
                 break;
         }
         case GF_FOP_FLUSH:
         {
                 stub->args.flush.fn (stub->frame,
                                      stub->frame->this,
-                                     stub->args.flush.fd);
+                                     stub->args.flush.fd, stub->xdata);
                 break;
         }
 
@@ -2250,7 +2522,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.fsync.fn (stub->frame,
                                      stub->frame->this,
                                      stub->args.fsync.fd,
-                                     stub->args.fsync.datasync);
+                                     stub->args.fsync.datasync, stub->xdata);
                 break;
         }
 
@@ -2260,7 +2532,7 @@ call_resume_wind (call_stub_t *stub)
                                         stub->frame->this,
                                         &stub->args.setxattr.loc,
                                         stub->args.setxattr.dict,
-                                        stub->args.setxattr.flags);
+                                        stub->args.setxattr.flags, stub->xdata);
                 break;
         }
 
@@ -2269,7 +2541,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.getxattr.fn (stub->frame,
                                         stub->frame->this,
                                         &stub->args.getxattr.loc,
-                                        stub->args.getxattr.name);
+                                        stub->args.getxattr.name, stub->xdata);
                 break;
         }
 
@@ -2279,7 +2551,7 @@ call_resume_wind (call_stub_t *stub)
                                          stub->frame->this,
                                          stub->args.fsetxattr.fd,
                                          stub->args.fsetxattr.dict,
-                                         stub->args.fsetxattr.flags);
+                                         stub->args.fsetxattr.flags, stub->xdata);
                 break;
         }
 
@@ -2288,7 +2560,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.fgetxattr.fn (stub->frame,
                                          stub->frame->this,
                                          stub->args.fgetxattr.fd,
-                                         stub->args.fgetxattr.name);
+                                         stub->args.fgetxattr.name, stub->xdata);
                 break;
         }
 
@@ -2297,7 +2569,16 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.removexattr.fn (stub->frame,
                                            stub->frame->this,
                                            &stub->args.removexattr.loc,
-                                           stub->args.removexattr.name);
+                                           stub->args.removexattr.name, stub->xdata);
+                break;
+        }
+
+        case GF_FOP_FREMOVEXATTR:
+        {
+                stub->args.fremovexattr.fn (stub->frame,
+                                            stub->frame->this,
+                                            stub->args.fremovexattr.fd,
+                                            stub->args.fremovexattr.name, stub->xdata);
                 break;
         }
 
@@ -2306,7 +2587,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.opendir.fn (stub->frame,
                                        stub->frame->this,
                                        &stub->args.opendir.loc,
-                                       stub->args.opendir.fd);
+                                       stub->args.opendir.fd, stub->xdata);
                 break;
         }
 
@@ -2315,7 +2596,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.fsyncdir.fn (stub->frame,
                                         stub->frame->this,
                                         stub->args.fsyncdir.fd,
-                                        stub->args.fsyncdir.datasync);
+                                        stub->args.fsyncdir.datasync, stub->xdata);
                 break;
         }
 
@@ -2324,7 +2605,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.access.fn (stub->frame,
                                       stub->frame->this,
                                       &stub->args.access.loc,
-                                      stub->args.access.mask);
+                                      stub->args.access.mask, stub->xdata);
                 break;
         }
 
@@ -2333,7 +2614,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.ftruncate.fn (stub->frame,
                                          stub->frame->this,
                                          stub->args.ftruncate.fd,
-                                         stub->args.ftruncate.off);
+                                         stub->args.ftruncate.off, stub->xdata);
                 break;
         }
 
@@ -2341,7 +2622,7 @@ call_resume_wind (call_stub_t *stub)
         {
                 stub->args.fstat.fn (stub->frame,
                                      stub->frame->this,
-                                     stub->args.fstat.fd);
+                                     stub->args.fstat.fd, stub->xdata);
                 break;
         }
 
@@ -2351,7 +2632,7 @@ call_resume_wind (call_stub_t *stub)
                                   stub->frame->this,
                                   stub->args.lk.fd,
                                   stub->args.lk.cmd,
-                                  &stub->args.lk.lock);
+                                  &stub->args.lk.lock, stub->xdata);
                 break;
         }
 
@@ -2362,7 +2643,7 @@ call_resume_wind (call_stub_t *stub)
                                        stub->args.inodelk.volume,
                                        &stub->args.inodelk.loc,
                                        stub->args.inodelk.cmd,
-                                       &stub->args.inodelk.lock);
+                                       &stub->args.inodelk.lock, stub->xdata);
                 break;
         }
 
@@ -2373,7 +2654,7 @@ call_resume_wind (call_stub_t *stub)
                                         stub->args.finodelk.volume,
                                         stub->args.finodelk.fd,
                                         stub->args.finodelk.cmd,
-                                        &stub->args.finodelk.lock);
+                                        &stub->args.finodelk.lock, stub->xdata);
                 break;
         }
 
@@ -2385,7 +2666,7 @@ call_resume_wind (call_stub_t *stub)
                                        &stub->args.entrylk.loc,
                                        stub->args.entrylk.name,
                                        stub->args.entrylk.cmd,
-                                       stub->args.entrylk.type);
+                                       stub->args.entrylk.type, stub->xdata);
                 break;
         }
 
@@ -2397,7 +2678,7 @@ call_resume_wind (call_stub_t *stub)
                                         stub->args.fentrylk.fd,
                                         stub->args.fentrylk.name,
                                         stub->args.fentrylk.cmd,
-                                        stub->args.fentrylk.type);
+                                        stub->args.fentrylk.type, stub->xdata);
                 break;
         }
 
@@ -2408,7 +2689,7 @@ call_resume_wind (call_stub_t *stub)
                 stub->args.lookup.fn (stub->frame,
                                       stub->frame->this,
                                       &stub->args.lookup.loc,
-                                      stub->args.lookup.xattr_req);
+                                      stub->xdata);
                 break;
         }
 
@@ -2418,7 +2699,7 @@ call_resume_wind (call_stub_t *stub)
                                          stub->frame->this,
                                          stub->args.rchecksum.fd,
                                          stub->args.rchecksum.offset,
-                                         stub->args.rchecksum.len);
+                                         stub->args.rchecksum.len, stub->xdata);
                 break;
         }
 
@@ -2428,7 +2709,7 @@ call_resume_wind (call_stub_t *stub)
                                        stub->frame->this,
                                        stub->args.readdir.fd,
                                        stub->args.readdir.size,
-                                       stub->args.readdir.off);
+                                       stub->args.readdir.off, stub->xdata);
                 break;
         }
 
@@ -2438,7 +2719,8 @@ call_resume_wind (call_stub_t *stub)
                                         stub->frame->this,
                                         stub->args.readdirp.fd,
                                         stub->args.readdirp.size,
-                                        stub->args.readdirp.off);
+                                        stub->args.readdirp.off,
+                                        stub->xdata);
                 break;
         }
 
@@ -2448,7 +2730,7 @@ call_resume_wind (call_stub_t *stub)
                                        stub->frame->this,
                                        &stub->args.xattrop.loc,
                                        stub->args.xattrop.optype,
-                                       stub->args.xattrop.xattr);
+                                       stub->args.xattrop.xattr, stub->xdata);
 
                 break;
         }
@@ -2458,7 +2740,7 @@ call_resume_wind (call_stub_t *stub)
                                         stub->frame->this,
                                         stub->args.fxattrop.fd,
                                         stub->args.fxattrop.optype,
-                                        stub->args.fxattrop.xattr);
+                                        stub->args.fxattrop.xattr, stub->xdata);
 
                 break;
         }
@@ -2468,7 +2750,7 @@ call_resume_wind (call_stub_t *stub)
                                        stub->frame->this,
                                        &stub->args.setattr.loc,
                                        &stub->args.setattr.stbuf,
-                                       stub->args.setattr.valid);
+                                       stub->args.setattr.valid, stub->xdata);
                 break;
         }
         case GF_FOP_FSETATTR:
@@ -2477,7 +2759,7 @@ call_resume_wind (call_stub_t *stub)
                                         stub->frame->this,
                                         stub->args.fsetattr.fd,
                                         &stub->args.fsetattr.stbuf,
-                                        stub->args.fsetattr.valid);
+                                        stub->args.fsetattr.valid, stub->xdata);
                 break;
         }
         default:
@@ -2507,14 +2789,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.open_cbk.op_ret,
                                       stub->args.open_cbk.op_errno,
-                                      stub->args.open_cbk.fd);
+                                      stub->args.open_cbk.fd, stub->xdata);
                 else
                         stub->args.open_cbk.fn (stub->frame,
                                                 stub->frame->cookie,
                                                 stub->frame->this,
                                                 stub->args.open_cbk.op_ret,
                                                 stub->args.open_cbk.op_errno,
-                                                stub->args.open_cbk.fd);
+                                                stub->args.open_cbk.fd, stub->xdata);
                 break;
         }
 
@@ -2528,7 +2810,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.create_cbk.inode,
                                       &stub->args.create_cbk.buf,
                                       &stub->args.create_cbk.preparent,
-                                      &stub->args.create_cbk.postparent);
+                                      &stub->args.create_cbk.postparent, stub->xdata);
                 else
                         stub->args.create_cbk.fn (stub->frame,
                                                   stub->frame->cookie,
@@ -2539,7 +2821,7 @@ call_resume_unwind (call_stub_t *stub)
                                                   stub->args.create_cbk.inode,
                                                   &stub->args.create_cbk.buf,
                                                   &stub->args.create_cbk.preparent,
-                                                  &stub->args.create_cbk.postparent);
+                                                  &stub->args.create_cbk.postparent, stub->xdata);
 
                 break;
         }
@@ -2550,14 +2832,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.stat_cbk.op_ret,
                                       stub->args.stat_cbk.op_errno,
-                                      &stub->args.stat_cbk.buf);
+                                      &stub->args.stat_cbk.buf, stub->xdata);
                 else
                         stub->args.stat_cbk.fn (stub->frame,
                                                 stub->frame->cookie,
                                                 stub->frame->this,
                                                 stub->args.stat_cbk.op_ret,
                                                 stub->args.stat_cbk.op_errno,
-                                                &stub->args.stat_cbk.buf);
+                                                &stub->args.stat_cbk.buf, stub->xdata);
 
                 break;
         }
@@ -2569,7 +2851,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.readlink_cbk.op_ret,
                                       stub->args.readlink_cbk.op_errno,
                                       stub->args.readlink_cbk.buf,
-                                      &stub->args.readlink_cbk.sbuf);
+                                      &stub->args.readlink_cbk.sbuf, stub->xdata);
                 else
                         stub->args.readlink_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
@@ -2577,7 +2859,7 @@ call_resume_unwind (call_stub_t *stub)
                                                     stub->args.readlink_cbk.op_ret,
                                                     stub->args.readlink_cbk.op_errno,
                                                     stub->args.readlink_cbk.buf,
-                                                    &stub->args.readlink_cbk.sbuf);
+                                                    &stub->args.readlink_cbk.sbuf, stub->xdata);
 
                 break;
         }
@@ -2591,7 +2873,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.mknod_cbk.inode,
                                       &stub->args.mknod_cbk.buf,
                                       &stub->args.mknod_cbk.preparent,
-                                      &stub->args.mknod_cbk.postparent);
+                                      &stub->args.mknod_cbk.postparent, stub->xdata);
                 else
                         stub->args.mknod_cbk.fn (stub->frame,
                                                  stub->frame->cookie,
@@ -2601,7 +2883,7 @@ call_resume_unwind (call_stub_t *stub)
                                                  stub->args.mknod_cbk.inode,
                                                  &stub->args.mknod_cbk.buf,
                                                  &stub->args.mknod_cbk.preparent,
-                                                 &stub->args.mknod_cbk.postparent);
+                                                 &stub->args.mknod_cbk.postparent, stub->xdata);
                 break;
         }
 
@@ -2614,7 +2896,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.mkdir_cbk.inode,
                                       &stub->args.mkdir_cbk.buf,
                                       &stub->args.mkdir_cbk.preparent,
-                                      &stub->args.mkdir_cbk.postparent);
+                                      &stub->args.mkdir_cbk.postparent, stub->xdata);
                 else
                         stub->args.mkdir_cbk.fn (stub->frame,
                                                  stub->frame->cookie,
@@ -2624,7 +2906,7 @@ call_resume_unwind (call_stub_t *stub)
                                                  stub->args.mkdir_cbk.inode,
                                                  &stub->args.mkdir_cbk.buf,
                                                  &stub->args.mkdir_cbk.preparent,
-                                                 &stub->args.mkdir_cbk.postparent);
+                                                 &stub->args.mkdir_cbk.postparent, stub->xdata);
 
                 if (stub->args.mkdir_cbk.inode)
                         inode_unref (stub->args.mkdir_cbk.inode);
@@ -2639,7 +2921,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.unlink_cbk.op_ret,
                                       stub->args.unlink_cbk.op_errno,
                                       &stub->args.unlink_cbk.preparent,
-                                      &stub->args.unlink_cbk.postparent);
+                                      &stub->args.unlink_cbk.postparent, stub->xdata);
                 else
                         stub->args.unlink_cbk.fn (stub->frame,
                                                   stub->frame->cookie,
@@ -2647,7 +2929,7 @@ call_resume_unwind (call_stub_t *stub)
                                                   stub->args.unlink_cbk.op_ret,
                                                   stub->args.unlink_cbk.op_errno,
                                                   &stub->args.unlink_cbk.preparent,
-                                                  &stub->args.unlink_cbk.postparent);
+                                                  &stub->args.unlink_cbk.postparent, stub->xdata);
                 break;
         }
 
@@ -2658,7 +2940,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.rmdir_cbk.op_ret,
                                       stub->args.rmdir_cbk.op_errno,
                                       &stub->args.rmdir_cbk.preparent,
-                                      &stub->args.rmdir_cbk.postparent);
+                                      &stub->args.rmdir_cbk.postparent, stub->xdata);
                 else
                         stub->args.rmdir_cbk.fn (stub->frame,
                                                  stub->frame->cookie,
@@ -2666,7 +2948,7 @@ call_resume_unwind (call_stub_t *stub)
                                                  stub->args.rmdir_cbk.op_ret,
                                                  stub->args.rmdir_cbk.op_errno,
                                                  &stub->args.rmdir_cbk.preparent,
-                                                 &stub->args.rmdir_cbk.postparent);
+                                                 &stub->args.rmdir_cbk.postparent, stub->xdata);
                 break;
         }
 
@@ -2679,7 +2961,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.symlink_cbk.inode,
                                       &stub->args.symlink_cbk.buf,
                                       &stub->args.symlink_cbk.preparent,
-                                      &stub->args.symlink_cbk.postparent);
+                                      &stub->args.symlink_cbk.postparent, stub->xdata);
                 else
                         stub->args.symlink_cbk.fn (stub->frame,
                                                    stub->frame->cookie,
@@ -2689,7 +2971,7 @@ call_resume_unwind (call_stub_t *stub)
                                                    stub->args.symlink_cbk.inode,
                                                    &stub->args.symlink_cbk.buf,
                                                    &stub->args.symlink_cbk.preparent,
-                                                   &stub->args.symlink_cbk.postparent);
+                                                   &stub->args.symlink_cbk.postparent, stub->xdata);
         }
         break;
 
@@ -2703,7 +2985,7 @@ call_resume_unwind (call_stub_t *stub)
                                       &stub->args.rename_cbk.preoldparent,
                                       &stub->args.rename_cbk.postoldparent,
                                       &stub->args.rename_cbk.prenewparent,
-                                      &stub->args.rename_cbk.postnewparent);
+                                      &stub->args.rename_cbk.postnewparent, stub->xdata);
                 else
                         stub->args.rename_cbk.fn (stub->frame,
                                                   stub->frame->cookie,
@@ -2714,7 +2996,7 @@ call_resume_unwind (call_stub_t *stub)
                                                   &stub->args.rename_cbk.preoldparent,
                                                   &stub->args.rename_cbk.postoldparent,
                                                   &stub->args.rename_cbk.prenewparent,
-                                                  &stub->args.rename_cbk.postnewparent);
+                                                  &stub->args.rename_cbk.postnewparent, stub->xdata);
                 break;
         }
 
@@ -2725,7 +3007,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.link_cbk.op_ret,
                                       stub->args.link_cbk.op_errno,
                                       stub->args.link_cbk.inode,
-                                      &stub->args.link_cbk.buf);
+                                      &stub->args.link_cbk.buf, stub->xdata);
                 else
                         stub->args.link_cbk.fn (stub->frame,
                                                 stub->frame->cookie,
@@ -2735,7 +3017,7 @@ call_resume_unwind (call_stub_t *stub)
                                                 stub->args.link_cbk.inode,
                                                 &stub->args.link_cbk.buf,
                                                 &stub->args.link_cbk.preparent,
-                                                &stub->args.link_cbk.postparent);
+                                                &stub->args.link_cbk.postparent, stub->xdata);
                 break;
         }
 
@@ -2746,7 +3028,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.truncate_cbk.op_ret,
                                       stub->args.truncate_cbk.op_errno,
                                       &stub->args.truncate_cbk.prebuf,
-                                      &stub->args.truncate_cbk.postbuf);
+                                      &stub->args.truncate_cbk.postbuf, stub->xdata);
                 else
                         stub->args.truncate_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
@@ -2754,7 +3036,7 @@ call_resume_unwind (call_stub_t *stub)
                                                     stub->args.truncate_cbk.op_ret,
                                                     stub->args.truncate_cbk.op_errno,
                                                     &stub->args.truncate_cbk.prebuf,
-                                                    &stub->args.truncate_cbk.postbuf);
+                                                    &stub->args.truncate_cbk.postbuf, stub->xdata);
                 break;
         }
 
@@ -2767,7 +3049,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.readv_cbk.vector,
                                       stub->args.readv_cbk.count,
                                       &stub->args.readv_cbk.stbuf,
-                                      stub->args.readv_cbk.iobref);
+                                      stub->args.readv_cbk.iobref, stub->xdata);
                 else
                         stub->args.readv_cbk.fn (stub->frame,
                                                  stub->frame->cookie,
@@ -2777,7 +3059,7 @@ call_resume_unwind (call_stub_t *stub)
                                                  stub->args.readv_cbk.vector,
                                                  stub->args.readv_cbk.count,
                                                  &stub->args.readv_cbk.stbuf,
-                                                 stub->args.readv_cbk.iobref);
+                                                 stub->args.readv_cbk.iobref, stub->xdata);
         }
         break;
 
@@ -2788,7 +3070,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.writev_cbk.op_ret,
                                       stub->args.writev_cbk.op_errno,
                                       &stub->args.writev_cbk.prebuf,
-                                      &stub->args.writev_cbk.postbuf);
+                                      &stub->args.writev_cbk.postbuf, stub->xdata);
                 else
                         stub->args.writev_cbk.fn (stub->frame,
                                                   stub->frame->cookie,
@@ -2796,7 +3078,7 @@ call_resume_unwind (call_stub_t *stub)
                                                   stub->args.writev_cbk.op_ret,
                                                   stub->args.writev_cbk.op_errno,
                                                   &stub->args.writev_cbk.prebuf,
-                                                  &stub->args.writev_cbk.postbuf);
+                                                  &stub->args.writev_cbk.postbuf, stub->xdata);
                 break;
         }
 
@@ -2806,14 +3088,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.statfs_cbk.op_ret,
                                       stub->args.statfs_cbk.op_errno,
-                                      &(stub->args.statfs_cbk.buf));
+                                      &(stub->args.statfs_cbk.buf), stub->xdata);
                 else
                         stub->args.statfs_cbk.fn (stub->frame,
                                                   stub->frame->cookie,
                                                   stub->frame->this,
                                                   stub->args.statfs_cbk.op_ret,
                                                   stub->args.statfs_cbk.op_errno,
-                                                  &(stub->args.statfs_cbk.buf));
+                                                  &(stub->args.statfs_cbk.buf), stub->xdata);
         }
         break;
 
@@ -2822,13 +3104,13 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.flush_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.flush_cbk.op_ret,
-                                      stub->args.flush_cbk.op_errno);
+                                      stub->args.flush_cbk.op_errno, stub->xdata);
                 else
                         stub->args.flush_cbk.fn (stub->frame,
                                                  stub->frame->cookie,
                                                  stub->frame->this,
                                                  stub->args.flush_cbk.op_ret,
-                                                 stub->args.flush_cbk.op_errno);
+                                                 stub->args.flush_cbk.op_errno, stub->xdata);
 
                 break;
         }
@@ -2840,7 +3122,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.fsync_cbk.op_ret,
                                       stub->args.fsync_cbk.op_errno,
                                       &stub->args.fsync_cbk.prebuf,
-                                      &stub->args.fsync_cbk.postbuf);
+                                      &stub->args.fsync_cbk.postbuf, stub->xdata);
                 else
                         stub->args.fsync_cbk.fn (stub->frame,
                                                  stub->frame->cookie,
@@ -2848,7 +3130,7 @@ call_resume_unwind (call_stub_t *stub)
                                                  stub->args.fsync_cbk.op_ret,
                                                  stub->args.fsync_cbk.op_errno,
                                                  &stub->args.fsync_cbk.prebuf,
-                                                 &stub->args.fsync_cbk.postbuf);
+                                                 &stub->args.fsync_cbk.postbuf, stub->xdata);
                 break;
         }
 
@@ -2857,14 +3139,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.setxattr_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.setxattr_cbk.op_ret,
-                                      stub->args.setxattr_cbk.op_errno);
+                                      stub->args.setxattr_cbk.op_errno, stub->xdata);
 
                 else
                         stub->args.setxattr_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
                                                     stub->frame->this,
                                                     stub->args.setxattr_cbk.op_ret,
-                                                    stub->args.setxattr_cbk.op_errno);
+                                                    stub->args.setxattr_cbk.op_errno, stub->xdata);
 
                 break;
         }
@@ -2875,14 +3157,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.getxattr_cbk.op_ret,
                                       stub->args.getxattr_cbk.op_errno,
-                                      stub->args.getxattr_cbk.dict);
+                                      stub->args.getxattr_cbk.dict, stub->xdata);
                 else
                         stub->args.getxattr_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
                                                     stub->frame->this,
                                                     stub->args.getxattr_cbk.op_ret,
                                                     stub->args.getxattr_cbk.op_errno,
-                                                    stub->args.getxattr_cbk.dict);
+                                                    stub->args.getxattr_cbk.dict, stub->xdata);
                 break;
         }
 
@@ -2891,14 +3173,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.fsetxattr_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.fsetxattr_cbk.op_ret,
-                                      stub->args.fsetxattr_cbk.op_errno);
+                                      stub->args.fsetxattr_cbk.op_errno, stub->xdata);
 
                 else
                         stub->args.fsetxattr_cbk.fn (stub->frame,
                                                      stub->frame->cookie,
                                                      stub->frame->this,
                                                      stub->args.fsetxattr_cbk.op_ret,
-                                                     stub->args.fsetxattr_cbk.op_errno);
+                                                     stub->args.fsetxattr_cbk.op_errno, stub->xdata);
 
                 break;
         }
@@ -2909,14 +3191,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.fgetxattr_cbk.op_ret,
                                       stub->args.fgetxattr_cbk.op_errno,
-                                      stub->args.fgetxattr_cbk.dict);
+                                      stub->args.fgetxattr_cbk.dict, stub->xdata);
                 else
                         stub->args.fgetxattr_cbk.fn (stub->frame,
                                                      stub->frame->cookie,
                                                      stub->frame->this,
                                                      stub->args.fgetxattr_cbk.op_ret,
                                                      stub->args.fgetxattr_cbk.op_errno,
-                                                     stub->args.fgetxattr_cbk.dict);
+                                                     stub->args.fgetxattr_cbk.dict, stub->xdata);
                 break;
         }
 
@@ -2925,13 +3207,29 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.removexattr_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.removexattr_cbk.op_ret,
-                                      stub->args.removexattr_cbk.op_errno);
+                                      stub->args.removexattr_cbk.op_errno, stub->xdata);
                 else
                         stub->args.removexattr_cbk.fn (stub->frame,
                                                        stub->frame->cookie,
                                                        stub->frame->this,
                                                        stub->args.removexattr_cbk.op_ret,
-                                                       stub->args.removexattr_cbk.op_errno);
+                                                       stub->args.removexattr_cbk.op_errno, stub->xdata);
+
+                break;
+        }
+
+        case GF_FOP_FREMOVEXATTR:
+        {
+                if (!stub->args.fremovexattr_cbk.fn)
+                        STACK_UNWIND (stub->frame,
+                                      stub->args.fremovexattr_cbk.op_ret,
+                                      stub->args.fremovexattr_cbk.op_errno, stub->xdata);
+                else
+                        stub->args.fremovexattr_cbk.fn (stub->frame,
+                                                        stub->frame->cookie,
+                                                        stub->frame->this,
+                                                        stub->args.fremovexattr_cbk.op_ret,
+                                                        stub->args.fremovexattr_cbk.op_errno, stub->xdata);
 
                 break;
         }
@@ -2942,14 +3240,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.opendir_cbk.op_ret,
                                       stub->args.opendir_cbk.op_errno,
-                                      stub->args.opendir_cbk.fd);
+                                      stub->args.opendir_cbk.fd, stub->xdata);
                 else
                         stub->args.opendir_cbk.fn (stub->frame,
                                                    stub->frame->cookie,
                                                    stub->frame->this,
                                                    stub->args.opendir_cbk.op_ret,
                                                    stub->args.opendir_cbk.op_errno,
-                                                   stub->args.opendir_cbk.fd);
+                                                   stub->args.opendir_cbk.fd, stub->xdata);
                 break;
         }
 
@@ -2958,13 +3256,13 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.fsyncdir_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.fsyncdir_cbk.op_ret,
-                                      stub->args.fsyncdir_cbk.op_errno);
+                                      stub->args.fsyncdir_cbk.op_errno, stub->xdata);
                 else
                         stub->args.fsyncdir_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
                                                     stub->frame->this,
                                                     stub->args.fsyncdir_cbk.op_ret,
-                                                    stub->args.fsyncdir_cbk.op_errno);
+                                                    stub->args.fsyncdir_cbk.op_errno, stub->xdata);
                 break;
         }
 
@@ -2973,13 +3271,13 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.access_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.access_cbk.op_ret,
-                                      stub->args.access_cbk.op_errno);
+                                      stub->args.access_cbk.op_errno, stub->xdata);
                 else
                         stub->args.access_cbk.fn (stub->frame,
                                                   stub->frame->cookie,
                                                   stub->frame->this,
                                                   stub->args.access_cbk.op_ret,
-                                                  stub->args.access_cbk.op_errno);
+                                                  stub->args.access_cbk.op_errno, stub->xdata);
 
                 break;
         }
@@ -2991,7 +3289,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.ftruncate_cbk.op_ret,
                                       stub->args.ftruncate_cbk.op_errno,
                                       &stub->args.ftruncate_cbk.prebuf,
-                                      &stub->args.ftruncate_cbk.postbuf);
+                                      &stub->args.ftruncate_cbk.postbuf, stub->xdata);
                 else
                         stub->args.ftruncate_cbk.fn (stub->frame,
                                                      stub->frame->cookie,
@@ -2999,7 +3297,7 @@ call_resume_unwind (call_stub_t *stub)
                                                      stub->args.ftruncate_cbk.op_ret,
                                                      stub->args.ftruncate_cbk.op_errno,
                                                      &stub->args.ftruncate_cbk.prebuf,
-                                                     &stub->args.ftruncate_cbk.postbuf);
+                                                     &stub->args.ftruncate_cbk.postbuf, stub->xdata);
                 break;
         }
 
@@ -3009,14 +3307,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.fstat_cbk.op_ret,
                                       stub->args.fstat_cbk.op_errno,
-                                      &stub->args.fstat_cbk.buf);
+                                      &stub->args.fstat_cbk.buf, stub->xdata);
                 else
                         stub->args.fstat_cbk.fn (stub->frame,
                                                  stub->frame->cookie,
                                                  stub->frame->this,
                                                  stub->args.fstat_cbk.op_ret,
                                                  stub->args.fstat_cbk.op_errno,
-                                                 &stub->args.fstat_cbk.buf);
+                                                 &stub->args.fstat_cbk.buf, stub->xdata);
 
                 break;
         }
@@ -3027,14 +3325,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.lk_cbk.op_ret,
                                       stub->args.lk_cbk.op_errno,
-                                      &stub->args.lk_cbk.lock);
+                                      &stub->args.lk_cbk.lock, stub->xdata);
                 else
                         stub->args.lk_cbk.fn (stub->frame,
                                               stub->frame->cookie,
                                               stub->frame->this,
                                               stub->args.lk_cbk.op_ret,
                                               stub->args.lk_cbk.op_errno,
-                                              &stub->args.lk_cbk.lock);
+                                              &stub->args.lk_cbk.lock, stub->xdata);
                 break;
         }
 
@@ -3043,14 +3341,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.inodelk_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.inodelk_cbk.op_ret,
-                                      stub->args.inodelk_cbk.op_errno);
+                                      stub->args.inodelk_cbk.op_errno, stub->xdata);
 
                 else
                         stub->args.inodelk_cbk.fn (stub->frame,
                                                    stub->frame->cookie,
                                                    stub->frame->this,
                                                    stub->args.inodelk_cbk.op_ret,
-                                                   stub->args.inodelk_cbk.op_errno);
+                                                   stub->args.inodelk_cbk.op_errno, stub->xdata);
                 break;
         }
 
@@ -3059,14 +3357,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.finodelk_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.finodelk_cbk.op_ret,
-                                      stub->args.finodelk_cbk.op_errno);
+                                      stub->args.finodelk_cbk.op_errno, stub->xdata);
 
                 else
                         stub->args.finodelk_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
                                                     stub->frame->this,
                                                     stub->args.finodelk_cbk.op_ret,
-                                                    stub->args.finodelk_cbk.op_errno);
+                                                    stub->args.finodelk_cbk.op_errno, stub->xdata);
                 break;
         }
 
@@ -3075,14 +3373,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.entrylk_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.entrylk_cbk.op_ret,
-                                      stub->args.entrylk_cbk.op_errno);
+                                      stub->args.entrylk_cbk.op_errno, stub->xdata);
 
                 else
                         stub->args.entrylk_cbk.fn (stub->frame,
                                                    stub->frame->cookie,
                                                    stub->frame->this,
                                                    stub->args.entrylk_cbk.op_ret,
-                                                   stub->args.entrylk_cbk.op_errno);
+                                                   stub->args.entrylk_cbk.op_errno, stub->xdata);
                 break;
         }
 
@@ -3091,14 +3389,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.fentrylk_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.fentrylk_cbk.op_ret,
-                                      stub->args.fentrylk_cbk.op_errno);
+                                      stub->args.fentrylk_cbk.op_errno, stub->xdata);
 
                 else
                         stub->args.fentrylk_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
                                                     stub->frame->this,
                                                     stub->args.fentrylk_cbk.op_ret,
-                                                    stub->args.fentrylk_cbk.op_errno);
+                                                    stub->args.fentrylk_cbk.op_errno, stub->xdata);
                 break;
         }
 
@@ -3110,7 +3408,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.lookup_cbk.op_errno,
                                       stub->args.lookup_cbk.inode,
                                       &stub->args.lookup_cbk.buf,
-                                      stub->args.lookup_cbk.dict,
+                                      stub->xdata,
                                       &stub->args.lookup_cbk.postparent);
                 else
                         stub->args.lookup_cbk.fn (stub->frame,
@@ -3120,12 +3418,10 @@ call_resume_unwind (call_stub_t *stub)
                                                   stub->args.lookup_cbk.op_errno,
                                                   stub->args.lookup_cbk.inode,
                                                   &stub->args.lookup_cbk.buf,
-                                                  stub->args.lookup_cbk.dict,
+                                                  stub->xdata,
                                                   &stub->args.lookup_cbk.postparent);
                 /* FIXME NULL should not be passed */
 
-                if (stub->args.lookup_cbk.dict)
-                        dict_unref (stub->args.lookup_cbk.dict);
                 if (stub->args.lookup_cbk.inode)
                         inode_unref (stub->args.lookup_cbk.inode);
 
@@ -3139,7 +3435,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.rchecksum_cbk.op_ret,
                                       stub->args.rchecksum_cbk.op_errno,
                                       stub->args.rchecksum_cbk.weak_checksum,
-                                      stub->args.rchecksum_cbk.strong_checksum);
+                                      stub->args.rchecksum_cbk.strong_checksum, stub->xdata);
                 else
                         stub->args.rchecksum_cbk.fn (stub->frame,
                                                      stub->frame->cookie,
@@ -3147,11 +3443,10 @@ call_resume_unwind (call_stub_t *stub)
                                                      stub->args.rchecksum_cbk.op_ret,
                                                      stub->args.rchecksum_cbk.op_errno,
                                                      stub->args.rchecksum_cbk.weak_checksum,
-                                                     stub->args.rchecksum_cbk.strong_checksum);
+                                                     stub->args.rchecksum_cbk.strong_checksum, stub->xdata);
+
                 if (stub->args.rchecksum_cbk.op_ret >= 0)
-                {
                         GF_FREE (stub->args.rchecksum_cbk.strong_checksum);
-                }
 
                 break;
         }
@@ -3162,14 +3457,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.readdir_cbk.op_ret,
                                       stub->args.readdir_cbk.op_errno,
-                                      &stub->args.readdir_cbk.entries);
+                                      &stub->args.readdir_cbk.entries, stub->xdata);
                 else
                         stub->args.readdir_cbk.fn (stub->frame,
                                                    stub->frame->cookie,
                                                    stub->frame->this,
                                                    stub->args.readdir_cbk.op_ret,
                                                    stub->args.readdir_cbk.op_errno,
-                                                   &stub->args.readdir_cbk.entries);
+                                                   &stub->args.readdir_cbk.entries, stub->xdata);
 
                 if (stub->args.readdir_cbk.op_ret > 0)
                         gf_dirent_free (&stub->args.readdir_cbk.entries);
@@ -3183,14 +3478,14 @@ call_resume_unwind (call_stub_t *stub)
                         STACK_UNWIND (stub->frame,
                                       stub->args.readdirp_cbk.op_ret,
                                       stub->args.readdirp_cbk.op_errno,
-                                      &stub->args.readdirp_cbk.entries);
+                                      &stub->args.readdirp_cbk.entries, stub->xdata);
                 else
                         stub->args.readdirp_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
                                                     stub->frame->this,
                                                     stub->args.readdirp_cbk.op_ret,
                                                     stub->args.readdirp_cbk.op_errno,
-                                                    &stub->args.readdirp_cbk.entries);
+                                                    &stub->args.readdirp_cbk.entries, stub->xdata);
 
                 if (stub->args.readdirp_cbk.op_ret > 0)
                         gf_dirent_free (&stub->args.readdirp_cbk.entries);
@@ -3203,14 +3498,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.xattrop_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.xattrop_cbk.op_ret,
-                                      stub->args.xattrop_cbk.op_errno);
+                                      stub->args.xattrop_cbk.op_errno, stub->xdata);
                 else
                         stub->args.xattrop_cbk.fn (stub->frame,
                                                    stub->frame->cookie,
                                                    stub->frame->this,
                                                    stub->args.xattrop_cbk.op_ret,
                                                    stub->args.xattrop_cbk.op_errno,
-                                                   stub->args.xattrop_cbk.xattr);
+                                                   stub->args.xattrop_cbk.xattr, stub->xdata);
 
                 if (stub->args.xattrop_cbk.xattr)
                         dict_unref (stub->args.xattrop_cbk.xattr);
@@ -3222,14 +3517,14 @@ call_resume_unwind (call_stub_t *stub)
                 if (!stub->args.fxattrop_cbk.fn)
                         STACK_UNWIND (stub->frame,
                                       stub->args.fxattrop_cbk.op_ret,
-                                      stub->args.fxattrop_cbk.op_errno);
+                                      stub->args.fxattrop_cbk.op_errno, stub->xdata);
                 else
                         stub->args.fxattrop_cbk.fn (stub->frame,
                                                     stub->frame->cookie,
                                                     stub->frame->this,
                                                     stub->args.fxattrop_cbk.op_ret,
                                                     stub->args.fxattrop_cbk.op_errno,
-                                                    stub->args.fxattrop_cbk.xattr);
+                                                    stub->args.fxattrop_cbk.xattr, stub->xdata);
 
                 if (stub->args.fxattrop_cbk.xattr)
                         dict_unref (stub->args.fxattrop_cbk.xattr);
@@ -3243,7 +3538,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.setattr_cbk.op_ret,
                                       stub->args.setattr_cbk.op_errno,
                                       &stub->args.setattr_cbk.statpre,
-                                      &stub->args.setattr_cbk.statpost);
+                                      &stub->args.setattr_cbk.statpost, stub->xdata);
                 else
                         stub->args.setattr_cbk.fn (
                                 stub->frame,
@@ -3252,7 +3547,7 @@ call_resume_unwind (call_stub_t *stub)
                                 stub->args.setattr_cbk.op_ret,
                                 stub->args.setattr_cbk.op_errno,
                                 &stub->args.setattr_cbk.statpre,
-                                &stub->args.setattr_cbk.statpost);
+                                &stub->args.setattr_cbk.statpost, stub->xdata);
                 break;
         }
         case GF_FOP_FSETATTR:
@@ -3262,7 +3557,7 @@ call_resume_unwind (call_stub_t *stub)
                                       stub->args.fsetattr_cbk.op_ret,
                                       stub->args.fsetattr_cbk.op_errno,
                                       &stub->args.fsetattr_cbk.statpre,
-                                      &stub->args.fsetattr_cbk.statpost);
+                                      &stub->args.fsetattr_cbk.statpost, stub->xdata);
                 else
                         stub->args.fsetattr_cbk.fn (
                                 stub->frame,
@@ -3271,7 +3566,7 @@ call_resume_unwind (call_stub_t *stub)
                                 stub->args.fsetattr_cbk.op_ret,
                                 stub->args.fsetattr_cbk.op_errno,
                                 &stub->args.fsetattr_cbk.statpre,
-                                &stub->args.fsetattr_cbk.statpost);
+                                &stub->args.fsetattr_cbk.statpost, stub->xdata);
                 break;
         }
         default:
@@ -3290,6 +3585,9 @@ out:
 static void
 call_stub_destroy_wind (call_stub_t *stub)
 {
+        if (stub->xdata)
+                dict_unref (stub->xdata);
+
         switch (stub->fop) {
         case GF_FOP_OPEN:
         {
@@ -3303,8 +3601,6 @@ call_stub_destroy_wind (call_stub_t *stub)
                 loc_wipe (&stub->args.create.loc);
                 if (stub->args.create.fd)
                         fd_unref (stub->args.create.fd);
-                if (stub->args.create.params)
-                        dict_unref (stub->args.create.params);
                 break;
         }
         case GF_FOP_STAT:
@@ -3321,16 +3617,12 @@ call_stub_destroy_wind (call_stub_t *stub)
         case GF_FOP_MKNOD:
         {
                 loc_wipe (&stub->args.mknod.loc);
-                if (stub->args.mknod.params)
-                        dict_unref (stub->args.mknod.params);
         }
         break;
 
         case GF_FOP_MKDIR:
         {
                 loc_wipe (&stub->args.mkdir.loc);
-                if (stub->args.mkdir.params)
-                        dict_unref (stub->args.mkdir.params);
         }
         break;
 
@@ -3350,8 +3642,6 @@ call_stub_destroy_wind (call_stub_t *stub)
         {
                 GF_FREE ((char *)stub->args.symlink.linkname);
                 loc_wipe (&stub->args.symlink.loc);
-                if (stub->args.symlink.params)
-                        dict_unref (stub->args.symlink.params);
         }
         break;
 
@@ -3422,8 +3712,7 @@ call_stub_destroy_wind (call_stub_t *stub)
 
         case GF_FOP_GETXATTR:
         {
-                if (stub->args.getxattr.name)
-                        GF_FREE ((char *)stub->args.getxattr.name);
+                GF_FREE ((char *)stub->args.getxattr.name);
                 loc_wipe (&stub->args.getxattr.loc);
                 break;
         }
@@ -3438,8 +3727,7 @@ call_stub_destroy_wind (call_stub_t *stub)
 
         case GF_FOP_FGETXATTR:
         {
-                if (stub->args.fgetxattr.name)
-                        GF_FREE ((char *)stub->args.fgetxattr.name);
+                GF_FREE ((char *)stub->args.fgetxattr.name);
                 fd_unref (stub->args.fgetxattr.fd);
                 break;
         }
@@ -3448,6 +3736,13 @@ call_stub_destroy_wind (call_stub_t *stub)
         {
                 loc_wipe (&stub->args.removexattr.loc);
                 GF_FREE ((char *)stub->args.removexattr.name);
+                break;
+        }
+
+        case GF_FOP_FREMOVEXATTR:
+        {
+                fd_unref (stub->args.fremovexattr.fd);
+                GF_FREE ((char *)stub->args.fremovexattr.name);
                 break;
         }
 
@@ -3495,16 +3790,14 @@ call_stub_destroy_wind (call_stub_t *stub)
 
         case GF_FOP_INODELK:
         {
-                if (stub->args.inodelk.volume)
-                        GF_FREE ((char *)stub->args.inodelk.volume);
+                GF_FREE ((char *)stub->args.inodelk.volume);
 
                 loc_wipe (&stub->args.inodelk.loc);
                 break;
         }
         case GF_FOP_FINODELK:
         {
-                if (stub->args.finodelk.volume)
-                        GF_FREE ((char *)stub->args.finodelk.volume);
+                GF_FREE ((char *)stub->args.finodelk.volume);
 
                 if (stub->args.finodelk.fd)
                         fd_unref (stub->args.finodelk.fd);
@@ -3512,21 +3805,17 @@ call_stub_destroy_wind (call_stub_t *stub)
         }
         case GF_FOP_ENTRYLK:
         {
-                if (stub->args.entrylk.volume)
-                        GF_FREE ((char *)stub->args.entrylk.volume);
+                GF_FREE ((char *)stub->args.entrylk.volume);
 
-                if (stub->args.entrylk.name)
-                        GF_FREE ((char *)stub->args.entrylk.name);
+                GF_FREE ((char *)stub->args.entrylk.name);
                 loc_wipe (&stub->args.entrylk.loc);
                 break;
         }
         case GF_FOP_FENTRYLK:
         {
-                if (stub->args.fentrylk.volume)
-                        GF_FREE ((char *)stub->args.fentrylk.volume);
+                GF_FREE ((char *)stub->args.fentrylk.volume);
 
-                if (stub->args.fentrylk.name)
-                        GF_FREE ((char *)stub->args.fentrylk.name);
+                GF_FREE ((char *)stub->args.fentrylk.name);
 
                 if (stub->args.fentrylk.fd)
                         fd_unref (stub->args.fentrylk.fd);
@@ -3536,8 +3825,6 @@ call_stub_destroy_wind (call_stub_t *stub)
         case GF_FOP_LOOKUP:
         {
                 loc_wipe (&stub->args.lookup.loc);
-                if (stub->args.lookup.xattr_req)
-                        dict_unref (stub->args.lookup.xattr_req);
                 break;
         }
 
@@ -3559,6 +3846,7 @@ call_stub_destroy_wind (call_stub_t *stub)
         {
                 if (stub->args.readdirp.fd)
                         fd_unref (stub->args.readdirp.fd);
+
                 break;
         }
 
@@ -3600,6 +3888,9 @@ call_stub_destroy_wind (call_stub_t *stub)
 static void
 call_stub_destroy_unwind (call_stub_t *stub)
 {
+        if (stub->xdata)
+                dict_unref (stub->xdata);
+
         switch (stub->fop) {
         case GF_FOP_OPEN:
         {
@@ -3623,8 +3914,7 @@ call_stub_destroy_unwind (call_stub_t *stub)
 
         case GF_FOP_READLINK:
         {
-                if (stub->args.readlink_cbk.buf)
-                        GF_FREE ((char *)stub->args.readlink_cbk.buf);
+                GF_FREE ((char *)stub->args.readlink_cbk.buf);
         }
         break;
 
@@ -3715,6 +4005,8 @@ call_stub_destroy_unwind (call_stub_t *stub)
 
         case GF_FOP_REMOVEXATTR:
                 break;
+        case GF_FOP_FREMOVEXATTR:
+                break;
 
         case GF_FOP_OPENDIR:
         {
@@ -3754,9 +4046,6 @@ call_stub_destroy_unwind (call_stub_t *stub)
         {
                 if (stub->args.lookup_cbk.inode)
                         inode_unref (stub->args.lookup_cbk.inode);
-
-                if (stub->args.lookup_cbk.dict)
-                        dict_unref (stub->args.lookup_cbk.dict);
         }
         break;
 

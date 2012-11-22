@@ -47,6 +47,9 @@
 
 typedef ssize_t (*mnt3_serializer) (struct iovec outmsg, void *args);
 
+extern void *
+mount3udp_thread (void *argv);
+
 
 /* Generic reply function for MOUNTv3 specific replies. */
 int
@@ -70,6 +73,7 @@ mnt3svc_submit_reply (rpcsvc_request_t *req, void *arg, mnt3_serializer sfunc)
         /* First, get the io buffer into which the reply in arg will
          * be serialized.
          */
+        /* TODO: use 'xdrproc_t' instead of 'sfunc' to get the xdr-size */
         iob = iobuf_get (ms->iobpool);
         if (!iob) {
                 gf_log (GF_MNT, GF_LOG_ERROR, "Failed to get iobuf");
@@ -191,6 +195,7 @@ mnt3svc_update_mountlist (struct mount3_state *ms, rpcsvc_request_t *req,
 {
         struct mountentry       *me = NULL;
         int                     ret = -1;
+        char                    *colon = NULL;
 
         if ((!ms) || (!req) || (!expname))
                 return -1;
@@ -209,6 +214,10 @@ mnt3svc_update_mountlist (struct mount3_state *ms, rpcsvc_request_t *req,
         if (ret == -1)
                 goto free_err;
 
+        colon = strrchr (me->hostname, ':');
+        if (colon) {
+                *colon = '\0';
+        }
         LOCK (&ms->mountlock);
         {
                 list_add_tail (&me->mlist, &ms->mountlist);
@@ -315,7 +324,7 @@ int
 mnt3_match_dirpath_export (char *expname, char *dirpath)
 {
         int     ret = 0;
-        int     dlen = 0;
+        size_t  dlen;
 
         if ((!expname) || (!dirpath))
                 return 0;
@@ -326,7 +335,7 @@ mnt3_match_dirpath_export (char *expname, char *dirpath)
          * compare.
          */
         dlen = strlen (dirpath);
-        if (dirpath [dlen - 1] == '/')
+        if (dlen && dirpath [dlen - 1] == '/')
                 dirpath [dlen - 1] = '\0';
 
         if (dirpath[0] != '/')
@@ -350,7 +359,7 @@ mnt3svc_mount_inode (rpcsvc_request_t *req, struct mount3_state *ms,
         if ((!req) || (!xl) || (!ms) || (!exportinode))
                 return ret;
 
-        ret = nfs_inode_loc_fill (exportinode, &exportloc);
+        ret = nfs_inode_loc_fill (exportinode, &exportloc, NFS_RESOLVE_EXIST);
         if (ret < 0) {
                 gf_log (GF_MNT, GF_LOG_ERROR, "Loc fill failed for export inode"
                         ": gfid %s, volume: %s",
@@ -753,24 +762,37 @@ mnt3_check_client_net (struct mount3_state *ms, rpcsvc_request_t *req,
                        xlator_t *targetxl)
 {
 
-        rpcsvc_t        *svc = NULL;
-        int             ret = -1;
+        rpcsvc_t                *svc = NULL;
+        rpc_transport_t         *trans = NULL;
+        struct sockaddr_storage sastorage = {0,};
+        char                    peer[RPCSVC_PEER_STRLEN] = {0,};
+        int                     ret = -1;
 
         if ((!ms) || (!req) || (!targetxl))
                 return -1;
 
         svc = rpcsvc_request_service (req);
+
+        trans = rpcsvc_request_transport (req);
+        ret = rpcsvc_transport_peeraddr (trans, peer, RPCSVC_PEER_STRLEN,
+                                         &sastorage, sizeof (sastorage));
+        if (ret != 0) {
+                gf_log (GF_MNT, GF_LOG_WARNING, "Failed to get peer addr: %s",
+                        gai_strerror (ret));
+        }
+
         ret = rpcsvc_transport_peer_check (svc->options, targetxl->name,
-                                           rpcsvc_request_transport (req));
+                                           trans);
         if (ret == RPCSVC_AUTH_REJECT) {
-                gf_log (GF_MNT, GF_LOG_TRACE, "Peer not allowed");
+                gf_log (GF_MNT, GF_LOG_INFO, "Peer %s  not allowed", peer);
                 goto err;
         }
 
         ret = rpcsvc_transport_privport_check (svc, targetxl->name,
                                                rpcsvc_request_transport (req));
         if (ret == RPCSVC_AUTH_REJECT) {
-                gf_log (GF_MNT, GF_LOG_TRACE, "Unprivileged port not allowed");
+                gf_log (GF_MNT, GF_LOG_INFO, "Peer %s rejected. Unprivileged "
+                        "port not allowed", peer);
                 goto err;
         }
 
@@ -1149,6 +1171,7 @@ mnt3svc_umnt (rpcsvc_request_t *req)
         int                     ret = -1;
         struct mount3_state     *ms = NULL;
         mountstat3              mstat = MNT3_OK;
+        char                    *colon = NULL;
 
         if (!req)
                 return -1;
@@ -1175,37 +1198,24 @@ mnt3svc_umnt (rpcsvc_request_t *req)
         if (ret != 0) {
                 gf_log (GF_MNT, GF_LOG_ERROR, "Failed to get remote name: %s",
                         gai_strerror (ret));
-                goto try_umount_with_addr;
-        }
-
-        gf_log (GF_MNT, GF_LOG_DEBUG, "dirpath: %s, hostname: %s", dirpath,
-                hostname);
-        ret = mnt3svc_umount (ms, dirpath, hostname);
-
-        /* Unmount succeeded with the given hostname. */
-        if (ret == 0)
-                goto snd_reply;
-
-try_umount_with_addr:
-        if (ret != 0)
-                ret = rpcsvc_transport_peeraddr (req->trans, hostname,
-                                                 MNTPATHLEN, NULL, 0);
-
-        if (ret != 0) {
-                gf_log (GF_MNT, GF_LOG_ERROR, "Failed to get remote addr: %s",
-                        gai_strerror (ret));
-                rpcsvc_request_seterr (req, SYSTEM_ERR);
                 goto rpcerr;
         }
 
+        colon = strrchr (hostname, ':');
+        if (colon) {
+                *colon= '\0';
+        }
         gf_log (GF_MNT, GF_LOG_DEBUG, "dirpath: %s, hostname: %s", dirpath,
                 hostname);
         ret = mnt3svc_umount (ms, dirpath, hostname);
-        if (ret == -1)
-                mstat = MNT3ERR_INVAL;
 
-        ret = 0;
-snd_reply:
+        if (ret == -1) {
+                ret = 0;
+                mstat = MNT3ERR_NOENT;
+        }
+        /* FIXME: also take care of the corner case where the
+         * client was resolvable at mount but not at the umount - vice-versa.
+         */
         mnt3svc_submit_reply (req, &mstat,
                               (mnt3_serializer)xdr_serialize_mountstat3);
 
@@ -1399,6 +1409,87 @@ err:
         return ret;
 }
 
+/* just declaring, definition is way down below */
+rpcsvc_program_t        mnt3prog;
+
+/* nfs3_rootfh used by mount3udp thread needs to access mount3prog.private
+ * directly as we don't have nfs xlator pointer to dereference it. But thats OK
+ */
+
+struct nfs3_fh *
+nfs3_rootfh (char* path)
+{
+        struct mount3_state     *ms = NULL;
+        struct nfs3_fh          *fh = NULL;
+        struct mnt3_export      *exp = NULL;
+        inode_t                 *inode = NULL;
+        char                    *tmp = NULL;
+
+        ms = mnt3prog.private;
+        exp = mnt3_mntpath_to_export (ms, path);
+        if (exp == NULL)
+                goto err;
+
+        tmp = (char *)path;
+        tmp = strchr (tmp, '/');
+        if (tmp == NULL)
+                tmp = "/";
+
+        inode = inode_from_path (exp->vol->itable, tmp);
+        if (inode == NULL)
+                goto err;
+
+        fh = GF_CALLOC (1, sizeof(*fh), gf_nfs_mt_nfs3_fh);
+        if (fh == NULL)
+                goto err;
+        nfs3_build_fh (inode, exp->volumeid, fh);
+
+err:
+        if (inode)
+                inode_unref (inode);
+        return fh;
+}
+
+int
+mount3udp_add_mountlist (char *host, dirpath *expname)
+{
+        struct mountentry       *me = NULL;
+        struct mount3_state     *ms = NULL;
+        char                    *export = NULL;
+
+        ms = mnt3prog.private;
+        me = GF_CALLOC (1, sizeof (*me), gf_nfs_mt_mountentry);
+        if (!me)
+                return -1;
+        export = (char *)expname;
+        while (*export == '/')
+                export++;
+
+        strcpy (me->exname, export);
+        strcpy (me->hostname, host);
+        INIT_LIST_HEAD (&me->mlist);
+        LOCK (&ms->mountlock);
+        {
+                list_add_tail (&me->mlist, &ms->mountlist);
+        }
+        UNLOCK (&ms->mountlock);
+        return 0;
+}
+
+int
+mount3udp_delete_mountlist (char *hostname, dirpath *expname)
+{
+        struct mount3_state     *ms = NULL;
+        char                    *export = NULL;
+
+        ms = mnt3prog.private;
+        export = (char *)expname;
+        while (*export == '/')
+                export++;
+        __mnt3svc_umount (ms, export, hostname);
+        return 0;
+}
+
 
 struct mnt3_export *
 mnt3_init_export_ent (struct mount3_state *ms, xlator_t *xl, char *exportpath,
@@ -1493,8 +1584,7 @@ __mnt3_init_volume_direxports (struct mount3_state *ms, xlator_t *xlator,
 
         ret = 0;
 err:
-        if (dupopt)
-                GF_FREE (dupopt);
+        GF_FREE (dupopt);
 
         return ret;
 }
@@ -1754,12 +1844,12 @@ out:
 }
 
 rpcsvc_actor_t  mnt3svc_actors[MOUNT3_PROC_COUNT] = {
-        {"NULL", MOUNT3_NULL, mnt3svc_null, NULL, NULL},
-        {"MNT", MOUNT3_MNT, mnt3svc_mnt, NULL, NULL},
-        {"DUMP", MOUNT3_DUMP, mnt3svc_dump, NULL, NULL},
-        {"UMNT", MOUNT3_UMNT, mnt3svc_umnt, NULL, NULL},
-        {"UMNTALL", MOUNT3_UMNTALL, mnt3svc_umntall, NULL, NULL},
-        {"EXPORT", MOUNT3_EXPORT, mnt3svc_export, NULL, NULL}
+        {"NULL", MOUNT3_NULL, mnt3svc_null, NULL, 0},
+        {"MNT", MOUNT3_MNT, mnt3svc_mnt, NULL, 0},
+        {"DUMP", MOUNT3_DUMP, mnt3svc_dump, NULL, 0},
+        {"UMNT", MOUNT3_UMNT, mnt3svc_umnt, NULL, 0},
+        {"UMNTALL", MOUNT3_UMNTALL, mnt3svc_umntall, NULL, 0},
+        {"EXPORT", MOUNT3_EXPORT, mnt3svc_export, NULL, 0}
 };
 
 
@@ -1778,6 +1868,7 @@ rpcsvc_program_t        mnt3prog = {
 };
 
 
+
 rpcsvc_program_t *
 mnt3svc_init (xlator_t *nfsx)
 {
@@ -1786,6 +1877,7 @@ mnt3svc_init (xlator_t *nfsx)
         dict_t                  *options = NULL;
         char                    *portstr = NULL;
         int                      ret = -1;
+        pthread_t                udp_thread;
 
         if (!nfsx || !nfsx->private)
                 return NULL;
@@ -1835,6 +1927,9 @@ mnt3svc_init (xlator_t *nfsx)
                 goto err;
         }
 
+        if (nfs->mount_udp) {
+                pthread_create (&udp_thread, NULL, mount3udp_thread, NULL);
+        }
         return &mnt3prog;
 err:
         return NULL;
@@ -1842,12 +1937,12 @@ err:
 
 
 rpcsvc_actor_t  mnt1svc_actors[MOUNT1_PROC_COUNT] = {
-        {"NULL", MOUNT1_NULL, mnt3svc_null, NULL, NULL},
-        {{0}, },
-        {"DUMP", MOUNT1_DUMP, mnt3svc_dump, NULL, NULL},
-        {"UMNT", MOUNT1_UMNT, mnt3svc_umnt, NULL, NULL},
-        {{0}, },
-        {"EXPORT", MOUNT1_EXPORT, mnt3svc_export, NULL, NULL}
+        {"NULL", MOUNT1_NULL, mnt3svc_null, NULL, 0},
+        {{0, 0}, },
+        {"DUMP", MOUNT1_DUMP, mnt3svc_dump, NULL, 0},
+        {"UMNT", MOUNT1_UMNT, mnt3svc_umnt, NULL, 0},
+        {{0, 0}, },
+        {"EXPORT", MOUNT1_EXPORT, mnt3svc_export, NULL, 0}
 };
 
 rpcsvc_program_t        mnt1prog = {
@@ -1923,5 +2018,3 @@ mnt1svc_init (xlator_t *nfsx)
 err:
         return NULL;
 }
-
-

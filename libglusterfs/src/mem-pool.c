@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "mem-pool.h"
@@ -39,37 +30,27 @@
 
 #define GLUSTERFS_ENV_MEM_ACCT_STR  "GLUSTERFS_DISABLE_MEM_ACCT"
 
-static int gf_mem_acct_enable = 0;
-
-int
-gf_mem_acct_is_enabled ()
-{
-        return gf_mem_acct_enable;
-}
-
 void
-gf_mem_acct_enable_set ()
+gf_mem_acct_enable_set (void *data)
 {
-        char    *opt = NULL;
-        long    val = -1;
+        char            *opt = NULL;
+        long             val = -1;
+        glusterfs_ctx_t *ctx = NULL;
 
-#ifdef DEBUG
-        gf_mem_acct_enable = 1;
-        return;
-#endif
+        ctx = data;
+
+        if (ctx->mem_acct_enable) {
+                return;
+        }
 
         opt = getenv (GLUSTERFS_ENV_MEM_ACCT_STR);
+        if (opt) {
+                val = strtol (opt, NULL, 0);
+                if (val)
+                        ctx->mem_acct_enable = 1;
+        }
 
-        if (!opt)
-                return;
-
-        val = strtol (opt, NULL, 0);
-
-        if (val)
-                gf_mem_acct_enable = 0;
-        else
-                gf_mem_acct_enable = 1;
-
+        return;
 }
 
 void
@@ -84,17 +65,11 @@ gf_mem_set_acct_info (xlator_t *xl, char **alloc_ptr,
 
         ptr = (char *) (*alloc_ptr);
 
-        if (!xl) {
-                GF_ASSERT (0);
-        }
+        GF_ASSERT (xl != NULL);
 
-        if (!(xl->mem_acct.rec)) {
-                GF_ASSERT (0);
-        }
+        GF_ASSERT (xl->mem_acct.rec != NULL);
 
-        if (type > xl->mem_acct.num_types) {
-                GF_ASSERT (0);
-        }
+        GF_ASSERT (type <= xl->mem_acct.num_types);
 
         LOCK(&xl->mem_acct.rec[type].lock);
         {
@@ -134,7 +109,7 @@ __gf_calloc (size_t nmemb, size_t size, uint32_t type)
         char            *ptr = NULL;
         xlator_t        *xl = NULL;
 
-        if (!gf_mem_acct_enable)
+        if (!THIS->ctx->mem_acct_enable)
                 return CALLOC (nmemb, size);
 
         xl = THIS;
@@ -160,7 +135,7 @@ __gf_malloc (size_t size, uint32_t type)
         char            *ptr = NULL;
         xlator_t        *xl = NULL;
 
-        if (!gf_mem_acct_enable)
+        if (!THIS->ctx->mem_acct_enable)
                 return MALLOC (size);
 
         xl = THIS;
@@ -185,7 +160,7 @@ __gf_realloc (void *ptr, size_t size)
         xlator_t        *xl = NULL;
         uint32_t        type = 0;
 
-        if (!gf_mem_acct_enable)
+        if (!THIS->ctx->mem_acct_enable)
                 return REALLOC (ptr, size);
 
         tot_size = size + GF_MEM_HEADER_SIZE + GF_MEM_TRAILER_SIZE;
@@ -258,7 +233,7 @@ __gf_free (void *free_ptr)
         uint32_t        type = 0;
         xlator_t        *xl = NULL;
 
-        if (!gf_mem_acct_enable) {
+        if (!THIS->ctx->mem_acct_enable) {
                 FREE (free_ptr);
                 return;
         }
@@ -268,20 +243,16 @@ __gf_free (void *free_ptr)
 
         ptr = (char *)free_ptr - 8 - 4;
 
-        if (GF_MEM_HEADER_MAGIC != *(uint32_t *)ptr) {
-                //Possible corruption, assert here
-                GF_ASSERT (0);
-        }
+        //Possible corruption, assert here
+        GF_ASSERT (GF_MEM_HEADER_MAGIC == *(uint32_t *)ptr);
 
         *(uint32_t *)ptr = 0;
 
         ptr = ptr - sizeof(xlator_t *);
         memcpy (&xl, ptr, sizeof(xlator_t *));
 
-        if (!xl) {
-                //gf_free expects xl to be available
-                GF_ASSERT (0);
-        }
+        //gf_free expects xl to be available
+        GF_ASSERT (xl != NULL);
 
         if (!xl->mem_acct.rec) {
                 ptr = (char *)free_ptr - GF_MEM_HEADER_SIZE;
@@ -294,11 +265,10 @@ __gf_free (void *free_ptr)
         ptr = ptr - 4;
         type = *(uint32_t *)ptr;
 
-        if (GF_MEM_TRAILER_MAGIC != *(uint32_t *)
-            ((char *)free_ptr + req_size)) {
-                // This points to a memory overrun
-                GF_ASSERT (0);
-        }
+        // This points to a memory overrun
+        GF_ASSERT (GF_MEM_TRAILER_MAGIC ==
+                *(uint32_t *)((char *)free_ptr + req_size));
+
         *(uint32_t *) ((char *)free_ptr + req_size) = 0;
 
         LOCK (&xl->mem_acct.rec[type].lock);
@@ -326,7 +296,7 @@ mem_pool_new_fn (unsigned long sizeof_type,
         glusterfs_ctx_t  *ctx = NULL;
 
         if (!sizeof_type || !count) {
-                gf_log ("mem-pool", GF_LOG_ERROR, "invalid argument");
+                gf_log_callingfn ("mem-pool", GF_LOG_ERROR, "invalid argument");
                 return NULL;
         }
         padded_sizeof_type = sizeof_type + GF_MEM_POOL_PAD_BOUNDARY;
@@ -369,7 +339,7 @@ mem_pool_new_fn (unsigned long sizeof_type,
         mem_pool->pool_end = pool + (count * (padded_sizeof_type));
 
         /* add this pool to the global list */
-        ctx = glusterfs_ctx_get ();
+        ctx = THIS->ctx;
         if (!ctx)
                 goto out;
 
@@ -385,7 +355,7 @@ mem_get0 (struct mem_pool *mem_pool)
         void             *ptr = NULL;
 
         if (!mem_pool) {
-                gf_log ("mem-pool", GF_LOG_ERROR, "invalid argument");
+                gf_log_callingfn ("mem-pool", GF_LOG_ERROR, "invalid argument");
                 return NULL;
         }
 
@@ -406,7 +376,7 @@ mem_get (struct mem_pool *mem_pool)
         struct mem_pool **pool_ptr = NULL;
 
         if (!mem_pool) {
-                gf_log ("mem-pool", GF_LOG_ERROR, "invalid argument");
+                gf_log_callingfn ("mem-pool", GF_LOG_ERROR, "invalid argument");
                 return NULL;
         }
 
@@ -451,6 +421,10 @@ mem_get (struct mem_pool *mem_pool)
                  * because it is too much work knowing that a better slab
                  * allocator is coming RSN.
                  */
+                mem_pool->pool_misses++;
+                mem_pool->curr_stdalloc++;
+                if (mem_pool->max_stdalloc < mem_pool->curr_stdalloc)
+                        mem_pool->max_stdalloc = mem_pool->curr_stdalloc;
                 ptr = GF_CALLOC (1, mem_pool->padded_sizeof_type,
                                  gf_common_mt_mem_pool);
                 gf_log_callingfn ("mem-pool", GF_LOG_DEBUG, "Mem pool is full. "
@@ -475,7 +449,7 @@ static int
 __is_member (struct mem_pool *pool, void *ptr)
 {
         if (!pool || !ptr) {
-                gf_log ("mem-pool", GF_LOG_ERROR, "invalid argument");
+                gf_log_callingfn ("mem-pool", GF_LOG_ERROR, "invalid argument");
                 return -1;
         }
 
@@ -500,20 +474,22 @@ mem_put (void *ptr)
         struct mem_pool *pool = NULL;
 
         if (!ptr) {
-                gf_log ("mem-pool", GF_LOG_ERROR, "invalid argument");
+                gf_log_callingfn ("mem-pool", GF_LOG_ERROR, "invalid argument");
                 return;
         }
 
         list = head = mem_pool_ptr2chunkhead (ptr);
         tmp = mem_pool_from_ptr (head);
         if (!tmp) {
-                gf_log ("mem-pool", GF_LOG_ERROR, "ptr header is corrupted");
+                gf_log_callingfn ("mem-pool", GF_LOG_ERROR,
+                                  "ptr header is corrupted");
                 return;
         }
 
         pool = *tmp;
         if (!pool) {
-                gf_log ("mem-pool", GF_LOG_ERROR, "mem-pool ptr is NULL");
+                gf_log_callingfn ("mem-pool", GF_LOG_ERROR,
+                                  "mem-pool ptr is NULL");
                 return;
         }
         LOCK (&pool->lock);
@@ -553,6 +529,7 @@ mem_put (void *ptr)
                          * not have enough info to distinguish between the two
                          * situations.
                          */
+                        pool->curr_stdalloc--;
                         GF_FREE (list);
                         break;
                 default:

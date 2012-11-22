@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "xdr-common.h"
@@ -177,6 +168,17 @@ xdr_gf1_cli_top_op (XDR *xdrs, gf1_cli_top_op *objp)
 }
 
 bool_t
+xdr_gf_cli_status_type (XDR *xdrs, gf_cli_status_type *objp)
+{
+	register int32_t *buf;
+        buf = NULL;
+
+	 if (!xdr_enum (xdrs, (enum_t *) objp))
+		 return FALSE;
+	return TRUE;
+}
+
+bool_t
 xdr_gf_cli_req (XDR *xdrs, gf_cli_req *objp)
 {
 	register int32_t *buf;
@@ -241,6 +243,8 @@ xdr_gf1_cli_probe_rsp (XDR *xdrs, gf1_cli_probe_rsp *objp)
 		}
 		 if (!xdr_string (xdrs, &objp->hostname, ~0))
 			 return FALSE;
+		 if (!xdr_string (xdrs, &objp->op_errstr, ~0))
+			 return FALSE;
 		return TRUE;
 	} else if (xdrs->x_op == XDR_DECODE) {
 		buf = XDR_INLINE (xdrs, 3 * BYTES_PER_XDR_UNIT);
@@ -259,6 +263,8 @@ xdr_gf1_cli_probe_rsp (XDR *xdrs, gf1_cli_probe_rsp *objp)
 		}
 		 if (!xdr_string (xdrs, &objp->hostname, ~0))
 			 return FALSE;
+		 if (!xdr_string (xdrs, &objp->op_errstr, ~0))
+			 return FALSE;
 	 return TRUE;
 	}
 
@@ -269,6 +275,8 @@ xdr_gf1_cli_probe_rsp (XDR *xdrs, gf1_cli_probe_rsp *objp)
 	 if (!xdr_int (xdrs, &objp->port))
 		 return FALSE;
 	 if (!xdr_string (xdrs, &objp->hostname, ~0))
+		 return FALSE;
+	 if (!xdr_string (xdrs, &objp->op_errstr, ~0))
 		 return FALSE;
 	return TRUE;
 }
@@ -299,6 +307,8 @@ xdr_gf1_cli_deprobe_rsp (XDR *xdrs, gf1_cli_deprobe_rsp *objp)
 	 if (!xdr_int (xdrs, &objp->op_errno))
 		 return FALSE;
 	 if (!xdr_string (xdrs, &objp->hostname, ~0))
+		 return FALSE;
+	 if (!xdr_string (xdrs, &objp->op_errstr, ~0))
 		 return FALSE;
 	return TRUE;
 }

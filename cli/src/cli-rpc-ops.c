@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2010-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 
 #ifndef _CONFIG_H
 #define _CONFIG_H
@@ -26,7 +16,6 @@
 #ifndef GSYNC_CONF
 #define GSYNC_CONF GEOREP"/gsyncd.conf"
 #endif
-#define DEFAULT_LOG_FILE_DIRECTORY      DATADIR "/log/glusterfs"
 
 /* Widths of various columns in top read/write-perf output
  * Total width of top read/write-perf should be 80 chars
@@ -59,25 +48,28 @@ extern rpc_clnt_prog_t *cli_rpc_prog;
 extern int              cli_op_ret;
 extern int              connected;
 
-char *cli_volume_type[] = {"Distribute",
-                           "Stripe",
-                           "Replicate",
-                           "Striped-Replicate",
-                           "Distributed-Stripe",
-                           "Distributed-Replicate",
-                           "Distributed-Striped-Replicate",
-};
+char *cli_vol_type_str[] = {"Distribute",
+                            "Stripe",
+                            "Replicate",
+                            "Striped-Replicate",
+                            "Distributed-Stripe",
+                            "Distributed-Replicate",
+                            "Distributed-Striped-Replicate",
+                           };
 
-
-char *cli_volume_status[] = {"Created",
-                             "Started",
-                             "Stopped"
-};
+char *cli_vol_status_str[] = {"Created",
+                              "Started",
+                              "Stopped",
+                             };
 
 int32_t
-gf_cli3_1_get_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_get_volume (call_frame_t *frame, xlator_t *this,
                       void *data);
 
+int
+cli_to_glusterd (gf_cli_req *req, call_frame_t *frame, fop_cbk_fn_t cbkfn,
+                 xdrproc_t xdrproc, dict_t *dict, int procnum, xlator_t *this,
+                 rpc_clnt_prog_t *prog, struct iobref *iobref);
 
 rpc_clnt_prog_t cli_handshake_prog = {
         .progname  = "cli handshake",
@@ -91,13 +83,13 @@ rpc_clnt_prog_t cli_pmap_prog = {
         .progver    = GLUSTER_PMAP_VERSION,
 };
 
-
 int
-gf_cli3_1_probe_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_probe_cbk (struct rpc_req *req, struct iovec *iov,
                         int count, void *myframe)
 {
-        gf1_cli_probe_rsp    rsp   = {0,};
-        int                   ret   = 0;
+        gf1_cli_probe_rsp     rsp   = {0,};
+        int                   ret   = -1;
+        char                  msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -112,55 +104,94 @@ gf_cli3_1_probe_cbk (struct rpc_req *req, struct iovec *iov,
         }
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to probe");
-	 if (!rsp.op_ret) {
-	 	switch (rsp.op_errno) {
-		 	case GF_PROBE_SUCCESS:
-		      		cli_out ("Probe successful");
-		      		break;
-	 	 	case GF_PROBE_LOCALHOST:
-		      		cli_out ("Probe on localhost not needed");
-		      		break;
-			case GF_PROBE_FRIEND:
-				cli_out ("Probe on host %s port %d already"
-					 " in peer list", rsp.hostname, rsp.port);
-				break;
-		 	default:
-		      		cli_out ("Probe returned with unknown errno %d",
-					rsp.op_errno);
-		      		break;
-	 	}
-	 }
-
-        if (rsp.op_ret) {
+         if (!rsp.op_ret) {
                 switch (rsp.op_errno) {
-                        case GF_PROBE_ANOTHER_CLUSTER:
-                                cli_out ("%s is already part of "
-                                         "another cluster", rsp.hostname);
+                        case GF_PROBE_SUCCESS:
+                                snprintf (msg, sizeof (msg),
+                                          "success");
                                 break;
-                        case GF_PROBE_VOLUME_CONFLICT:
-                                cli_out ("Atleast one volume on %s conflicts "
-                                         "with existing volumes in the "
-                                         "cluster", rsp.hostname);
+                        case GF_PROBE_LOCALHOST:
+                                snprintf (msg, sizeof (msg),
+                                          "success: on localhost not needed");
                                 break;
-                        case GF_PROBE_UNKNOWN_PEER:
-                                cli_out ("%s responded with 'unknown peer' error, "
-                                         "this could happen if %s doesn't have"
-                                         " localhost in its peer database",
-                                         rsp.hostname, rsp.hostname);
+                        case GF_PROBE_FRIEND:
+                                snprintf (msg, sizeof (msg),
+                                          "success: host %s port %d already"
+                                          " in peer list", rsp.hostname,
+                                          rsp.port);
                                 break;
-                        case GF_PROBE_ADD_FAILED:
-                                cli_out ("Failed to add peer information "
-                                         "on %s" , rsp.hostname);
-                                break;
-
                         default:
-                                cli_out ("Probe unsuccessful\nProbe returned "
-                                         "with unknown errno %d", rsp.op_errno);
+                                rsp.op_ret = -1;
+                                snprintf (msg, sizeof (msg),
+                                          "Probe returned with unknown errno"
+                                          " %d", rsp.op_errno);
                                 break;
                 }
-                gf_log ("glusterd",GF_LOG_ERROR,"Probe failed with op_ret %d"
-                        " and op_errno %d", rsp.op_ret, rsp.op_errno);
+         }
+
+        if (rsp.op_ret) {
+                if (rsp.op_errstr && (strlen (rsp.op_errstr) > 0)) {
+                        snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
+                } else {
+                        switch (rsp.op_errno) {
+                                case GF_PROBE_ANOTHER_CLUSTER:
+                                        snprintf (msg, sizeof (msg),
+                                                  "%s is already part of "
+                                                  "another cluster",
+                                                  rsp.hostname);
+                                        break;
+                                case GF_PROBE_VOLUME_CONFLICT:
+                                        snprintf (msg, sizeof (msg),
+                                                  "Atleast one volume on %s "
+                                                  "conflicts with existing "
+                                                  "volumes in the cluster",
+                                                  rsp.hostname);
+                                        break;
+                                case GF_PROBE_UNKNOWN_PEER:
+                                        snprintf (msg, sizeof (msg),
+                                                  "%s responded with 'unknown "
+                                                  "peer' error, this could "
+                                                  "happen if %s doesn't have "
+                                                  "localhost in its peer "
+                                                  "database", rsp.hostname,
+                                                  rsp.hostname);
+                                        break;
+                                case GF_PROBE_ADD_FAILED:
+                                        snprintf (msg, sizeof (msg),
+                                                  "Failed to add peer "
+                                                  "information on %s" ,
+                                                  rsp.hostname);
+                                        break;
+                                case GF_PROBE_SAME_UUID:
+                                        snprintf (msg, sizeof (msg),
+                                                  "Peer uuid (host %s) is"
+                                                  "same as local uuid",
+                                                  rsp.hostname);
+                                break;
+                                default:
+                                        snprintf (msg, sizeof (msg),
+                                                  "Probe returned with unknown "
+                                                  "errno %d", rsp.op_errno);
+                                        break;
+                        }
+                }
+                gf_log ("cli", GF_LOG_ERROR, "%s", msg);
         }
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("peerProbe", msg, rsp.op_ret,
+                                          rsp.op_errno, NULL);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (!rsp.op_ret)
+                cli_out ("peer probe: %s", msg);
+        else
+                cli_err ("peer probe: failed: %s", msg);
+
         ret = rsp.op_ret;
 
 out:
@@ -169,11 +200,12 @@ out:
 }
 
 int
-gf_cli3_1_deprobe_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_deprobe_cbk (struct rpc_req *req, struct iovec *iov,
                        int count, void *myframe)
 {
         gf1_cli_deprobe_rsp    rsp   = {0,};
-        int                   ret   = 0;
+        int                   ret   = -1;
+        char                  msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -189,35 +221,59 @@ gf_cli3_1_deprobe_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to deprobe");
         if (rsp.op_ret) {
-                switch (rsp.op_errno) {
-                        case GF_DEPROBE_LOCALHOST:
-                                cli_out ("%s is localhost",
-                                         rsp.hostname);
-                                break;
-                        case GF_DEPROBE_NOT_FRIEND:
-                                cli_out ("%s is not part of cluster",
-                                         rsp.hostname);
-                                break;
-                        case GF_DEPROBE_BRICK_EXIST:
-                                cli_out ("Brick(s) with the peer %s exist in "
-                                         "cluster", rsp.hostname);
-                                break;
-                        case GF_DEPROBE_FRIEND_DOWN:
-                                cli_out ("One of the peers is probably down."
-                                         " Check with 'peer status'.");
-                                break;
-                        default:
-                                cli_out ("Detach unsuccessful\nDetach returned "
-                                         "with unknown errno %d",
-                                         rsp.op_errno);
-                                break;
+                if (strlen (rsp.op_errstr) > 0) {
+                        snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
+                        gf_log ("cli", GF_LOG_ERROR, "%s", rsp.op_errstr);
+                } else {
+                        switch (rsp.op_errno) {
+                                case GF_DEPROBE_LOCALHOST:
+                                        snprintf (msg, sizeof (msg),
+                                                  "%s is localhost",
+                                                  rsp.hostname);
+                                        break;
+                                case GF_DEPROBE_NOT_FRIEND:
+                                        snprintf (msg, sizeof (msg),
+                                                  "%s is not part of cluster",
+                                                  rsp.hostname);
+                                        break;
+                                case GF_DEPROBE_BRICK_EXIST:
+                                        snprintf (msg, sizeof (msg),
+                                                  "Brick(s) with the peer %s "
+                                                  "exist in cluster",
+                                                  rsp.hostname);
+                                        break;
+                                case GF_DEPROBE_FRIEND_DOWN:
+                                        snprintf (msg, sizeof (msg),
+                                                  "One of the peers is probably"
+                                                  " down. Check with 'peer "
+                                                  "status'.");
+                                        break;
+                                default:
+                                        snprintf (msg, sizeof (msg),
+                                                  "Detach returned with unknown"
+                                                  " errno %d", rsp.op_errno);
+                                        break;
+                        }
+                        gf_log ("cli", GF_LOG_ERROR,"Detach failed with op_ret "
+                                "%d and op_errno %d", rsp.op_ret, rsp.op_errno);
                 }
-                gf_log ("glusterd",GF_LOG_ERROR,"Detach failed with op_ret %d"
-                        " and op_errno %d", rsp.op_ret, rsp.op_errno);
         } else {
-                cli_out ("Detach successful");
+                snprintf (msg, sizeof (msg), "success");
         }
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("peerDetach", msg, rsp.op_ret,
+                                          rsp.op_errno, NULL);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (!rsp.op_ret)
+                cli_out ("peer detach: %s", msg);
+        else
+                cli_err ("peer detach: failed: %s", msg);
 
         ret = rsp.op_ret;
 
@@ -227,11 +283,11 @@ out:
 }
 
 int
-gf_cli3_1_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf1_cli_peer_list_rsp      rsp   = {0,};
-        int                        ret   = 0;
+        int                        ret   = -1;
         dict_t                     *dict = NULL;
         char                       *uuid_buf = NULL;
         char                       *hostname_buf = NULL;
@@ -241,6 +297,7 @@ gf_cli3_1_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
         int32_t                    port = 0;
         int32_t                    connected = 0;
         char                       *connected_str = NULL;
+        char                       msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -254,7 +311,6 @@ gf_cli3_1_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
-
         gf_log ("cli", GF_LOG_INFO, "Received resp to list: %d",
                 rsp.op_ret);
 
@@ -263,7 +319,19 @@ gf_cli3_1_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
         if (!rsp.op_ret) {
 
                 if (!rsp.friends.friends_len) {
-                        cli_out ("No peers present");
+                        snprintf (msg, sizeof (msg),
+                                  "peer status: No peers present");
+                        if (global_state->mode & GLUSTER_MODE_XML) {
+                                ret = cli_xml_output_peer_status (dict,
+                                                                  rsp.op_ret,
+                                                                  rsp.op_errno,
+                                                                  msg);
+                                if (ret)
+                                        gf_log ("cli", GF_LOG_ERROR,
+                                                "Error outputting to xml");
+                                goto out;
+                        }
+                        cli_err ("%s", msg);
                         ret = 0;
                         goto out;
                 }
@@ -285,14 +353,22 @@ gf_cli3_1_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
                         goto out;
                 }
 
-                ret = dict_get_int32 (dict, "count", &count);
+                if (global_state->mode & GLUSTER_MODE_XML) {
+                        ret = cli_xml_output_peer_status (dict, rsp.op_ret,
+                                                          rsp.op_errno, msg);
+                        if (ret)
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                        goto out;
+                }
 
+                ret = dict_get_int32 (dict, "count", &count);
                 if (ret) {
                         goto out;
                 }
 
                 cli_out ("Number of Peers: %d", count);
-
+                i = 1;
                 while ( i <= count) {
                         snprintf (key, 256, "friend%d.uuid", i);
                         ret = dict_get_str (dict, key, &uuid_buf);
@@ -336,7 +412,15 @@ gf_cli3_1_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
                         i++;
                 }
         } else {
-                ret = -1;
+                if (global_state->mode & GLUSTER_MODE_XML) {
+                        ret = cli_xml_output_peer_status (dict, rsp.op_ret,
+                                                          rsp.op_errno, NULL);
+                        if (ret)
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                } else {
+                        ret = -1;
+                }
                 goto out;
         }
 
@@ -346,7 +430,7 @@ gf_cli3_1_list_friends_cbk (struct rpc_req *req, struct iovec *iov,
 out:
         cli_cmd_broadcast_response (ret);
         if (ret)
-                cli_out ("Peer status unsuccessful");
+                cli_err ("peer status: failed");
 
         if (dict)
                 dict_destroy (dict);
@@ -382,265 +466,299 @@ cli_out_options ( char *substr, char *optstr, char *valstr)
 
 
 int
-gf_cli3_1_get_volume_cbk (struct rpc_req *req, struct iovec *iov,
-                             int count, void *myframe)
+gf_cli_get_volume_cbk (struct rpc_req *req, struct iovec *iov,
+                          int count, void *myframe)
 {
-        gf_cli_rsp                 rsp   = {0,};
-        int                        ret   = 0;
-        dict_t                     *dict = NULL;
-        char                       *volname = NULL;
-        int32_t                    i = 0;
-        char                       key[1024] = {0,};
-        int32_t                    status = 0;
-        int32_t                    type = 0;
-        int32_t                    brick_count = 0;
-        int32_t                    dist_count = 0;
-        int32_t                    stripe_count = 0;
-        int32_t                    replica_count = 0;
-        int32_t                    vol_type = 0;
-        char                       *brick = NULL;
-        int32_t                    j = 1;
-        cli_local_t                *local = NULL;
-        int32_t                    transport = 0;
-        data_pair_t                *pairs = NULL;
-        char                       *ptr = NULL;
-        data_t                     *value = NULL;
-        int                        opt_count = 0;
-        int                        k = 0;
-        char                       err_str[2048] = {0};
+        int                        ret                  = -1;
+        int                        opt_count            = 0;
+        int32_t                    i                    = 0;
+        int32_t                    j                    = 1;
+        int32_t                    status               = 0;
+        int32_t                    type                 = 0;
+        int32_t                    brick_count          = 0;
+        int32_t                    dist_count           = 0;
+        int32_t                    stripe_count         = 0;
+        int32_t                    replica_count        = 0;
+        int32_t                    vol_type             = 0;
+        int32_t                    transport            = 0;
+        char                      *ptr                  = NULL;
+        char                      *volume_id_str        = NULL;
+        char                      *brick                = NULL;
+        char                      *volname              = NULL;
+        dict_t                    *dict                 = NULL;
+        data_t                    *value                = NULL;
+        cli_local_t               *local                = NULL;
+        char                       key[1024]            = {0};
+        char                       err_str[2048]        = {0};
+        gf_cli_rsp                 rsp                  = {0};
 
-        snprintf (err_str, sizeof (err_str), "Volume info unsuccessful");
-        if (-1 == req->rpc_status) {
+        if (-1 == req->rpc_status)
                 goto out;
-        }
 
         ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
         if (ret < 0) {
-                gf_log ("", GF_LOG_ERROR, "error");
-                //rsp.op_ret   = -1;
-                //rsp.op_errno = EINVAL;
+                gf_log ("cli", GF_LOG_ERROR, "error");
                 goto out;
         }
-
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to get vol: %d",
                 rsp.op_ret);
 
-        if (!rsp.op_ret) {
-
-                if (!rsp.dict.dict_len) {
-                        cli_out ("No volumes present");
-                        ret = 0;
-                        goto out;
-                }
-
-                dict = dict_new ();
-
-                if (!dict) {
-                        ret = -1;
-                        goto out;
-                }
-
-                ret = dict_unserialize (rsp.dict.dict_val,
-                                        rsp.dict.dict_len,
-                                        &dict);
-
-                if (ret) {
-                        gf_log ("", GF_LOG_ERROR,
-                                        "Unable to allocate memory");
-                        goto out;
-                }
-
-                ret = dict_get_int32 (dict, "count", &count);
-
-                if (ret) {
-                        goto out;
-                }
-
-                local = ((call_frame_t *)myframe)->local;
-                //cli_out ("Number of Volumes: %d", count);
-
-                if (!count && (local->get_vol.flags ==
-                                        GF_CLI_GET_NEXT_VOLUME)) {
-                        local->get_vol.volname = NULL;
-                        ret = 0;
-                        goto out;
-                } else if (!count && (local->get_vol.flags ==
-                                        GF_CLI_GET_VOLUME)) {
-                        snprintf (err_str, sizeof (err_str),
-                                  "Volume %s does not exist",
-                                  local->get_vol.volname);
-                        ret = -1;
-                        goto out;
-                }
-
-                while ( i < count) {
-                        cli_out (" ");
-                        snprintf (key, 256, "volume%d.name", i);
-                        ret = dict_get_str (dict, key, &volname);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "volume%d.type", i);
-                        ret = dict_get_int32 (dict, key, &type);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "volume%d.status", i);
-                        ret = dict_get_int32 (dict, key, &status);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "volume%d.brick_count", i);
-                        ret = dict_get_int32 (dict, key, &brick_count);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "volume%d.dist_count", i);
-                        ret = dict_get_int32 (dict, key, &dist_count);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "volume%d.stripe_count", i);
-                        ret = dict_get_int32 (dict, key, &stripe_count);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "volume%d.replica_count", i);
-                        ret = dict_get_int32 (dict, key, &replica_count);
-                        if (ret)
-                                goto out;
-
-                        snprintf (key, 256, "volume%d.transport", i);
-                        ret = dict_get_int32 (dict, key, &transport);
-                        if (ret)
-                                goto out;
-
-                        vol_type = type;
-
-                        // Distributed (stripe/replicate/stripe-replica) setups
-                        if ((type > 0) && ( dist_count < brick_count))
-                                vol_type = type + 3;
-
-                        cli_out ("Volume Name: %s", volname);
-                        cli_out ("Type: %s", cli_volume_type[vol_type]);
-                        cli_out ("Status: %s", cli_volume_status[status]);
-
-                        if (type == GF_CLUSTER_TYPE_STRIPE_REPLICATE)
-                                cli_out ("Number of Bricks: %d x %d x %d = %d",
-                                         (brick_count / dist_count),
-                                         stripe_count,
-                                         replica_count,
-                                         brick_count);
-                        else if (type == GF_CLUSTER_TYPE_NONE)
-                                cli_out ("Number of Bricks: %d",
-                                         brick_count);
-                        else
-                                /* For both replicate and stripe, dist_count is
-                                   good enough */
-                                cli_out ("Number of Bricks: %d x %d = %d",
-                                         (brick_count / dist_count),
-                                         dist_count,
-                                         brick_count);
-
-
-                        cli_out ("Transport-type: %s",
-                                 ((transport == 0)?"tcp":
-                                   (transport == 1)?"rdma":
-                                  "tcp,rdma"));
-                        j = 1;
-
-
-                        GF_FREE (local->get_vol.volname);
-                        local->get_vol.volname = gf_strdup (volname);
-
-                        if (brick_count)
-                                cli_out ("Bricks:");
-
-                        while ( j <= brick_count) {
-                                snprintf (key, 1024, "volume%d.brick%d",
-                                          i, j);
-                                ret = dict_get_str (dict, key, &brick);
-                                if (ret)
-                                        goto out;
-                                cli_out ("Brick%d: %s", j, brick);
-                                j++;
-                        }
-                        pairs = dict->members_list;
-                        if (!pairs) {
-                                ret = -1;
-                                goto out;
-                        }
-
-                        snprintf (key, 256, "volume%d.opt_count",i);
-                        ret = dict_get_int32 (dict, key, &opt_count);
-                        if (ret)
-                            goto out;
-
-                        if (!opt_count)
-                            goto out;
-
-                        cli_out ("Options Reconfigured:");
-                        k = 0;
-                        while ( k < opt_count) {
-
-                                snprintf (key, 256, "volume%d.option.",i);
-                                while (pairs) {
-                                        ptr = strstr (pairs->key, "option.");
-                                        if (ptr) {
-                                                value = pairs->value;
-                                                if (!value) {
-                                                        ret = -1;
-                                                        goto out;
-                                                }
-                                                cli_out_options (key, pairs->key,
-                                                                 value->data);
-                                        }
-                                        pairs = pairs->next;
-                                }
-                                k++;
-                       }
-
-                       i++;
-                }
-
-
-        } else {
+        if (rsp.op_ret) {
                 ret = -1;
                 goto out;
         }
 
+        if (!rsp.dict.dict_len) {
+                if (global_state->mode & GLUSTER_MODE_XML)
+                        goto xml_output;
+                cli_err ("No volumes present");
+                ret = 0;
+                goto out;
+        }
+
+        dict = dict_new ();
+
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_unserialize (rsp.dict.dict_val,
+                                rsp.dict.dict_len,
+                                &dict);
+
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR,
+                        "Unable to allocate memory");
+                goto out;
+        }
+
+        ret = dict_get_int32 (dict, "count", &count);
+        if (ret)
+                goto out;
+
+        local = ((call_frame_t *)myframe)->local;
+
+        if (!count) {
+                switch (local->get_vol.flags) {
+
+                case GF_CLI_GET_NEXT_VOLUME:
+                        GF_FREE (local->get_vol.volname);
+                        local->get_vol.volname = NULL;
+                        ret = 0;
+                        goto out;
+
+                case GF_CLI_GET_VOLUME:
+                        memset (err_str, 0, sizeof (err_str));
+                        snprintf (err_str, sizeof (err_str),
+                                  "Volume %s does not exist",
+                                  local->get_vol.volname);
+                        ret = -1;
+                        if (!(global_state->mode & GLUSTER_MODE_XML))
+                                goto out;
+                }
+        }
+
+xml_output:
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                /* For GET_NEXT_VOLUME output is already begun in
+                 * and will also end in gf_cli_get_next_volume()
+                 */
+                if (local->get_vol.flags == GF_CLI_GET_VOLUME) {
+                        ret = cli_xml_output_vol_info_begin
+                                (local, rsp.op_ret, rsp.op_errno,
+                                 rsp.op_errstr);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                                goto out;
+                        }
+                }
+
+                if (dict) {
+                        ret = cli_xml_output_vol_info (local, dict);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                                goto out;
+                        }
+                }
+
+                if (local->get_vol.flags == GF_CLI_GET_VOLUME) {
+                        ret = cli_xml_output_vol_info_end (local);
+                        if (ret)
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                }
+                goto out;
+        }
+
+        while ( i < count) {
+                cli_out (" ");
+                snprintf (key, 256, "volume%d.name", i);
+                ret = dict_get_str (dict, key, &volname);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.type", i);
+                ret = dict_get_int32 (dict, key, &type);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.status", i);
+                ret = dict_get_int32 (dict, key, &status);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.brick_count", i);
+                ret = dict_get_int32 (dict, key, &brick_count);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.dist_count", i);
+                ret = dict_get_int32 (dict, key, &dist_count);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.stripe_count", i);
+                ret = dict_get_int32 (dict, key, &stripe_count);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.replica_count", i);
+                ret = dict_get_int32 (dict, key, &replica_count);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.transport", i);
+                ret = dict_get_int32 (dict, key, &transport);
+                if (ret)
+                        goto out;
+
+                snprintf (key, 256, "volume%d.volume_id", i);
+                ret = dict_get_str (dict, key, &volume_id_str);
+                if (ret)
+                        goto out;
+
+                vol_type = type;
+
+                // Distributed (stripe/replicate/stripe-replica) setups
+                if ((type > 0) && ( dist_count < brick_count))
+                        vol_type = type + 3;
+
+                cli_out ("Volume Name: %s", volname);
+                cli_out ("Type: %s", cli_vol_type_str[vol_type]);
+                cli_out ("Volume ID: %s", volume_id_str);
+                cli_out ("Status: %s", cli_vol_status_str[status]);
+
+                if (type == GF_CLUSTER_TYPE_STRIPE_REPLICATE) {
+                        cli_out ("Number of Bricks: %d x %d x %d = %d",
+                                 (brick_count / dist_count),
+                                 stripe_count,
+                                 replica_count,
+                                 brick_count);
+
+                } else if (type == GF_CLUSTER_TYPE_NONE) {
+                        cli_out ("Number of Bricks: %d", brick_count);
+
+                } else {
+                        /* For both replicate and stripe, dist_count is
+                           good enough */
+                        cli_out ("Number of Bricks: %d x %d = %d",
+                                 (brick_count / dist_count),
+                                 dist_count, brick_count);
+                }
+
+                cli_out ("Transport-type: %s",
+                         ((transport == 0)?"tcp":
+                          (transport == 1)?"rdma":
+                          "tcp,rdma"));
+                j = 1;
+
+                GF_FREE (local->get_vol.volname);
+                local->get_vol.volname = gf_strdup (volname);
+
+                if (brick_count)
+                        cli_out ("Bricks:");
+
+                while (j <= brick_count) {
+                        snprintf (key, 1024, "volume%d.brick%d", i, j);
+                        ret = dict_get_str (dict, key, &brick);
+                        if (ret)
+                                goto out;
+
+                        cli_out ("Brick%d: %s", j, brick);
+                        j++;
+                }
+
+                snprintf (key, 256, "volume%d.opt_count",i);
+                ret = dict_get_int32 (dict, key, &opt_count);
+                if (ret)
+                        goto out;
+
+                if (!opt_count)
+                        goto out;
+
+                cli_out ("Options Reconfigured:");
+
+                snprintf (key, 256, "volume%d.option.",i);
+                int _output_volinfo_opts (dict_t *d, char *k,
+                                          data_t *v, void *tmp)
+                {
+                        ptr = strstr (k, "option.");
+                        if (ptr) {
+                                value = v;
+                                if (!value) {
+                                        ret = -1;
+                                        goto internal_out;
+                                }
+                                cli_out_options (key, k, v->data);
+                        }
+                internal_out:
+                        return ret;
+                }
+                ret = dict_foreach (dict, _output_volinfo_opts, NULL);
+                if (ret)
+                        goto out;
+
+                i++;
+        }
+
 
         ret = 0;
-
 out:
         cli_cmd_broadcast_response (ret);
         if (ret)
-                cli_out ("%s", err_str);
+                cli_err ("%s", err_str);
 
         if (dict)
                 dict_destroy (dict);
 
-        gf_log ("", GF_LOG_INFO, "Returning: %d", ret);
+        free (rsp.dict.dict_val);
+
+        free (rsp.op_errstr);
+
+        gf_log ("cli", GF_LOG_INFO, "Returning: %d", ret);
         return ret;
 }
 
 int
-gf_cli3_1_create_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_create_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp              rsp   = {0,};
-        int                     ret   = 0;
+        int                     ret   = -1;
         cli_local_t             *local = NULL;
         char                    *volname = NULL;
         dict_t                  *dict = NULL;
+        dict_t                  *rsp_dict = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
         }
 
         local = ((call_frame_t *) (myframe))->local;
-        ((call_frame_t *) (myframe))->local = NULL;
 
         ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
         if (ret < 0) {
@@ -648,43 +766,64 @@ gf_cli3_1_create_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
+        gf_log ("cli", GF_LOG_INFO, "Received resp to create volume");
+
         dict = local->dict;
 
         ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
 
-        gf_log ("cli", GF_LOG_INFO, "Received resp to create volume");
-	if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-	        cli_out ("%s", rsp.op_errstr);
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                if (rsp.op_ret == 0) {
+                        rsp_dict = dict_new ();
+                        ret = dict_unserialize (rsp.dict.dict_val,
+                                                rsp.dict.dict_len,
+                                                &rsp_dict);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Failed rsp_dict unserialization");
+                                goto out;
+                        }
+                }
+
+                ret = cli_xml_output_vol_create (rsp_dict, rsp.op_ret,
+                                                 rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
+                cli_err ("volume create: %s: failed: %s", volname,
+                         rsp.op_errstr);
+        else if (rsp.op_ret)
+                cli_err ("volume create: %s: failed", volname);
         else
-                cli_out ("Creation of volume %s has been %s", volname,
-                                (rsp.op_ret) ? "unsuccessful":
-                                "successful. Please start the volume to "
-                                "access data.");
+                cli_out ("volume create: %s: success: "
+                         "please start the volume to access data", volname);
+
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        if (dict)
-                dict_unref (dict);
-        if (local)
-                cli_local_wipe (local);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
-        if (rsp.op_errstr)
-                free (rsp.op_errstr);
+        free (rsp.dict.dict_val);
+        free (rsp.op_errstr);
         return ret;
 }
 
 int
-gf_cli3_1_delete_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_delete_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp              rsp   = {0,};
-        int                     ret   = 0;
+        int                     ret   = -1;
         cli_local_t             *local = NULL;
         char                    *volname = NULL;
         call_frame_t            *frame = NULL;
         dict_t                  *dict = NULL;
+        dict_t                  *rsp_dict = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -698,7 +837,6 @@ gf_cli3_1_delete_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         frame = myframe;
         local = frame->local;
-        frame->local = NULL;
 
         if (local)
                 dict = local->dict;
@@ -711,35 +849,57 @@ gf_cli3_1_delete_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to delete volume");
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                if (rsp.op_ret == 0) {
+                        rsp_dict = dict_new ();
+                        ret = dict_unserialize (rsp.dict.dict_val,
+                                                rsp.dict.dict_len,
+                                                &rsp_dict);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Failed rsp_dict unserialization");
+                                goto out;
+                        }
+                }
+
+                ret = cli_xml_output_generic_volume ("volDelete", rsp_dict,
+                                                     rsp.op_ret, rsp.op_errno,
+                                                     rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
         if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                cli_err ("volume delete: %s: failed: %s", volname,
+                         rsp.op_errstr);
+        else if (rsp.op_ret)
+                cli_err ("volume delete: %s: failed", volname);
         else
-                cli_out ("Deleting volume %s has been %s", volname,
-                         (rsp.op_ret) ? "unsuccessful": "successful");
+                cli_out ("volume delete: %s: success", volname);
+
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        cli_local_wipe (local);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
-        if (dict)
-                dict_unref (dict);
+        free (rsp.dict.dict_val);
 
         gf_log ("", GF_LOG_INFO, "Returning with %d", ret);
         return ret;
 }
 
 int
-gf_cli3_1_start_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_start_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp              rsp   = {0,};
-        int                     ret   = 0;
+        int                     ret   = -1;
         cli_local_t             *local = NULL;
         char                    *volname = NULL;
         call_frame_t            *frame = NULL;
         dict_t                  *dict = NULL;
+        dict_t                  *rsp_dict = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -753,10 +913,8 @@ gf_cli3_1_start_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         frame = myframe;
 
-        if (frame) {
+        if (frame)
                 local = frame->local;
-                frame->local = NULL;
-        }
 
         if (local)
                 dict = local->dict;
@@ -769,37 +927,56 @@ gf_cli3_1_start_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to start volume");
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                if (rsp.op_ret == 0) {
+                        rsp_dict = dict_new ();
+                        ret = dict_unserialize (rsp.dict.dict_val,
+                                                rsp.dict.dict_len,
+                                                &rsp_dict);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Failed rsp_dict unserialization");
+                                goto out;
+                        }
+                }
+
+                ret = cli_xml_output_generic_volume ("volStart", rsp_dict,
+                                                     rsp.op_ret, rsp.op_errno,
+                                                     rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
         if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                cli_err ("volume start: %s: failed: %s", volname,
+                         rsp.op_errstr);
+        else if (rsp.op_ret)
+                cli_err ("volume start: %s: failed", volname);
         else
-                cli_out ("Starting volume %s has been %s", volname,
-                        (rsp.op_ret) ? "unsuccessful": "successful");
+                cli_out ("volume start: %s: success", volname);
 
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        if (local)
-                cli_local_wipe (local);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
-        if (rsp.op_errstr)
-                free (rsp.op_errstr);
-        if (dict)
-                dict_unref (dict);
+        free (rsp.dict.dict_val);
+        free (rsp.op_errstr);
         return ret;
 }
 
 int
-gf_cli3_1_stop_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_stop_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp            rsp   = {0,};
-        int                   ret   = 0;
+        int                   ret   = -1;
         cli_local_t           *local = NULL;
         char                  *volname = NULL;
         call_frame_t          *frame = NULL;
         dict_t                *dict = NULL;
+        dict_t                *rsp_dict = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -828,26 +1005,47 @@ gf_cli3_1_stop_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to stop volume");
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                if (rsp.op_ret == 0) {
+                        rsp_dict = dict_new ();
+                        ret = dict_unserialize (rsp.dict.dict_val,
+                                                rsp.dict.dict_len,
+                                                &rsp_dict);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Failed rsp_dict unserialization");
+                                goto out;
+                        }
+                }
+
+                ret = cli_xml_output_generic_volume ("volStop", rsp_dict,
+                                                     rsp.op_ret, rsp.op_errno,
+                                                     rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
         if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                cli_err ("volume stop: %s: failed: %s", volname, rsp.op_errstr);
+        else if (rsp.op_ret)
+                cli_err ("volume stop: %s: failed", volname);
         else
-                cli_out ("Stopping volume %s has been %s", volname,
-                        (rsp.op_ret) ? "unsuccessful": "successful");
+                cli_out ("volume stop: %s: success", volname);
+
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        if (rsp.op_errstr)
-                free (rsp.op_errstr);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
-        if (local)
-                cli_local_wipe (local);
+        free (rsp.op_errstr);
+        free (rsp.dict.dict_val);
+
         return ret;
 }
 
 int
-gf_cli3_1_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp               rsp     = {0,};
@@ -856,12 +1054,21 @@ gf_cli3_1_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
         call_frame_t            *frame   = NULL;
         char                    *status  = "unknown";
         int                      cmd     = 0;
-        int                      ret     = 0;
+        int                      ret     = -1;
         dict_t                  *dict    = NULL;
         dict_t                  *local_dict = NULL;
         uint64_t                 files   = 0;
         uint64_t                 size    = 0;
         uint64_t                 lookup  = 0;
+        char                     msg[1024] = {0,};
+        gf_defrag_status_t       status_rcd = GF_DEFRAG_STATUS_NOT_STARTED;
+        int32_t                  counter = 0;
+        char                    *node_uuid = NULL;
+        char                     key[256] = {0,};
+        int32_t                  i = 1;
+        uint64_t                 failures = 0;
+        double                   elapsed = 0;
+        char                    *size_str = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -879,9 +1086,8 @@ gf_cli3_1_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
         if (frame)
                 local = frame->local;
 
-        if (local) {
+        if (local)
                 local_dict = local->dict;
-        }
 
         ret = dict_get_str (local_dict, "volname", &volname);
         if (ret) {
@@ -912,54 +1118,120 @@ gf_cli3_1_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 }
         }
 
-        ret = dict_get_uint64 (dict, "files", &files);
-        if (ret)
-                gf_log (THIS->name, GF_LOG_TRACE,
-                        "failed to get file count");
-
-        ret = dict_get_uint64 (dict, "size", &size);
-        if (ret)
-                gf_log (THIS->name, GF_LOG_TRACE,
-                        "failed to get size of xfer");
-
-        ret = dict_get_uint64 (dict, "lookups", &lookup);
-        if (ret)
-                gf_log (THIS->name, GF_LOG_TRACE,
-                        "failed to get lookedup file count");
+        if (!((cmd == GF_DEFRAG_CMD_STOP) || (cmd == GF_DEFRAG_CMD_STATUS))) {
+                /* All other possibility is about starting a volume */
+                if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
+                        snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
+                else
+                        snprintf (msg, sizeof (msg),
+                                  "Starting rebalance on volume %s has been %s",
+                                  volname, (rsp.op_ret) ? "unsuccessful":
+                                  "successful");
+                goto done;
+        }
 
         if (cmd == GF_DEFRAG_CMD_STOP) {
                 if (rsp.op_ret == -1) {
                         if (strcmp (rsp.op_errstr, ""))
-                                cli_out ("%s", rsp.op_errstr);
+                                snprintf (msg, sizeof (msg),
+                                          "%s", rsp.op_errstr);
                         else
-                                cli_out ("rebalance volume %s stop failed",
-                                         volname);
+                                snprintf (msg, sizeof (msg),
+                                          "rebalance volume %s stop failed",
+                                          volname);
+                        goto done;
                 } else {
-                        cli_out ("stopped rebalance process of volume %s \n"
-                                 "(after rebalancing %"PRId64" files totaling "
-                                 "%"PRId64" bytes)", volname, files, size);
+                        snprintf (msg, sizeof (msg),
+                                 "Stopped rebalance process on volume %s \n",
+                                  volname);
                 }
-                goto done;
         }
         if (cmd == GF_DEFRAG_CMD_STATUS) {
                 if (rsp.op_ret == -1) {
                         if (strcmp (rsp.op_errstr, ""))
-                                cli_out ("%s", rsp.op_errstr);
+                                snprintf (msg, sizeof (msg),
+                                          "%s", rsp.op_errstr);
                         else
-                                cli_out ("failed to get the status of "
-                                         "rebalance process");
+                                snprintf (msg, sizeof (msg),
+                                          "Failed to get the status of "
+                                          "rebalance process");
                         goto done;
                 }
+        }
 
-                switch (rsp.op_errno) {
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_rebalance (cmd, dict, rsp.op_ret,
+                                                    rsp.op_errno,
+                                                    rsp.op_errstr);
+                goto out;
+        }
+
+        ret = dict_get_int32 (dict, "count", &counter);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR, "count not set");
+                goto out;
+        }
+
+        cli_out ("%40s %16s %13s %13s %13s %14s %s", "Node", "Rebalanced-files",
+                 "size", "scanned", "failures", "status", "run time in secs");
+        cli_out ("%40s %16s %13s %13s %13s %14s %16s", "---------",
+                 "-----------", "-----------", "-----------", "-----------",
+                 "------------", "--------------");
+        do {
+                snprintf (key, 256, "node-uuid-%d", i);
+                ret = dict_get_str (dict, key, &node_uuid);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get node-uuid");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "files-%d", i);
+                ret = dict_get_uint64 (dict, key, &files);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get file count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "size-%d", i);
+                ret = dict_get_uint64 (dict, key, &size);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get size of xfer");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "lookups-%d", i);
+                ret = dict_get_uint64 (dict, key, &lookup);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get lookedup file count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "status-%d", i);
+                ret = dict_get_int32 (dict, key, (int32_t *)&status_rcd);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get status");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "failures-%d", i);
+                ret = dict_get_uint64 (dict, key, &failures);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get failures count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "run-time-%d", i);
+                ret = dict_get_double (dict, key, &elapsed);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get run-time");
+
+                switch (status_rcd) {
                 case GF_DEFRAG_STATUS_NOT_STARTED:
                         status = "not started";
                         break;
-                case GF_DEFRAG_STATUS_LAYOUT_FIX_STARTED:
-                        status = "step 1: layout fix in progress";
-                        break;
-                case GF_DEFRAG_STATUS_MIGRATE_DATA_STARTED:
-                        status = "step 2: data migration in progress";
+                case GF_DEFRAG_STATUS_STARTED:
+                        status = "in progress";
                         break;
                 case GF_DEFRAG_STATUS_STOPPED:
                         status = "stopped";
@@ -970,70 +1242,41 @@ gf_cli3_1_defrag_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 case GF_DEFRAG_STATUS_FAILED:
                         status = "failed";
                         break;
-                case GF_DEFRAG_STATUS_LAYOUT_FIX_COMPLETE:
-                        status = "step 1: layout fix complete";
-                        break;
-                case GF_DEFRAG_STATUS_MIGRATE_DATA_COMPLETE:
-                        status = "step 2: data migration complete";
-                        break;
-                case GF_DEFRAG_STATUS_PAUSED:
-                        status = "paused";
-                        break;
-                }
-                if (files && (rsp.op_errno == 1)) {
-                        cli_out ("rebalance %s: fixed layout %"PRId64,
-                                 status, files);
-                        goto done;
-                }
-                if (files && (rsp.op_errno == 6)) {
-                        cli_out ("rebalance %s: fixed layout %"PRId64,
-                                 status, files);
-                        goto done;
-                }
-                if (files) {
-                        cli_out ("rebalance %s: rebalanced %"PRId64
-                                 " files of size %"PRId64" (total files"
-                                 " scanned %"PRId64")", status,
-                                 files, size, lookup);
-                        goto done;
                 }
 
-                cli_out ("rebalance %s", status);
-                goto done;
-        }
+                size_str = gf_uint64_2human_readable(size);
+                cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"PRIu64
+                         " %14s %16.2f", node_uuid, files, size_str, lookup,
+                         failures, status, elapsed);
+                GF_FREE(size_str);
 
-        /* All other possibility is about starting a volume */
-        if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
-        else
-                cli_out ("starting rebalance on volume %s has been %s",
-                         volname, (rsp.op_ret) ? "unsuccessful":
-                         "successful");
+                i++;
+        } while (i <= counter);
+
 
 done:
+        if (rsp.op_ret)
+                cli_err ("volume rebalance: %s: failed: %s", volname, msg);
+        else
+                cli_out ("volume rebalance: %s: success: %s", volname, msg);
         ret = rsp.op_ret;
 
 out:
-        if (rsp.op_errstr)
-                free (rsp.op_errstr); //malloced by xdr
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val); //malloced by xdr
+        free (rsp.op_errstr); //malloced by xdr
+        free (rsp.dict.dict_val); //malloced by xdr
         if (dict)
                 dict_unref (dict);
-        if (local_dict)
-                dict_unref (local_dict);
-        if (local)
-                cli_local_wipe (local);
         cli_cmd_broadcast_response (ret);
         return ret;
 }
 
 int
-gf_cli3_1_rename_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_rename_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp              rsp   = {0,};
-        int                     ret   = 0;
+        int                     ret   = -1;
+        char                    msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1047,8 +1290,22 @@ gf_cli3_1_rename_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to probe");
-        cli_out ("Rename volume %s", (rsp.op_ret) ? "unsuccessful":
-                                        "successful");
+        snprintf (msg, sizeof (msg), "Rename volume %s",
+                  (rsp.op_ret) ? "unsuccessful": "successful");
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("volRename", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("volume rename: failed");
+        else
+                cli_out ("volume rename: success");
 
         ret = rsp.op_ret;
 
@@ -1058,11 +1315,12 @@ out:
 }
 
 int
-gf_cli3_1_reset_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_reset_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp           rsp   = {0,};
-        int                  ret   = 0;
+        int                  ret   = -1;
+        char                 msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1077,26 +1335,41 @@ gf_cli3_1_reset_volume_cbk (struct rpc_req *req, struct iovec *iov,
         gf_log ("cli", GF_LOG_INFO, "Received resp to reset");
 
         if (rsp.op_ret &&  strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
         else
-                cli_out ("reset volume %s", (rsp.op_ret) ? "unsuccessful":
-                                "successful");
+                snprintf (msg, sizeof (msg), "reset volume %s",
+                          (rsp.op_ret) ? "unsuccessful": "successful");
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("volReset", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("volume reset: failed: %s", msg);
+        else
+                cli_out ("volume reset: success");
 
         ret = rsp.op_ret;
 
 out:
-                cli_cmd_broadcast_response (ret);
+        cli_cmd_broadcast_response (ret);
         return ret;
 }
 
 int
-gf_cli3_1_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp           rsp   = {0,};
-        int                  ret   = 0;
+        int                  ret   = -1;
         dict_t               *dict = NULL;
         char                 *help_str = NULL;
+        char                 msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1110,9 +1383,6 @@ gf_cli3_1_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to set");
 
-        if (rsp.op_ret &&  strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
-
         dict = dict_new ();
 
         if (!dict) {
@@ -1122,28 +1392,47 @@ gf_cli3_1_set_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         ret = dict_unserialize (rsp.dict.dict_val, rsp.dict.dict_len, &dict);
 
-        if (ret)
-                goto out;
+        if (dict_get_str (dict, "help-str", &help_str) && !msg[0])
+                snprintf (msg, sizeof (msg), "Set volume %s",
+                          (rsp.op_ret) ? "unsuccessful": "successful");
 
-        if (dict_get_str (dict, "help-str", &help_str))
-                cli_out ("Set volume %s", (rsp.op_ret) ? "unsuccessful":
-                                                         "successful");
-        else 
-                cli_out ("%s", help_str);
+        if ((global_state->mode & GLUSTER_MODE_XML) && (help_str == NULL)) {
+                ret = cli_xml_output_str ("volSet", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret &&  strcmp (rsp.op_errstr, ""))
+                cli_err ("volume set: failed: %s", rsp.op_errstr);
+
+        if (!rsp.op_ret) {
+                if (help_str == NULL)
+                        cli_out ("volume set: success");
+                else
+                        cli_out ("%s", help_str);
+        } else {
+                cli_err ("volume set: failed");
+        }
 
         ret = rsp.op_ret;
 
 out:
+        if (dict)
+                dict_unref (dict);
         cli_cmd_broadcast_response (ret);
         return ret;
 }
 
 int
-gf_cli3_1_add_brick_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_add_brick_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp                  rsp   = {0,};
-        int                         ret   = 0;
+        int                         ret   = -1;
+        char                        msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1159,18 +1448,30 @@ gf_cli3_1_add_brick_cbk (struct rpc_req *req, struct iovec *iov,
         gf_log ("cli", GF_LOG_INFO, "Received resp to add brick");
 
         if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
         else
-                cli_out ("Add Brick %s", (rsp.op_ret) ? "unsuccessful":
-                                                        "successful");
+                snprintf (msg, sizeof (msg), "Add Brick %s",
+                          (rsp.op_ret) ? "unsuccessful": "successful");
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("volAddBrick", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("volume add-brick: failed: %s", rsp.op_errstr);
+        else
+                cli_out ("volume add-brick: success");
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
-        if (rsp.op_errstr)
-                free (rsp.op_errstr);
+        free (rsp.dict.dict_val);
+        free (rsp.op_errstr);
         return ret;
 }
 
@@ -1180,10 +1481,20 @@ gf_cli3_remove_brick_status_cbk (struct rpc_req *req, struct iovec *iov,
 {
         gf_cli_rsp               rsp     = {0,};
         char                    *status  = "unknown";
-        int                      ret     = 0;
+        int                      ret     = -1;
         uint64_t                 files   = 0;
         uint64_t                 size    = 0;
+        uint64_t                 lookup  = 0;
         dict_t                  *dict    = NULL;
+        char                     msg[1024] = {0,};
+        char                     key[256] = {0,};
+        int32_t                  i       = 1;
+        int32_t                  counter = 0;
+        char                    *node_uuid = 0;
+        gf_defrag_status_t       status_rcd = GF_DEFRAG_STATUS_NOT_STARTED;
+        uint64_t                 failures = 0;
+        double                   elapsed = 0;
+        char                    *size_str = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1199,35 +1510,17 @@ gf_cli3_remove_brick_status_cbk (struct rpc_req *req, struct iovec *iov,
         ret = rsp.op_ret;
         if (rsp.op_ret == -1) {
                 if (strcmp (rsp.op_errstr, ""))
-                        cli_out ("%s", rsp.op_errstr);
+                        snprintf (msg, sizeof (msg), "volume remove-brick: "
+                                  "failed: %s", rsp.op_errstr);
                 else
-                        cli_out ("failed to get the status of "
-                                 "remove-brick process");
-                goto out;
-        }
+                        snprintf (msg, sizeof (msg), "volume remove-brick: "
+                                  "failed: status getting failed");
 
-        switch (rsp.op_errno) {
-        case GF_DEFRAG_STATUS_NOT_STARTED:
-                status = "not started";
-                break;
-        case GF_DEFRAG_STATUS_LAYOUT_FIX_STARTED:
-        case GF_DEFRAG_STATUS_MIGRATE_DATA_STARTED:
-        case GF_DEFRAG_STATUS_LAYOUT_FIX_COMPLETE:
-                status = "in progress";
-                break;
-        case GF_DEFRAG_STATUS_STOPPED:
-                status = "stopped";
-                break;
-        case GF_DEFRAG_STATUS_COMPLETE:
-        case GF_DEFRAG_STATUS_MIGRATE_DATA_COMPLETE:
-                status = "completed";
-                break;
-        case GF_DEFRAG_STATUS_FAILED:
-                status = "failed";
-                break;
-        case GF_DEFRAG_STATUS_PAUSED:
-                status = "paused";
-                break;
+                if (global_state->mode & GLUSTER_MODE_XML)
+                        goto xml_output;
+
+                cli_err ("%s", msg);
+                goto out;
         }
 
         if (rsp.dict.dict_len) {
@@ -1238,45 +1531,125 @@ gf_cli3_remove_brick_status_cbk (struct rpc_req *req, struct iovec *iov,
                                         rsp.dict.dict_len,
                                         &dict);
                 if (ret < 0) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
-                                "failed to "
-                                "unserialize req-buffer to dictionary");
+                        strncpy (msg, "failed to unserialize req-buffer to "
+                                 "dictionary", sizeof (msg));
+
+                        if (global_state->mode & GLUSTER_MODE_XML) {
+                                rsp.op_ret = -1;
+                                goto xml_output;
+                        }
+
+                        gf_log ("cli", GF_LOG_ERROR, "%s", msg);
                         goto out;
                 }
         }
 
-        ret = dict_get_uint64 (dict, "files", &files);
-        if (ret)
-                gf_log (THIS->name, GF_LOG_TRACE,
-                        "failed to get file count");
-
-        ret = dict_get_uint64 (dict, "size", &size);
-        if (ret)
-                gf_log (THIS->name, GF_LOG_TRACE,
-                        "failed to get size of xfer");
-
-        if (files && (rsp.op_errno == 1)) {
-                cli_out ("remove-brick %s: fixed layout %"PRId64,
-                         status,files);
-                goto out;
-        }
-        if (files && (rsp.op_errno == 6)) {
-                cli_out ("remove-brick %s: fixed layout %"PRId64,
-                         status, files);
-                goto out;
-        }
-        if (files) {
-                cli_out ("remove-brick %s: decommissioned %"PRId64
-                         " files of size %"PRId64, status,
-                         files, size);
+xml_output:
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                if (strcmp (rsp.op_errstr, "")) {
+                        ret = cli_xml_output_vol_remove_brick (_gf_true, dict,
+                                                               rsp.op_ret,
+                                                               rsp.op_errno,
+                                                               rsp.op_errstr);
+                } else {
+                        ret = cli_xml_output_vol_remove_brick (_gf_true, dict,
+                                                               rsp.op_ret,
+                                                               rsp.op_errno,
+                                                               msg);
+                }
                 goto out;
         }
 
-        cli_out ("remove-brick %s", status);
+        ret = dict_get_int32 (dict, "count", &counter);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR, "count not set");
+                goto out;
+        }
+
+
+        cli_out ("%40s %16s %13s %13s %13s %14s %s", "Node", "Rebalanced-files",
+                 "size", "scanned", "failures", "status", "run-time in secs");
+        cli_out ("%40s %16s %13s %13s %13s %14s %16s", "---------",
+                 "-----------", "-----------", "-----------", "-----------",
+                 "------------", "--------------");
+
+        do {
+                snprintf (key, 256, "node-uuid-%d", i);
+                ret = dict_get_str (dict, key, &node_uuid);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get node-uuid");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "files-%d", i);
+                ret = dict_get_uint64 (dict, key, &files);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get file count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "size-%d", i);
+                ret = dict_get_uint64 (dict, key, &size);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get size of xfer");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "lookups-%d", i);
+                ret = dict_get_uint64 (dict, key, &lookup);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get lookedup file count");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "status-%d", i);
+                ret = dict_get_int32 (dict, key, (int32_t *)&status_rcd);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "failed to get status");
+
+                snprintf (key, 256, "failures-%d", i);
+                ret = dict_get_uint64 (dict, key, &failures);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "Failed to get failure on files");
+
+                memset (key, 0, 256);
+                snprintf (key, 256, "run-time-%d", i);
+                ret = dict_get_double (dict, key, &elapsed);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_TRACE,
+                                "Failed to get run-time");
+
+                switch (status_rcd) {
+                case GF_DEFRAG_STATUS_NOT_STARTED:
+                        status = "not started";
+                        break;
+                case GF_DEFRAG_STATUS_STARTED:
+                        status = "in progress";
+                        break;
+                case GF_DEFRAG_STATUS_STOPPED:
+                        status = "stopped";
+                        break;
+                case GF_DEFRAG_STATUS_COMPLETE:
+                        status = "completed";
+                        break;
+                case GF_DEFRAG_STATUS_FAILED:
+                        status = "failed";
+                        break;
+                }
+
+                size_str = gf_uint64_2human_readable(size);
+                cli_out ("%40s %16"PRIu64 " %13s" " %13"PRIu64 " %13"PRIu64
+                         " %14s %16.2f", node_uuid, files, size_str, lookup,
+                         failures, status, elapsed);
+                GF_FREE(size_str);
+
+                i++;
+        } while (i <= counter);
 
 out:
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val); //malloced by xdr
+        free (rsp.dict.dict_val); //malloced by xdr
         if (dict)
                 dict_unref (dict);
         cli_cmd_broadcast_response (ret);
@@ -1285,15 +1658,23 @@ out:
 
 
 int
-gf_cli3_1_remove_brick_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_remove_brick_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp                      rsp   = {0,};
-        int                             ret   = 0;
+        int                             ret   = -1;
+        char                            msg[1024] = {0,};
+        gf1_op_commands                 cmd = GF_OP_CMD_NONE;
+        char                           *cmd_str = "unknown";
+        cli_local_t                    *local = NULL;
+        call_frame_t                   *frame = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
         }
+
+        frame = myframe;
+        local = frame->local;
 
         ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_cli_rsp);
         if (ret < 0) {
@@ -1301,33 +1682,69 @@ gf_cli3_1_remove_brick_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
         }
 
+        ret = dict_get_int32 (local->dict, "command", (int32_t *)&cmd);
+        if (ret) {
+                 gf_log ("", GF_LOG_ERROR, "failed to get command");
+                 goto out;
+        }
+
+        switch (cmd) {
+
+        case GF_OP_CMD_START:
+                cmd_str = "start";
+                break;
+        case GF_OP_CMD_COMMIT:
+                cmd_str = "commit";
+                break;
+        case GF_OP_CMD_COMMIT_FORCE:
+                cmd_str = "commit force";
+                break;
+        default:
+                cmd_str = "unknown";
+                break;
+        }
+
         gf_log ("cli", GF_LOG_INFO, "Received resp to remove brick");
 
         if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
         else
-                cli_out ("Remove Brick %s", (rsp.op_ret) ? "unsuccessful":
-                                                           "successful");
+                snprintf (msg, sizeof (msg), "Remove Brick %s %s", cmd_str,
+                          (rsp.op_ret) ? "unsuccessful": "successful");
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_remove_brick (_gf_false, NULL,
+                                                       rsp.op_ret, rsp.op_errno,
+                                                       rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("volume remove-brick: failed: %s", rsp.op_errstr);
+        else
+                cli_out ("volume remove-brick: success");
 
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
-        if (rsp.op_errstr)
-                free (rsp.op_errstr);
+        free (rsp.dict.dict_val);
+        free (rsp.op_errstr);
+
         return ret;
 }
 
 
 
 int
-gf_cli3_1_replace_brick_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_replace_brick_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp                       rsp              = {0,};
-        int                              ret              = 0;
+        int                              ret              = -1;
         cli_local_t                     *local            = NULL;
         call_frame_t                    *frame            = NULL;
         dict_t                          *dict             = NULL;
@@ -1337,6 +1754,7 @@ gf_cli3_1_replace_brick_cbk (struct rpc_req *req, struct iovec *iov,
         gf1_cli_replace_op               replace_op       = 0;
         char                            *rb_operation_str = NULL;
         dict_t                          *rsp_dict         = NULL;
+        char                             msg[1024]         = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1450,20 +1868,28 @@ gf_cli3_1_replace_brick_cbk (struct rpc_req *req, struct iovec *iov,
         }
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to replace brick");
-        cli_out ("%s",
-                 rb_operation_str ? rb_operation_str : "Unknown operation");
+        snprintf (msg, sizeof (msg), "%s",
+                  rb_operation_str ? rb_operation_str : "Unknown operation");
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_replace_brick (replace_op, rsp_dict,
+                                                        rsp.op_ret,
+                                                        rsp.op_errno, msg);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("volume replace-brick: failed: %s", msg);
+        else
+                cli_out ("volume replace-brick: success: %s", msg);
         ret = rsp.op_ret;
 
 out:
-        if (local) {
-                dict_unref (local->dict);
-                cli_local_wipe (local);
-        }
-
         cli_cmd_broadcast_response (ret);
-        if (rsp.dict.dict_val)
-               free (rsp.dict.dict_val);
+        free (rsp.dict.dict_val);
         if (rsp_dict)
                 dict_unref (rsp_dict);
 
@@ -1472,11 +1898,12 @@ out:
 
 
 static int
-gf_cli3_1_log_rotate_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_log_rotate_cbk (struct rpc_req *req, struct iovec *iov,
                           int count, void *myframe)
 {
         gf_cli_rsp             rsp   = {0,};
         int                    ret   = -1;
+        char                   msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1491,27 +1918,40 @@ gf_cli3_1_log_rotate_cbk (struct rpc_req *req, struct iovec *iov,
         gf_log ("cli", GF_LOG_DEBUG, "Received resp to log rotate");
 
         if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
         else
-                cli_out ("log rotate %s", (rsp.op_ret) ? "unsuccessful":
-                                                         "successful");
+                snprintf (msg, sizeof (msg), "log rotate %s",
+                          (rsp.op_ret) ? "unsuccessful": "successful");
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("volLogRotate", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("volume log-rotate: failed: %s", msg);
+        else
+                cli_out ("volume log-rotate: success");
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
+        free (rsp.dict.dict_val);
 
         return ret;
 }
 
 static int
-gf_cli3_1_sync_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_sync_volume_cbk (struct rpc_req *req, struct iovec *iov,
                            int count, void *myframe)
 {
         gf_cli_rsp                     rsp   = {0,};
         int                            ret   = -1;
+        char                           msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1526,10 +1966,25 @@ gf_cli3_1_sync_volume_cbk (struct rpc_req *req, struct iovec *iov,
         gf_log ("cli", GF_LOG_DEBUG, "Received resp to sync");
 
         if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
+                snprintf (msg, sizeof (msg), "volume sync: failed: %s",
+                          rsp.op_errstr);
         else
-                cli_out ("volume sync: %s",
-                         (rsp.op_ret) ? "unsuccessful": "successful");
+                snprintf (msg, sizeof (msg), "volume sync: %s",
+                          (rsp.op_ret) ? "failed": "success");
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("volSync", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("%s", msg);
+        else
+                cli_out ("%s", msg);
         ret = rsp.op_ret;
 
 out:
@@ -1538,12 +1993,12 @@ out:
 }
 
 int32_t
-gf_cli3_1_print_limit_list (char *volname, char *limit_list,
+gf_cli_print_limit_list (char *volname, char *limit_list,
                             char *op_errstr)
 {
         int64_t  size            = 0;
         int64_t  limit_value     = 0;
-        int32_t  i, j, k;
+        int32_t  i, j;
         int32_t  len = 0, ret    = -1;
         char     *size_str       = NULL;
         char     path [PATH_MAX] = {0, };
@@ -1551,6 +2006,7 @@ gf_cli3_1_print_limit_list (char *volname, char *limit_list,
         char     value [1024]    = {0, };
         char     mountdir []     = "/tmp/mntXXXXXX";
         char     abspath [PATH_MAX] = {0, };
+        char     *colon_ptr      = NULL;
         runner_t runner          = {0,};
 
         GF_VALIDATE_OR_GOTO ("cli", volname, out);
@@ -1561,7 +2017,7 @@ gf_cli3_1_print_limit_list (char *volname, char *limit_list,
 
         len = strlen (limit_list);
         if (len == 0) {
-                cli_out ("%s", op_errstr?op_errstr:"quota limit not set ");
+                cli_err ("%s", op_errstr?op_errstr:"quota limit not set ");
                 goto out;
         }
 
@@ -1587,7 +2043,7 @@ gf_cli3_1_print_limit_list (char *volname, char *limit_list,
 
         len = strlen (limit_list);
         if (len == 0) {
-                cli_out ("quota limit not set ");
+                cli_err ("quota limit not set ");
                 goto unmount;
         }
 
@@ -1598,19 +2054,16 @@ gf_cli3_1_print_limit_list (char *volname, char *limit_list,
                  "-----------------------");
         while (i < len) {
                 j = 0;
-                k = 0;
-
-                while (limit_list [i] != ':') {
-                        path [k++] = limit_list [i++];
-                }
-                path [k] = '\0';
-
-                i++;  //skip ':'
 
                 while (limit_list [i] != ',' && limit_list [i] != '\0') {
-                        value [j++] = limit_list[i++];
+                        path [j++] = limit_list[i++];
                 }
-                value [j] = '\0';
+                path [j] = '\0';
+                //here path[] contains both path and limit value
+
+                colon_ptr = strrchr (path, ':');
+                *colon_ptr = '\0';
+                strcpy (value, ++colon_ptr);
 
                 snprintf (abspath, sizeof (abspath), "%s/%s", mountdir, path);
 
@@ -1653,15 +2106,16 @@ out:
 }
 
 int
-gf_cli3_1_quota_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_quota_cbk (struct rpc_req *req, struct iovec *iov,
                      int count, void *myframe)
 {
         gf_cli_rsp         rsp        = {0,};
-        int                ret        = 0;
+        int                ret        = -1;
         dict_t            *dict       = NULL;
         char              *volname    = NULL;
         char              *limit_list = NULL;
         int32_t            type       = 0;
+        char               msg[1024] = {0,};
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -1675,7 +2129,11 @@ gf_cli3_1_quota_cbk (struct rpc_req *req, struct iovec *iov,
 
         if (rsp.op_ret &&
             strcmp (rsp.op_errstr, "") == 0) {
-                cli_out ("command unsuccessful %s", rsp.op_errstr);
+                snprintf (msg, sizeof (msg), "command unsuccessful %s",
+                          rsp.op_errstr);
+
+                if (global_state->mode & GLUSTER_MODE_XML)
+                        goto xml_output;
                 goto out;
         }
 
@@ -1710,36 +2168,70 @@ gf_cli3_1_quota_cbk (struct rpc_req *req, struct iovec *iov,
                         "failed to get type");
 
         if (type == GF_QUOTA_OPTION_TYPE_LIST) {
+                if (global_state->mode & GLUSTER_MODE_XML) {
+                        ret = cli_xml_output_vol_quota_limit_list
+                                (volname, limit_list, rsp.op_ret,
+                                 rsp.op_errno, rsp.op_errstr);
+                        if (ret)
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                        goto out;
+
+                }
+
                 if (limit_list) {
-                        gf_cli3_1_print_limit_list (volname,
+                        gf_cli_print_limit_list (volname,
                                                     limit_list,
                                                     rsp.op_errstr);
+                } else {
+                        gf_log ("cli", GF_LOG_INFO, "Received resp to quota "
+                                "command ");
+                        if (rsp.op_errstr)
+                                snprintf (msg, sizeof (msg), "%s",
+                                          rsp.op_errstr);
                 }
         } else {
                 gf_log ("cli", GF_LOG_INFO, "Received resp to quota command ");
                 if (rsp.op_errstr)
-                        cli_out ("%s", rsp.op_errstr);
+                        snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
                 else
-                        cli_out ("%s", "successful");
+                        snprintf (msg, sizeof (msg), "successful");
         }
 
-out:
+xml_output:
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("volQuota", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (strlen (msg) > 0) {
+                if (rsp.op_ret)
+                        cli_err ("%s", msg);
+                else
+                        cli_out ("%s", msg);
+        }
+
         ret = rsp.op_ret;
-
+out:
         cli_cmd_broadcast_response (ret);
+        if (dict)
+                dict_unref (dict);
 
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
+        free (rsp.dict.dict_val);
 
         return ret;
 }
 
 int
-gf_cli3_1_getspec_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_getspec_cbk (struct rpc_req *req, struct iovec *iov,
                        int count, void *myframe)
 {
         gf_getspec_rsp          rsp   = {0,};
-        int                     ret   = 0;
+        int                     ret   = -1;
         char                   *spec  = NULL;
 
         if (-1 == req->rpc_status) {
@@ -1772,11 +2264,11 @@ out:
 }
 
 int
-gf_cli3_1_pmap_b2p_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_pmap_b2p_cbk (struct rpc_req *req, struct iovec *iov,
                         int count, void *myframe)
 {
         pmap_port_by_brick_rsp rsp = {0,};
-        int                     ret   = 0;
+        int                     ret   = -1;
         char                   *spec  = NULL;
 
         if (-1 == req->rpc_status) {
@@ -1803,7 +2295,7 @@ out:
 
 
 int32_t
-gf_cli3_1_probe (call_frame_t *frame, xlator_t *this,
+gf_cli_probe (call_frame_t *frame, xlator_t *this,
                  void *data)
 {
         gf1_cli_probe_req  req      = {0,};
@@ -1831,7 +2323,7 @@ gf_cli3_1_probe (call_frame_t *frame, xlator_t *this,
 
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_PROBE, NULL,
-                              this, gf_cli3_1_probe_cbk,
+                              this, gf_cli_probe_cbk,
                               (xdrproc_t)xdr_gf1_cli_probe_req);
 
 out:
@@ -1840,7 +2332,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_deprobe (call_frame_t *frame, xlator_t *this,
+gf_cli_deprobe (call_frame_t *frame, xlator_t *this,
                    void *data)
 {
         gf1_cli_deprobe_req  req      = {0,};
@@ -1873,7 +2365,7 @@ gf_cli3_1_deprobe (call_frame_t *frame, xlator_t *this,
         req.flags    = flags;
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_DEPROBE, NULL,
-                              this, gf_cli3_1_deprobe_cbk,
+                              this, gf_cli_deprobe_cbk,
                               (xdrproc_t)xdr_gf1_cli_deprobe_req);
 
 out:
@@ -1882,7 +2374,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_list_friends (call_frame_t *frame, xlator_t *this,
+gf_cli_list_friends (call_frame_t *frame, xlator_t *this,
                         void *data)
 {
         gf1_cli_peer_list_req   req = {0,};
@@ -1897,7 +2389,7 @@ gf_cli3_1_list_friends (call_frame_t *frame, xlator_t *this,
 
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_LIST_FRIENDS, NULL,
-                              this, gf_cli3_1_list_friends_cbk,
+                              this, gf_cli_list_friends_cbk,
                               (xdrproc_t) xdr_gf1_cli_peer_list_req);
 
 out:
@@ -1906,7 +2398,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_get_next_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_get_next_volume (call_frame_t *frame, xlator_t *this,
                            void *data)
 {
 
@@ -1920,31 +2412,51 @@ gf_cli3_1_get_next_volume (call_frame_t *frame, xlator_t *this,
         }
 
         ctx = data;
-
-        ret = gf_cli3_1_get_volume (frame, this, data);
-
         local = frame->local;
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_info_begin (local, 0, 0, "");
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Error outputting to xml");
+                        goto out;
+                }
+        }
+
+        ret = gf_cli_get_volume (frame, this, data);
+
+
         if (!local || !local->get_vol.volname) {
-                cli_out ("No volumes present");
+                if ((global_state->mode & GLUSTER_MODE_XML))
+                        goto end_xml;
+
+                cli_err ("No volumes present");
                 goto out;
         }
+
 
         ctx->volname = local->get_vol.volname;
 
         while (ctx->volname) {
-                ret = gf_cli3_1_get_volume (frame, this, ctx);
+                ret = gf_cli_get_volume (frame, this, ctx);
                 if (ret)
                         goto out;
                 ctx->volname = local->get_vol.volname;
         }
 
+end_xml:
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_info_end (local);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR, "Error outputting to xml");
+        }
+
 out:
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
 int32_t
-gf_cli3_1_get_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_get_volume (call_frame_t *frame, xlator_t *this,
                       void *data)
 {
         gf_cli_req                      req = {{0,}};
@@ -1977,131 +2489,31 @@ gf_cli3_1_get_volume (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
+        ret = dict_allocate_and_serialize (dict, &req.dict.dict_val,
+                                           &req.dict.dict_len);
 
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_GET_VOLUME, NULL,
-                              this, gf_cli3_1_get_volume_cbk,
+                              this, gf_cli_get_volume_cbk,
                               (xdrproc_t) xdr_gf_cli_req);
-
-out:
-        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
-        return ret;
-}
-
-
-int32_t
-gf_cli3_1_create_volume (call_frame_t *frame, xlator_t *this,
-                         void *data)
-{
-        gf_cli_req              req = {{0,}};
-        int                     ret = 0;
-        dict_t                  *dict = NULL;
-        cli_local_t             *local = NULL;
-
-        if (!frame || !this ||  !data) {
-                ret = -1;
-                goto out;
-        }
-
-        dict = dict_ref ((dict_t *)data);
-
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_DEBUG,
-                        "failed to get serialized length of dict");
-                goto out;
-        }
-
-        local = cli_local_get ();
-
-        if (local) {
-                local->dict = dict_ref (dict);
-                frame->local = local;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_CREATE_VOLUME, NULL,
-                              this, gf_cli3_1_create_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
-
-
-
-out:
-        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
-
-        if (dict)
-                dict_unref (dict);
-
-        if (req.dict.dict_val) {
-                GF_FREE (req.dict.dict_val);
-        }
-
-        return ret;
-}
-
-int32_t
-gf_cli3_1_delete_volume (call_frame_t *frame, xlator_t *this,
-                         void *data)
-{
-        gf_cli_req              req = {{0,}};
-        int                     ret = 0;
-        cli_local_t             *local = NULL;
-        dict_t                  *dict = NULL;
-
-        if (!frame || !this ||  !data) {
-                ret = -1;
-                goto out;
-        }
-
-        local = cli_local_get ();
-
-        dict = dict_new ();
-        ret = dict_set_str (dict, "volname", data);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_WARNING, "dict set failed");
-                goto out;
-        }
-        if (local) {
-                local->dict = dict_ref (dict);
-                frame->local = local;
-        }
-
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to get serialize dict");
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_DELETE_VOLUME, NULL,
-                              this, gf_cli3_1_delete_volume_cbk,
-                              (xdrproc_t)xdr_gf_cli_req);
 
 out:
         if (dict)
                 dict_unref (dict);
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
-        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
+        GF_FREE (req.dict.dict_val);
+
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
+
 int32_t
-gf_cli3_1_start_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_create_volume (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req              req = {{0,}};
         int                     ret = 0;
-        cli_local_t             *local = NULL;
         dict_t                  *dict = NULL;
 
         if (!frame || !this ||  !data) {
@@ -2110,27 +2522,66 @@ gf_cli3_1_start_volume (call_frame_t *frame, xlator_t *this,
         }
 
         dict = data;
-        local = cli_local_get ();
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize dict");
+        ret = cli_to_glusterd (&req, frame, gf_cli_create_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_CREATE_VOLUME, this, cli_rpc_prog,
+                               NULL);
+
+out:
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+
+        GF_FREE (req.dict.dict_val);
+
+        return ret;
+}
+
+int32_t
+gf_cli_delete_volume (call_frame_t *frame, xlator_t *this,
+                         void *data)
+{
+        gf_cli_req              req = {{0,}};
+        int                     ret = 0;
+        dict_t                  *dict = NULL;
+
+        if (!frame || !this ||  !data) {
+                ret = -1;
                 goto out;
         }
 
+        dict = data;
 
-        if (local) {
-                local->dict = dict_ref (dict);
-                frame->local = local;
+        ret = cli_to_glusterd (&req, frame, gf_cli_delete_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_DELETE_VOLUME, this, cli_rpc_prog,
+                               NULL);
+
+out:
+        GF_FREE (req.dict.dict_val);
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+
+        return ret;
+}
+
+int32_t
+gf_cli_start_volume (call_frame_t *frame, xlator_t *this,
+                         void *data)
+{
+        gf_cli_req              req = {{0,}};
+        int                     ret = 0;
+        dict_t                  *dict = NULL;
+
+        if (!frame || !this ||  !data) {
+                ret = -1;
+                goto out;
         }
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_START_VOLUME, NULL,
-                              this, gf_cli3_1_start_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        dict = data;
+
+        ret = cli_to_glusterd (&req, frame, gf_cli_start_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_START_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
@@ -2139,12 +2590,11 @@ out:
 }
 
 int32_t
-gf_cli3_1_stop_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_stop_volume (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req             req = {{0,}};
         int                    ret = 0;
-        cli_local_t            *local = NULL;
         dict_t                 *dict = data;
 
         if (!frame || !this ||  !data) {
@@ -2152,28 +2602,12 @@ gf_cli3_1_stop_volume (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        local = cli_local_get ();
         dict = data;
 
-        if (local) {
-                local->dict = dict_ref (dict);
-                frame->local = local;
-        }
-
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *) &req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
-
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_STOP_VOLUME, NULL,
-                              this, gf_cli3_1_stop_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_stop_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_STOP_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
@@ -2182,17 +2616,12 @@ out:
 }
 
 int32_t
-gf_cli3_1_defrag_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_defrag_volume (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req              req     =  {{0,}};
         int                     ret     = 0;
-        cli_local_t            *local   = NULL;
-        char                   *volname = NULL;
-        char                   *cmd_str = NULL;
         dict_t                 *dict    = NULL;
-        gf_cli_defrag_type      cmd     = 0;
-        dict_t                  *req_dict = NULL;
 
         if (!frame || !this ||  !data) {
                 ret = -1;
@@ -2201,82 +2630,10 @@ gf_cli3_1_defrag_volume (call_frame_t *frame, xlator_t *this,
 
         dict = data;
 
-        ret = dict_get_str (dict, "volname", &volname);
-        if (ret)
-                gf_log ("", GF_LOG_DEBUG, "error");
-
-        ret = dict_get_str (dict, "command", &cmd_str);
-        if (ret) {
-                gf_log ("", GF_LOG_DEBUG, "error");
-                goto out;
-        }
-
-        if (strcmp (cmd_str, "start") == 0) {
-                cmd = GF_DEFRAG_CMD_START;
-                ret = dict_get_str (dict, "start-type", &cmd_str);
-                if (!ret) {
-                        if (strcmp (cmd_str, "fix-layout") == 0) {
-                                cmd = GF_DEFRAG_CMD_START_LAYOUT_FIX;
-                        }
-                        if (strcmp (cmd_str, "migrate-data") == 0) {
-                                cmd = GF_DEFRAG_CMD_START_MIGRATE_DATA;
-                        }
-                        if (strcmp (cmd_str, "migrate-data-force") == 0) {
-                                cmd = GF_DEFRAG_CMD_START_MIGRATE_DATA_FORCE;
-                        }
-                }
-                goto done;
-        }
-        if (strcmp (cmd_str, "stop") == 0) {
-                cmd = GF_DEFRAG_CMD_STOP;
-                goto done;
-        }
-        if (strcmp (cmd_str, "status") == 0) {
-                cmd = GF_DEFRAG_CMD_STATUS;
-        }
-
-done:
-        local = cli_local_get ();
-
-        req_dict = dict_new ();
-        if (!req_dict) {
-                ret = -1;
-                goto out;
-        }
-
-        ret = dict_set_str (req_dict, "volname", volname);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR,
-                        "Failed to set dict");
-                goto out;
-        }
-
-        ret = dict_set_int32 (req_dict, "rebalance-command", (int32_t) cmd);
-        if (ret) {
-                gf_log (THIS->name, GF_LOG_ERROR,
-                        "Failed to set dict");
-                goto out;
-        }
-
-        if (local) {
-                local->dict = dict_ref (req_dict);
-                frame->local = local;
-        }
-
-        ret = dict_allocate_and_serialize (req_dict,
-                                           &req.dict.dict_val,
-                                           (size_t *) &req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
-
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_DEFRAG_VOLUME, NULL,
-                              this, gf_cli3_1_defrag_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_defrag_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_DEFRAG_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
@@ -2285,7 +2642,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_rename_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_rename_volume (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req              req = {{0,}};
@@ -2299,9 +2656,8 @@ gf_cli3_1_rename_volume (call_frame_t *frame, xlator_t *this,
 
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *) &req.dict.dict_len);
+        ret = dict_allocate_and_serialize (dict, &req.dict.dict_val,
+                                           &req.dict.dict_len);
         if (ret < 0) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "failed to serialize the data");
@@ -2312,7 +2668,7 @@ gf_cli3_1_rename_volume (call_frame_t *frame, xlator_t *this,
 
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_RENAME_VOLUME, NULL,
-                              this, gf_cli3_1_rename_volume_cbk,
+                              this, gf_cli_rename_volume_cbk,
                               (xdrproc_t) xdr_gf_cli_req);
 
 out:
@@ -2322,7 +2678,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_reset_volume (call_frame_t *frame, xlator_t *this, 
+gf_cli_reset_volume (call_frame_t *frame, xlator_t *this,
                         void *data)
 {
         gf_cli_req              req =  {{0,}};
@@ -2336,28 +2692,18 @@ gf_cli3_1_reset_volume (call_frame_t *frame, xlator_t *this,
 
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to get serialized length of dict");
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                               GLUSTER_CLI_RESET_VOLUME, NULL,
-                               this, gf_cli3_1_reset_volume_cbk,
-                               (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_reset_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_RESET_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
-                gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
-
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
 int32_t
-gf_cli3_1_set_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_set_volume (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req              req =  {{0,}};
@@ -2371,19 +2717,10 @@ gf_cli3_1_set_volume (call_frame_t *frame, xlator_t *this,
 
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_DEBUG,
-                        "failed to get serialized length of dict");
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_SET_VOLUME, NULL,
-                              this, gf_cli3_1_set_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_set_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_SET_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
@@ -2392,7 +2729,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_add_brick (call_frame_t *frame, xlator_t *this,
+gf_cli_add_brick (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req              req =  {{0,}};
@@ -2417,33 +2754,20 @@ gf_cli3_1_add_brick (call_frame_t *frame, xlator_t *this,
         if (ret)
                 goto out;
 
-
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_DEBUG,
-                        "failed to get serialized length of dict");
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_ADD_BRICK, NULL,
-                              this, gf_cli3_1_add_brick_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_add_brick_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_ADD_BRICK, this, cli_rpc_prog, NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
-        if (req.dict.dict_val) {
-                GF_FREE (req.dict.dict_val);
-        }
+        GF_FREE (req.dict.dict_val);
 
         return ret;
 }
 
 int32_t
-gf_cli3_1_remove_brick (call_frame_t *frame, xlator_t *this,
+gf_cli_remove_brick (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req                req =  {{0,}};;
@@ -2470,21 +2794,14 @@ gf_cli3_1_remove_brick (call_frame_t *frame, xlator_t *this,
         if (ret)
                 goto out;
 
-        if (command != GF_OP_CMD_STATUS) {
+        if ((command != GF_OP_CMD_STATUS) &&
+            (command != GF_OP_CMD_STOP)) {
 
-                ret = dict_allocate_and_serialize (dict,
-                                                   &req.dict.dict_val,
-                                                   (size_t *)&req.dict.dict_len);
-                if (ret < 0) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "failed to get serialized length of dict");
-                        goto out;
-                }
 
-                ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                                      GLUSTER_CLI_REMOVE_BRICK, NULL,
-                                      this, gf_cli3_1_remove_brick_cbk,
-                                      (xdrproc_t) xdr_gf_cli_req);
+                ret = cli_to_glusterd (&req, frame, gf_cli_remove_brick_cbk,
+                                       (xdrproc_t) xdr_gf_cli_req, dict,
+                                       GLUSTER_CLI_REMOVE_BRICK, this,
+                                       cli_rpc_prog, NULL);
         } else {
                 /* Need rebalance status to e sent :-) */
                 req_dict = dict_new ();
@@ -2500,7 +2817,10 @@ gf_cli3_1_remove_brick (call_frame_t *frame, xlator_t *this,
                         goto out;
                 }
 
-                cmd |= GF_DEFRAG_CMD_STATUS;
+                if (command == GF_OP_CMD_STATUS)
+                        cmd |= GF_DEFRAG_CMD_STATUS;
+                else
+                        cmd |= GF_DEFRAG_CMD_STOP;
 
                 ret = dict_set_int32 (req_dict, "rebalance-command", (int32_t) cmd);
                 if (ret) {
@@ -2509,46 +2829,32 @@ gf_cli3_1_remove_brick (call_frame_t *frame, xlator_t *this,
                         goto out;
                 }
 
-                ret = dict_allocate_and_serialize (req_dict,
-                                                   &status_req.dict.dict_val,
-                                                   (size_t *) &status_req.dict.dict_len);
-                if (ret < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "failed to serialize the data");
+                ret = cli_to_glusterd (&status_req, frame,
+                                       gf_cli3_remove_brick_status_cbk,
+                                       (xdrproc_t) xdr_gf_cli_req, req_dict,
+                                       GLUSTER_CLI_DEFRAG_VOLUME, this,
+                                       cli_rpc_prog, NULL);
 
-                        goto out;
                 }
 
-                ret = cli_cmd_submit (&status_req, frame, cli_rpc_prog,
-                                      GLUSTER_CLI_DEFRAG_VOLUME, NULL,
-                                      this, gf_cli3_remove_brick_status_cbk,
-                                      (xdrproc_t) xdr_gf_cli_req);
-
-        }
-
 out:
-        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
-
-        if (req.dict.dict_val) {
-                GF_FREE (req.dict.dict_val);
-        }
-
-        if (status_req.dict.dict_val)
-                GF_FREE (status_req.dict.dict_val);
- 
         if (req_dict)
                 dict_unref (req_dict);
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+
+        GF_FREE (req.dict.dict_val);
+
+        GF_FREE (status_req.dict.dict_val);
 
         return ret;
 }
 
 int32_t
-gf_cli3_1_replace_brick (call_frame_t *frame, xlator_t *this,
+gf_cli_replace_brick (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req                  req        =  {{0,}};
         int                         ret        = 0;
-        cli_local_t                *local      = NULL;
         dict_t                     *dict       = NULL;
         char                       *src_brick  = NULL;
         char                       *dst_brick  = NULL;
@@ -2560,18 +2866,7 @@ gf_cli3_1_replace_brick (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-	dict = data;
-
-        local = cli_local_get ();
-        if (!local) {
-                ret = -1;
-                gf_log (this->name, GF_LOG_ERROR,
-                        "Out of memory");
-                goto out;
-        }
-
-        local->dict                 = dict_ref (dict);
-        frame->local                = local;
+        dict = data;
 
         ret = dict_get_int32 (dict, "operation", &op);
         if (ret) {
@@ -2605,34 +2900,22 @@ gf_cli3_1_replace_brick (call_frame_t *frame, xlator_t *this,
                 "%s with operation=%d", src_brick,
                 dst_brick, op);
 
-
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_DEBUG,
-                        "failed to get serialized length of dict");
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_REPLACE_BRICK, NULL,
-                              this, gf_cli3_1_replace_brick_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_replace_brick_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_REPLACE_BRICK, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
-        if (req.dict.dict_val) {
-                GF_FREE (req.dict.dict_val);
-        }
+        GF_FREE (req.dict.dict_val);
 
         return ret;
 }
 
 
 int32_t
-gf_cli3_1_log_rotate (call_frame_t *frame, xlator_t *this,
+gf_cli_log_rotate (call_frame_t *frame, xlator_t *this,
                       void *data)
 {
         gf_cli_req                req = {{0,}};
@@ -2646,31 +2929,20 @@ gf_cli3_1_log_rotate (call_frame_t *frame, xlator_t *this,
 
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-
-        if (ret < 0) {
-                gf_log (THIS->name, GF_LOG_ERROR, "failed to serialize dict");
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_LOG_ROTATE, NULL,
-                              this, gf_cli3_1_log_rotate_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
-
+        ret = cli_to_glusterd (&req, frame, gf_cli_log_rotate_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_LOG_ROTATE, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
+        GF_FREE (req.dict.dict_val);
         return ret;
 }
 
 int32_t
-gf_cli3_1_sync_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_sync_volume (call_frame_t *frame, xlator_t *this,
                        void *data)
 {
         int               ret = 0;
@@ -2683,30 +2955,21 @@ gf_cli3_1_sync_volume (call_frame_t *frame, xlator_t *this,
         }
 
         dict = data;
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
 
-        if (ret < 0) {
-                gf_log (THIS->name, GF_LOG_ERROR, "failed to serialize dict");
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame,
-                              cli_rpc_prog, GLUSTER_CLI_SYNC_VOLUME,
-                              NULL, this, gf_cli3_1_sync_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_sync_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_SYNC_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
+        GF_FREE (req.dict.dict_val);
 
         return ret;
 }
 
 int32_t
-gf_cli3_1_getspec (call_frame_t *frame, xlator_t *this,
+gf_cli_getspec (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_getspec_req          req = {0,};
@@ -2726,7 +2989,7 @@ gf_cli3_1_getspec (call_frame_t *frame, xlator_t *this,
 
         ret = cli_cmd_submit (&req, frame, &cli_handshake_prog,
                               GF_HNDSK_GETSPEC, NULL,
-                              this, gf_cli3_1_getspec_cbk,
+                              this, gf_cli_getspec_cbk,
                               (xdrproc_t) xdr_gf_getspec_req);
 
 out:
@@ -2736,7 +2999,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_quota (call_frame_t *frame, xlator_t *this,
+gf_cli_quota (call_frame_t *frame, xlator_t *this,
                  void *data)
 {
         gf_cli_req          req = {{0,}};
@@ -2750,27 +3013,18 @@ gf_cli3_1_quota (call_frame_t *frame, xlator_t *this,
 
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to get serialized length of dict");
-                goto out;
-        }
+        ret = cli_to_glusterd (&req, frame, gf_cli_quota_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_QUOTA, this, cli_rpc_prog, NULL);
 
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_QUOTA, NULL,
-                              this, gf_cli3_1_quota_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
-
-        GF_FREE (req.dict.dict_val);
 out:
+        GF_FREE (req.dict.dict_val);
+
         return ret;
 }
 
 int32_t
-gf_cli3_1_pmap_b2p (call_frame_t *frame, xlator_t *this, void *data)
+gf_cli_pmap_b2p (call_frame_t *frame, xlator_t *this, void *data)
 {
         pmap_port_by_brick_req  req = {0,};
         int                     ret = 0;
@@ -2789,7 +3043,7 @@ gf_cli3_1_pmap_b2p (call_frame_t *frame, xlator_t *this, void *data)
 
         ret = cli_cmd_submit (&req, frame, &cli_pmap_prog,
                               GF_PMAP_PORTBYBRICK, NULL,
-                              this, gf_cli3_1_pmap_b2p_cbk,
+                              this, gf_cli_pmap_b2p_cbk,
                               (xdrproc_t) xdr_pmap_port_by_brick_req);
 
 out:
@@ -2799,7 +3053,7 @@ out:
 }
 
 static int
-gf_cli3_1_fsm_log_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_fsm_log_cbk (struct rpc_req *req, struct iovec *iov,
                        int count, void *myframe)
 {
         gf1_cli_fsm_log_rsp        rsp   = {0,};
@@ -2825,8 +3079,8 @@ gf_cli3_1_fsm_log_cbk (struct rpc_req *req, struct iovec *iov,
 
         if (rsp.op_ret) {
                 if (strcmp (rsp.op_errstr, ""))
-                        cli_out ("%s", rsp.op_errstr);
-                cli_out ("fsm log unsuccessful");
+                        cli_err ("%s", rsp.op_errstr);
+                cli_err ("fsm log unsuccessful");
                 ret = rsp.op_ret;
                 goto out;
         }
@@ -2842,7 +3096,7 @@ gf_cli3_1_fsm_log_cbk (struct rpc_req *req, struct iovec *iov,
                                 &dict);
 
         if (ret) {
-                cli_out ("bad response");
+                cli_err ("bad response");
                 goto out;
         }
 
@@ -2850,7 +3104,7 @@ gf_cli3_1_fsm_log_cbk (struct rpc_req *req, struct iovec *iov,
         if (tr_count)
                 cli_out("number of transitions: %d", tr_count);
         else
-                cli_out("No transitions");
+                cli_err("No transitions");
         for (i = 0; i < tr_count; i++) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "log%d-old-state", i);
@@ -2889,7 +3143,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_fsm_log (call_frame_t *frame, xlator_t *this, void *data)
+gf_cli_fsm_log (call_frame_t *frame, xlator_t *this, void *data)
 {
         int                        ret = -1;
         gf1_cli_fsm_log_req        req = {0,};
@@ -2903,7 +3157,7 @@ gf_cli3_1_fsm_log (call_frame_t *frame, xlator_t *this, void *data)
         req.name = data;
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_FSM_LOG, NULL,
-                              this, gf_cli3_1_fsm_log_cbk,
+                              this, gf_cli_fsm_log_cbk,
                               (xdrproc_t) xdr_gf1_cli_fsm_log_req);
 
 out:
@@ -2913,7 +3167,7 @@ out:
 }
 
 int
-gf_cli3_1_gsync_config_command (dict_t *dict)
+gf_cli_gsync_config_command (dict_t *dict)
 {
         runner_t runner     = {0,};
         char *subop         = NULL;
@@ -2953,20 +3207,22 @@ gf_cli3_1_gsync_config_command (dict_t *dict)
 }
 
 int
-gf_cli3_1_gsync_out_status (dict_t *dict)
+gf_cli_gsync_out_status (dict_t *dict)
 {
-        int              gsync_count = 0;
-        int              i = 0;
-        int              ret = 0;
+        int   gsync_count              = 0;
+        int   i                        = 0;
+        int   ret                      = 0;
         char             mst[PATH_MAX] = {0, };
-        char             slv[PATH_MAX]= {0, };
+        char             slv[PATH_MAX] = {0, };
         char             sts[PATH_MAX] = {0, };
-        char             hyphens[81] = {0, };
-        char             *mst_val = NULL;
-        char             *slv_val = NULL;
-        char             *sts_val = NULL;
+        char             nds[PATH_MAX] = {0, };
+        char             hyphens[100]  = {0, };
+        char *mst_val                  = NULL;
+        char *slv_val                  = NULL;
+        char *sts_val                  = NULL;
+        char *nds_val                  = NULL;
 
-        cli_out ("%-20s %-50s %-10s", "MASTER", "SLAVE", "STATUS");
+        cli_out ("%-20s %-20s %-50s %-10s", "NODE", "MASTER", "SLAVE", "STATUS");
 
         for (i=0; i<sizeof(hyphens)-1; i++)
                 hyphens[i] = '-';
@@ -2983,9 +3239,14 @@ gf_cli3_1_gsync_out_status (dict_t *dict)
         }
 
         for (i = 1; i <= gsync_count; i++) {
+                snprintf (nds, sizeof(nds), "node%d", i);
                 snprintf (mst, sizeof(mst), "master%d", i);
                 snprintf (slv, sizeof(slv), "slave%d", i);
                 snprintf (sts, sizeof(sts), "status%d", i);
+
+                ret = dict_get_str (dict, nds, &nds_val);
+                if (ret)
+                        goto out;
 
                 ret = dict_get_str (dict, mst, &mst_val);
                 if (ret)
@@ -2999,7 +3260,7 @@ gf_cli3_1_gsync_out_status (dict_t *dict)
                 if (ret)
                         goto out;
 
-                cli_out ("%-20s %-50s %-10s", mst_val,
+                cli_out ("%-20s %-20s %-50s %-10s", nds_val, mst_val,
                          slv_val, sts_val);
 
         }
@@ -3010,10 +3271,10 @@ gf_cli3_1_gsync_out_status (dict_t *dict)
 }
 
 int
-gf_cli3_1_gsync_set_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_gsync_set_cbk (struct rpc_req *req, struct iovec *iov,
                          int count, void *myframe)
 {
-        int                     ret     = 0;
+        int                     ret     = -1;
         gf_cli_rsp              rsp     = {0, };
         dict_t                  *dict   = NULL;
         char                    *gsync_status = NULL;
@@ -3045,8 +3306,17 @@ gf_cli3_1_gsync_set_cbk (struct rpc_req *req, struct iovec *iov,
         if (ret)
                 goto out;
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_dict ("volGeoRep", dict, rsp.op_ret,
+                                           rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
         if (rsp.op_ret) {
-                cli_out ("%s", rsp.op_errstr ? rsp.op_errstr :
+                cli_err ("%s", rsp.op_errstr ? rsp.op_errstr :
                          GEOREP" command unsuccessful");
                 ret = rsp.op_ret;
                 goto out;
@@ -3080,28 +3350,28 @@ gf_cli3_1_gsync_set_cbk (struct rpc_req *req, struct iovec *iov,
                 break;
 
                 case GF_GSYNC_OPTION_TYPE_CONFIG:
-                        ret = gf_cli3_1_gsync_config_command (dict);
+                        ret = gf_cli_gsync_config_command (dict);
                 break;
 
                 case GF_GSYNC_OPTION_TYPE_STATUS:
-                        ret = gf_cli3_1_gsync_out_status (dict);
+                        ret = gf_cli_gsync_out_status (dict);
                         goto out;
                 default:
                         cli_out (GEOREP" command executed successfully");
         }
 
 out:
-
+        if (dict)
+                dict_unref (dict);
         cli_cmd_broadcast_response (ret);
 
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
+        free (rsp.dict.dict_val);
 
         return ret;
 }
 
 int32_t
-gf_cli3_1_gsync_set (call_frame_t *frame, xlator_t *this,
+gf_cli_gsync_set (call_frame_t *frame, xlator_t *this,
                      void *data)
 {
         int                      ret    = 0;
@@ -3115,33 +3385,17 @@ gf_cli3_1_gsync_set (call_frame_t *frame, xlator_t *this,
 
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *) &req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
-
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_GSYNC_SET, NULL,
-                              this, gf_cli3_1_gsync_set_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_gsync_set_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_GSYNC_SET, this, cli_rpc_prog,
+                               NULL);
 
 out:
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
+        GF_FREE (req.dict.dict_val);
 
         return ret;
 }
 
-void*
-cli_profile_info_elem (void *a, int index)
-{
-        return ((cli_profile_info_t *)a) + index;
-}
 
 int
 cli_profile_info_percentage_cmp (void *a, void *b)
@@ -3161,19 +3415,6 @@ cli_profile_info_percentage_cmp (void *a, void *b)
         return ret;
 }
 
-void
-cli_profile_info_swap (void *a, void *b)
-{
-        cli_profile_info_t *ia = NULL;
-        cli_profile_info_t *ib = NULL;
-        cli_profile_info_t tmp = {0};
-
-        ia = a;
-        ib = b;
-        tmp = *ia;
-        *ia = *ib;
-        *ib = tmp;
-}
 
 void
 cmd_profile_volume_brick_out (dict_t *dict, int count, int interval)
@@ -3183,7 +3424,6 @@ cmd_profile_volume_brick_out (dict_t *dict, int count, int interval)
         uint64_t                sec = 0;
         uint64_t                r_count = 0;
         uint64_t                w_count = 0;
-        char                    *brick = NULL;
         uint64_t                rb_counts[32] = {0};
         uint64_t                wb_counts[32] = {0};
         cli_profile_info_t      profile_info[GF_FOP_MAXVALUE] = {{0}};
@@ -3196,9 +3436,6 @@ cmd_profile_volume_brick_out (dict_t *dict, int count, int interval)
         int                     ret = 0;
         double                  total_percentage_latency = 0;
 
-        memset (key, 0, sizeof (key));
-        snprintf (key, sizeof (key), "%d-brick", count);
-        ret = dict_get_str (dict, key, &brick);
         for (i = 0; i < 32; i++) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "%d-%d-read-%d", count,
@@ -3233,7 +3470,7 @@ cmd_profile_volume_brick_out (dict_t *dict, int count, int interval)
                 snprintf (key, sizeof (key), "%d-%d-%d-maxlatency", count,
                           interval, i);
                 ret = dict_get_double (dict, key, &profile_info[i].max_latency);
-                profile_info[i].fop_name = gf_fop_list[i];
+                profile_info[i].fop_name = (char *)gf_fop_list[i];
 
                 total_percentage_latency +=
                        (profile_info[i].fop_hits * profile_info[i].avg_latency);
@@ -3261,7 +3498,6 @@ cmd_profile_volume_brick_out (dict_t *dict, int count, int interval)
         ret = dict_get_uint64 (dict, key, &w_count);
 
         if (ret == 0) {
-                cli_out ("Brick: %s", brick);
         }
 
         if (interval == -1)
@@ -3346,18 +3582,21 @@ cmd_profile_volume_brick_out (dict_t *dict, int count, int interval)
 }
 
 int32_t
-gf_cli3_1_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
                               int count, void *myframe)
 {
         gf_cli_rsp                        rsp   = {0,};
         int                               ret   = -1;
         dict_t                            *dict = NULL;
-	gf1_cli_stats_op                  op = GF_CLI_STATS_NONE;
+        gf1_cli_stats_op                  op = GF_CLI_STATS_NONE;
         char                              key[256] = {0};
         int                               interval = 0;
         int                               i = 1;
         int32_t                           brick_count = 0;
         char                              *volname = NULL;
+        char                              *brick = NULL;
+        char                              str[1024] = {0,};
+
         if (-1 == req->rpc_status) {
                 goto out;
         }
@@ -3388,6 +3627,16 @@ gf_cli3_1_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 dict->extra_stdfree = rsp.dict.dict_val;
         }
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_profile (dict, rsp.op_ret,
+                                                  rsp.op_errno,
+                                                  rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
         ret = dict_get_str (dict, "volname", &volname);
         if (ret)
                 goto out;
@@ -3397,7 +3646,7 @@ gf_cli3_1_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
 
         if (rsp.op_ret && strcmp (rsp.op_errstr, "")) {
-                cli_out ("%s", rsp.op_errstr);
+                cli_err ("%s", rsp.op_errstr);
         } else {
                 switch (op) {
                 case GF_CLI_STATS_START:
@@ -3435,11 +3684,28 @@ gf_cli3_1_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 goto out;
 
         if (!brick_count) {
-                cli_out ("All bricks of volume %s are down.", volname);
+                cli_err ("All bricks of volume %s are down.", volname);
                 goto out;
         }
 
         while (i <= brick_count) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%d-brick", i);
+                ret = dict_get_str (dict, key, &brick);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Couldn't get brick name");
+                        goto out;
+                }
+
+                ret = dict_get_str_boolean (dict, "nfs", _gf_false);
+                if (ret)
+                        snprintf (str, sizeof (str), "NFS Server : %s", brick);
+                else
+                        snprintf (str, sizeof (str), "Brick: %s", brick);
+                cli_out ("%s", str);
+                memset (str, '-', strlen (str));
+                cli_out ("%s", str);
+
                 snprintf (key, sizeof (key), "%d-cumulative", i);
                 ret = dict_get_int32 (dict, key, &interval);
                 if (ret == 0) {
@@ -3457,18 +3723,17 @@ gf_cli3_1_profile_volume_cbk (struct rpc_req *req, struct iovec *iov,
 out:
         if (dict)
                 dict_unref (dict);
-        if (rsp.op_errstr)
-                free (rsp.op_errstr);
+        free (rsp.op_errstr);
         cli_cmd_broadcast_response (ret);
         return ret;
 }
 
 int32_t
-gf_cli3_1_profile_volume (call_frame_t *frame, xlator_t *this, void *data)
+gf_cli_profile_volume (call_frame_t *frame, xlator_t *this, void *data)
 {
         int                        ret   = -1;
         gf_cli_req                 req   = {{0,}};
-        dict_t			   *dict = NULL;
+        dict_t                     *dict = NULL;
 
         GF_ASSERT (frame);
         GF_ASSERT (this);
@@ -3478,58 +3743,47 @@ gf_cli3_1_profile_volume (call_frame_t *frame, xlator_t *this, void *data)
                 goto out;
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
-
-                goto out;
-        }
-
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_PROFILE_VOLUME, NULL,
-                              this, gf_cli3_1_profile_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_profile_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_PROFILE_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
+        GF_FREE (req.dict.dict_val);
         return ret;
 }
 
 int32_t
-gf_cli3_1_top_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_top_volume_cbk (struct rpc_req *req, struct iovec *iov,
                               int count, void *myframe)
 {
         gf_cli_rsp                        rsp   = {0,};
         int                               ret   = -1;
-        dict_t                            *dict = NULL;
-        gf1_cli_stats_op                op = GF_CLI_STATS_NONE;
+        dict_t                           *dict = NULL;
+        gf1_cli_stats_op                  op = GF_CLI_STATS_NONE;
         char                              key[256] = {0};
         int                               i = 0;
         int32_t                           brick_count = 0;
         char                              brick[1024];
         int32_t                           members = 0;
-        char                              *filename;
-        char                              *bricks;
-        uint64_t                           value = 0;
+        char                             *filename;
+        char                             *bricks;
+        uint64_t                          value = 0;
         int32_t                           j = 0;
         gf1_cli_top_op                    top_op = GF_CLI_TOP_NONE;
         uint64_t                          nr_open = 0;
         uint64_t                          max_nr_open = 0;
         double                            throughput = 0;
         double                            time = 0;
-        long int                          time_sec = 0;
-        long int                           time_usec = 0;
-        struct tm                         *tm = NULL;
+        int32_t                           time_sec = 0;
+        long int                          time_usec = 0;
         char                              timestr[256] = {0, };
-        char                              *openfd_str = NULL;
+        char                             *openfd_str = NULL;
+        gf_boolean_t                      nfs = _gf_false;
+        gf_boolean_t                      clear_stats = _gf_false;
+        int                               stats_cleared = 0;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -3544,8 +3798,8 @@ gf_cli3_1_top_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         if (rsp.op_ret) {
                 if (strcmp (rsp.op_errstr, ""))
-                        cli_out ("%s", rsp.op_errstr);
-                cli_out ("volume top unsuccessful");
+                        cli_err ("%s", rsp.op_errstr);
+                cli_err ("volume top unsuccessful");
                 ret = rsp.op_ret;
                 goto out;
         }
@@ -3573,6 +3827,18 @@ gf_cli3_1_top_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 ret = 0;
                 goto out;
         }
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_top (dict, rsp.op_ret,
+                                              rsp.op_errno,
+                                              rsp.op_errstr);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                }
+                goto out;
+        }
+
         ret = dict_get_int32 (dict, "count", &brick_count);
         if (ret)
                 goto out;
@@ -3580,13 +3846,35 @@ gf_cli3_1_top_volume_cbk (struct rpc_req *req, struct iovec *iov,
         ret = dict_get_int32 (dict, key, (int32_t*)&top_op);
         if (ret)
                 goto out;
+
+        clear_stats = dict_get_str_boolean (dict, "clear-stats", _gf_false);
+
         while (i < brick_count) {
                 i++;
                 snprintf (brick, sizeof (brick), "%d-brick", i);
                 ret = dict_get_str (dict, brick, &bricks);
                 if (ret)
                         goto out;
-                cli_out ("Brick: %s", bricks);
+
+                nfs = dict_get_str_boolean (dict, "nfs", _gf_false);
+
+                if (clear_stats) {
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "%d-stats-cleared", i);
+                        ret = dict_get_int32 (dict, key, &stats_cleared);
+                        if (ret)
+                                goto out;
+                        cli_out (stats_cleared ? "Cleared stats for %s %s" :
+                                 "Failed to clear stats for %s %s",
+                                 nfs ? "NFS server on" : "brick", bricks);
+                        continue;
+                }
+
+                if (nfs)
+                        cli_out ("NFS Server : %s", bricks);
+                else
+                        cli_out ("Brick: %s", bricks);
+
                 snprintf(key, sizeof (key), "%d-members", i);
                 ret = dict_get_int32 (dict, key, &members);
 
@@ -3663,11 +3951,9 @@ gf_cli3_1_top_volume_cbk (struct rpc_req *req, struct iovec *iov,
                                 ret = dict_get_int32 (dict, key, (int32_t *)&time_usec);
                                 if (ret)
                                         goto out;
-                                tm    = localtime (&time_sec);
-                                if (!tm)
-                                        goto out;
-                                strftime (timestr, 256, "%Y-%m-%d %H:%M:%S", tm);
-                                snprintf (timestr + strlen (timestr), 256 - strlen (timestr),
+                                gf_time_fmt (timestr, sizeof timestr,
+                                             time_sec, gf_timefmt_FT);
+                                snprintf (timestr + strlen (timestr), sizeof timestr - strlen (timestr),
                                   ".%"GF_PRI_SUSECONDS, time_usec);
                                 if (strlen (filename) < VOL_TOP_PERF_FILENAME_DEF_WIDTH)
                                         cli_out ("%*"PRIu64" %-*s %-*s",
@@ -3699,13 +3985,12 @@ out:
         if (dict)
                 dict_unref (dict);
 
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
+        free (rsp.dict.dict_val);
         return ret;
 }
 
 int32_t
-gf_cli3_1_top_volume (call_frame_t *frame, xlator_t *this, void *data)
+gf_cli_top_volume (call_frame_t *frame, xlator_t *this, void *data)
 {
         int                        ret   = -1;
         gf_cli_req                 req   = {{0,}};
@@ -3719,36 +4004,24 @@ gf_cli3_1_top_volume (call_frame_t *frame, xlator_t *this, void *data)
                 goto out;
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
-
-                goto out;
-        }
-
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_PROFILE_VOLUME, NULL,
-                              this, gf_cli3_1_top_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_top_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_PROFILE_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
+        GF_FREE (req.dict.dict_val);
         return ret;
 }
 
 
 int
-gf_cli3_1_getwd_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_getwd_cbk (struct rpc_req *req, struct iovec *iov,
                        int count, void *myframe)
 {
         gf1_cli_getwd_rsp rsp   = {0,};
-        int               ret   = 0;
+        int               ret   = -1;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -3772,7 +4045,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_getwd (call_frame_t *frame, xlator_t *this, void *data)
+gf_cli_getwd (call_frame_t *frame, xlator_t *this, void *data)
 {
         int                      ret = -1;
         gf1_cli_getwd_req        req = {0,};
@@ -3785,7 +4058,7 @@ gf_cli3_1_getwd (call_frame_t *frame, xlator_t *this, void *data)
 
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_GETWD, NULL,
-                              this, gf_cli3_1_getwd_cbk,
+                              this, gf_cli_getwd_cbk,
                               (xdrproc_t) xdr_gf1_cli_getwd_req);
 
 out:
@@ -3794,24 +4067,1006 @@ out:
         return ret;
 }
 
-static int
-gf_cli3_1_status_cbk (struct rpc_req *req, struct iovec *iov,
-                         int count, void *myframe)
+void
+cli_print_volume_status_mempool (dict_t *dict, char *prefix)
 {
-        gf_cli_rsp                      rsp = {0,};
-        int                             ret = -1;
-        dict_t                          *dict = NULL;
-        char                            *hostname = NULL;
-        char                            *path = NULL;
-        int                             i = 0;
-        int                             port = 0;
-        int                             online = 0;
-        char                            key[1024] = {0,};
-        int                             pid = -1;
-        char                            *pid_str = NULL;
-        char                            brick[8192] = {0,};
-        char                            *volname = NULL;
+        int             ret = -1;
+        int32_t         mempool_count = 0;
+        char            *name = NULL;
+        int32_t         hotcount = 0;
+        int32_t         coldcount = 0;
+        uint64_t        paddedsizeof = 0;
+        uint64_t        alloccount = 0;
+        int32_t         maxalloc = 0;
+        uint64_t        pool_misses = 0;
+        int32_t         maxstdalloc = 0;
+        char            key[1024] = {0,};
+        int             i = 0;
 
+        GF_ASSERT (dict);
+        GF_ASSERT (prefix);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.mempool-count",prefix);
+        ret = dict_get_int32 (dict, key, &mempool_count);
+        if (ret)
+                goto out;
+
+        cli_out ("Mempool Stats\n-------------");
+        cli_out ("%-30s %9s %9s %12s %10s %8s %8s %12s", "Name", "HotCount",
+                 "ColdCount", "PaddedSizeof", "AllocCount", "MaxAlloc",
+                 "Misses", "Max-StdAlloc");
+        cli_out ("%-30s %9s %9s %12s %10s %8s %8s %12s", "----", "--------",
+                 "---------", "------------", "----------",
+                 "--------", "--------", "------------");
+
+        for (i = 0; i < mempool_count; i++) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.name", prefix, i);
+                ret = dict_get_str (dict, key, &name);
+                if (ret)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.hotcount", prefix, i);
+                ret = dict_get_int32 (dict, key, &hotcount);
+                if (ret)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.coldcount", prefix, i);
+                ret = dict_get_int32 (dict, key, &coldcount);
+                if (ret)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.paddedsizeof",
+                          prefix, i);
+                ret = dict_get_uint64 (dict, key, &paddedsizeof);
+                if (ret)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.alloccount", prefix, i);
+                ret = dict_get_uint64 (dict, key, &alloccount);
+                if (ret)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.max_alloc", prefix, i);
+                ret = dict_get_int32 (dict, key, &maxalloc);
+                if (ret)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.max-stdalloc", prefix, i);
+                ret = dict_get_int32 (dict, key, &maxstdalloc);
+                if (ret)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pool%d.pool-misses", prefix, i);
+                ret = dict_get_uint64 (dict, key, &pool_misses);
+                if (ret)
+                        goto out;
+
+                cli_out ("%-30s %9d %9d %12"PRIu64" %10"PRIu64" %8d %8"PRIu64
+                         " %12d", name, hotcount, coldcount, paddedsizeof,
+                         alloccount, maxalloc, pool_misses, maxstdalloc);
+        }
+
+out:
+        return;
+
+}
+
+void
+cli_print_volume_status_mem (dict_t *dict, gf_boolean_t notbrick)
+{
+        int             ret = -1;
+        char            *volname = NULL;
+        char            *hostname = NULL;
+        char            *path = NULL;
+        int             online = -1;
+        char            key[1024] = {0,};
+        int             brick_index_max = -1;
+        int             other_count = 0;
+        int             index_max = 0;
+        int             val = 0;
+        int             i = 0;
+
+        GF_ASSERT (dict);
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
+        cli_out ("Memory status for volume : %s", volname);
+
+        ret = dict_get_int32 (dict, "brick-index-max", &brick_index_max);
+        if (ret)
+                goto out;
+        ret = dict_get_int32 (dict, "other-count", &other_count);
+        if (ret)
+                goto out;
+
+        index_max = brick_index_max + other_count;
+
+        for (i = 0; i <= index_max; i++) {
+                cli_out ("----------------------------------------------");
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.hostname", i);
+                ret = dict_get_str (dict, key, &hostname);
+                if (ret)
+                        continue;
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.path", i);
+                ret = dict_get_str (dict, key, &path);
+                if (ret)
+                        continue;
+                if (notbrick)
+                        cli_out ("%s : %s", hostname, path);
+                else
+                        cli_out ("Brick : %s:%s", hostname, path);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.status", i);
+                ret = dict_get_int32 (dict, key, &online);
+                if (ret)
+                        goto out;
+                if (!online) {
+                        if (notbrick)
+                                cli_out ("%s is offline", hostname);
+                        else
+                                cli_out ("Brick is offline");
+                        continue;
+                }
+
+                cli_out ("Mallinfo\n--------");
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.arena", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if (ret)
+                        goto out;
+                cli_out ("%-8s : %d","Arena", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.ordblks", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if(ret)
+                        goto out;
+                cli_out ("%-8s : %d","Ordblks", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.smblks", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if(ret)
+                        goto out;
+                cli_out ("%-8s : %d","Smblks", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.hblks", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if(ret)
+                        goto out;
+                cli_out ("%-8s : %d", "Hblks", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.hblkhd", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if (ret)
+                        goto out;
+                cli_out ("%-8s : %d", "Hblkhd", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.usmblks", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if (ret)
+                        goto out;
+                cli_out ("%-8s : %d", "Usmblks", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.fsmblks", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if (ret)
+                        goto out;
+                cli_out ("%-8s : %d", "Fsmblks", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.uordblks", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if (ret)
+                        goto out;
+                cli_out ("%-8s : %d", "Uordblks", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.fordblks", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if (ret)
+                        goto out;
+                cli_out ("%-8s : %d", "Fordblks", val);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.mallinfo.keepcost", i);
+                ret = dict_get_int32 (dict, key, &val);
+                if (ret)
+                        goto out;
+                cli_out ("%-8s : %d", "Keepcost", val);
+
+                cli_out (" ");
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d", i);
+                cli_print_volume_status_mempool (dict, key);
+        }
+out:
+        cli_out ("----------------------------------------------\n");
+        return;
+}
+
+void
+cli_print_volume_status_clients (dict_t *dict, gf_boolean_t notbrick)
+{
+        int             ret = -1;
+        char            *volname = NULL;
+        int             brick_index_max = -1;
+        int             other_count = 0;
+        int             index_max = 0;
+        char            *hostname = NULL;
+        char            *path = NULL;
+        int             online = -1;
+        int             client_count = 0;
+        char            *clientname = NULL;
+        uint64_t        bytesread = 0;
+        uint64_t        byteswrite = 0;
+        char            key[1024] = {0,};
+        int             i = 0;
+        int             j = 0;
+
+        GF_ASSERT (dict);
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
+        cli_out ("Client connections for volume %s", volname);
+
+        ret = dict_get_int32 (dict, "brick-index-max", &brick_index_max);
+        if (ret)
+                goto out;
+        ret = dict_get_int32 (dict, "other-count", &other_count);
+        if (ret)
+                goto out;
+
+        index_max = brick_index_max + other_count;
+
+        for (i = 0; i <= index_max; i++) {
+                cli_out ("----------------------------------------------");
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.hostname", i);
+                ret = dict_get_str (dict, key, &hostname);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.path", i);
+                ret = dict_get_str (dict, key, &path);
+                if (ret)
+                        goto out;
+
+                if (notbrick)
+                        cli_out ("%s : %s", hostname, path);
+                else
+                        cli_out ("Brick : %s:%s", hostname, path);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.status", i);
+                ret = dict_get_int32 (dict, key, &online);
+                if (ret)
+                        goto out;
+                if (!online) {
+                        if (notbrick)
+                                cli_out ("%s is offline", hostname);
+                        else
+                                cli_out ("Brick is offline");
+                        continue;
+                }
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.clientcount", i);
+                ret = dict_get_int32 (dict, key, &client_count);
+                if (ret)
+                        goto out;
+
+                cli_out ("Clients connected : %d", client_count);
+                if (client_count == 0)
+                        continue;
+
+                cli_out ("%-48s %15s %15s", "Hostname", "BytesRead",
+                         "BytesWritten");
+                cli_out ("%-48s %15s %15s", "--------", "---------",
+                         "------------");
+                for (j =0; j < client_count; j++) {
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key),
+                                  "brick%d.client%d.hostname", i, j);
+                        ret = dict_get_str (dict, key, &clientname);
+                        if (ret)
+                                goto out;
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key),
+                                  "brick%d.client%d.bytesread", i, j);
+                        ret = dict_get_uint64 (dict, key, &bytesread);
+                        if (ret)
+                                goto out;
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key),
+                                 "brick%d.client%d.byteswrite", i, j);
+                        ret = dict_get_uint64 (dict, key, &byteswrite);
+                        if (ret)
+                                goto out;
+
+                        cli_out ("%-48s %15"PRIu64" %15"PRIu64,
+                                 clientname, bytesread, byteswrite);
+                }
+        }
+out:
+        cli_out ("----------------------------------------------\n");
+        return;
+}
+
+void
+cli_print_volume_status_inode_entry (dict_t *dict, char *prefix)
+{
+        int             ret = -1;
+        char            key[1024] = {0,};
+        char            *gfid = NULL;
+        uint64_t        nlookup = 0;
+        uint32_t        ref = 0;
+        int             ia_type = 0;
+        char            inode_type;
+
+        GF_ASSERT (dict);
+        GF_ASSERT (prefix);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.gfid", prefix);
+        ret = dict_get_str (dict, key, &gfid);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.nlookup", prefix);
+        ret = dict_get_uint64 (dict, key, &nlookup);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.ref", prefix);
+        ret = dict_get_uint32 (dict, key, &ref);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.ia_type", prefix);
+        ret = dict_get_int32 (dict, key, &ia_type);
+        if (ret)
+                goto out;
+
+        switch (ia_type) {
+        case IA_IFREG:
+                inode_type = 'R';
+                break;
+        case IA_IFDIR:
+                inode_type = 'D';
+                break;
+        case IA_IFLNK:
+                inode_type = 'L';
+                break;
+        case IA_IFBLK:
+                inode_type = 'B';
+                break;
+        case IA_IFCHR:
+                inode_type = 'C';
+                break;
+        case IA_IFIFO:
+                inode_type = 'F';
+                break;
+        case IA_IFSOCK:
+                inode_type = 'S';
+                break;
+        default:
+                inode_type = 'I';
+                break;
+        }
+
+        cli_out ("%-40s %14"PRIu64" %14"PRIu32" %9c",
+                 gfid, nlookup, ref, inode_type);
+
+out:
+        return;
+
+}
+
+void
+cli_print_volume_status_itables (dict_t *dict, char *prefix)
+{
+        int             ret = -1;
+        char            key[1024] = {0,};
+        uint32_t        active_size = 0;
+        uint32_t        lru_size = 0;
+        uint32_t        purge_size = 0;
+        int             i =0;
+
+        GF_ASSERT (dict);
+        GF_ASSERT (prefix);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.active_size", prefix);
+        ret = dict_get_uint32 (dict, key, &active_size);
+        if (ret)
+                goto out;
+        if (active_size != 0) {
+                cli_out ("Active inodes:");
+                cli_out ("%-40s %14s %14s %9s", "GFID", "Lookups", "Ref",
+                         "IA type");
+                cli_out ("%-40s %14s %14s %9s", "----", "-------", "---",
+                         "-------");
+        }
+        for (i = 0; i < active_size; i++) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.active%d", prefix, i);
+                cli_print_volume_status_inode_entry (dict, key);
+        }
+        cli_out (" ");
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.lru_size", prefix);
+        ret = dict_get_uint32 (dict, key, &lru_size);
+        if (ret)
+                goto out;
+        if (lru_size != 0) {
+                cli_out ("LRU inodes:");
+                cli_out ("%-40s %14s %14s %9s", "GFID", "Lookups", "Ref",
+                         "IA type");
+                cli_out ("%-40s %14s %14s %9s", "----", "-------", "---",
+                         "-------");
+        }
+        for (i = 0; i < lru_size; i++) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.lru%d", prefix, i);
+                cli_print_volume_status_inode_entry (dict, key);
+        }
+        cli_out (" ");
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.purge_size", prefix);
+        ret = dict_get_uint32 (dict, key, &purge_size);
+        if (ret)
+                goto out;
+        if (purge_size != 0) {
+                cli_out ("Purged inodes:");
+                cli_out ("%-40s %14s %14s %9s", "GFID", "Lookups", "Ref",
+                         "IA type");
+                cli_out ("%-40s %14s %14s %9s", "----", "-------", "---",
+                         "-------");
+        }
+        for (i = 0; i < purge_size; i++) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.purge%d", prefix, i);
+                cli_print_volume_status_inode_entry (dict, key);
+        }
+
+out:
+        return;
+}
+
+void
+cli_print_volume_status_inode (dict_t *dict, gf_boolean_t notbrick)
+{
+        int             ret = -1;
+        char            *volname = NULL;
+        int             brick_index_max = -1;
+        int             other_count = 0;
+        int             index_max = 0;
+        char            *hostname = NULL;
+        char            *path = NULL;
+        int             online = -1;
+        int             conn_count = 0;
+        char            key[1024] = {0,};
+        int             i = 0;
+        int             j = 0;
+
+        GF_ASSERT (dict);
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
+        cli_out ("Inode tables for volume %s", volname);
+
+        ret = dict_get_int32 (dict, "brick-index-max", &brick_index_max);
+        if (ret)
+                goto out;
+        ret = dict_get_int32 (dict, "other-count", &other_count);
+        if (ret)
+                goto out;
+
+        index_max = brick_index_max + other_count;
+
+        for ( i = 0; i <= index_max; i++) {
+                cli_out ("----------------------------------------------");
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.hostname", i);
+                ret = dict_get_str (dict, key, &hostname);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.path", i);
+                ret = dict_get_str (dict, key, &path);
+                if (ret)
+                        goto out;
+                if (notbrick)
+                        cli_out ("%s : %s", hostname, path);
+                else
+                        cli_out ("Brick : %s:%s", hostname, path);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.status", i);
+                ret = dict_get_int32 (dict, key, &online);
+                if (ret)
+                        goto out;
+                if (!online) {
+                        if (notbrick)
+                                cli_out ("%s is offline", hostname);
+                        else
+                                cli_out ("Brick is offline");
+                        continue;
+                }
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.conncount", i);
+                ret = dict_get_int32 (dict, key, &conn_count);
+                if (ret)
+                        goto out;
+
+                for (j = 0; j < conn_count; j++) {
+                        if (conn_count > 1)
+                                cli_out ("Connection %d:", j+1);
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "brick%d.conn%d.itable",
+                                  i, j);
+                        cli_print_volume_status_itables (dict, key);
+                        cli_out (" ");
+                }
+        }
+out:
+        cli_out ("----------------------------------------------");
+        return;
+}
+
+void
+cli_print_volume_status_fdtable (dict_t *dict, char *prefix)
+{
+        int             ret = -1;
+        char            key[1024] = {0,};
+        int             refcount = 0;
+        uint32_t        maxfds = 0;
+        int             firstfree = 0;
+        int             openfds = 0;
+        int             fd_pid = 0;
+        int             fd_refcount = 0;
+        int             fd_flags = 0;
+        int             i = 0;
+
+        GF_ASSERT (dict);
+        GF_ASSERT (prefix);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.refcount", prefix);
+        ret = dict_get_int32 (dict, key, &refcount);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.maxfds", prefix);
+        ret = dict_get_uint32 (dict, key, &maxfds);
+        if (ret)
+                goto out;
+
+        memset (key, 0 ,sizeof (key));
+        snprintf (key, sizeof (key), "%s.firstfree", prefix);
+        ret = dict_get_int32 (dict, key, &firstfree);
+        if (ret)
+                goto out;
+
+        cli_out ("RefCount = %d  MaxFDs = %d  FirstFree = %d",
+                 refcount, maxfds, firstfree);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.openfds", prefix);
+        ret = dict_get_int32 (dict, key, &openfds);
+        if (ret)
+                goto out;
+        if (0 == openfds) {
+                cli_err ("No open fds");
+                goto out;
+        }
+
+        cli_out ("%-19s %-19s %-19s %-19s", "FD Entry", "PID",
+                 "RefCount", "Flags");
+        cli_out ("%-19s %-19s %-19s %-19s", "--------", "---",
+                 "--------", "-----");
+
+        for (i = 0; i < maxfds ; i++) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.fdentry%d.pid", prefix, i);
+                ret = dict_get_int32 (dict, key, &fd_pid);
+                if (ret)
+                        continue;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.fdentry%d.refcount",
+                          prefix, i);
+                ret = dict_get_int32 (dict, key, &fd_refcount);
+                if (ret)
+                        continue;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.fdentry%d.flags", prefix, i);
+                ret = dict_get_int32 (dict, key, &fd_flags);
+                if (ret)
+                        continue;
+
+                cli_out ("%-19d %-19d %-19d %-19d", i, fd_pid, fd_refcount,
+                         fd_flags);
+        }
+
+out:
+        return;
+}
+
+void
+cli_print_volume_status_fd (dict_t *dict, gf_boolean_t notbrick)
+{
+        int             ret = -1;
+        char            *volname = NULL;
+        int             brick_index_max = -1;
+        int             other_count = 0;
+        int             index_max = 0;
+        char            *hostname = NULL;
+        char            *path = NULL;
+        int             online = -1;
+        int             conn_count = 0;
+        char            key[1024] = {0,};
+        int             i = 0;
+        int             j = 0;
+
+        GF_ASSERT (dict);
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
+        cli_out ("FD tables for volume %s", volname);
+
+        ret = dict_get_int32 (dict, "brick-index-max", &brick_index_max);
+        if (ret)
+                goto out;
+        ret = dict_get_int32 (dict, "other-count", &other_count);
+        if (ret)
+                goto out;
+
+        index_max = brick_index_max + other_count;
+
+        for (i = 0; i <= index_max; i++) {
+                cli_out ("----------------------------------------------");
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.hostname", i);
+                ret = dict_get_str (dict, key, &hostname);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.path", i);
+                ret = dict_get_str (dict, key, &path);
+                if (ret)
+                        goto out;
+
+                if (notbrick)
+                        cli_out ("%s : %s", hostname, path);
+                else
+                        cli_out ("Brick : %s:%s", hostname, path);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.status", i);
+                ret = dict_get_int32 (dict, key, &online);
+                if (ret)
+                        goto out;
+                if (!online) {
+                        if (notbrick)
+                                cli_out ("%s is offline", hostname);
+                        else
+                                cli_out ("Brick is offline");
+                        continue;
+                }
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.conncount", i);
+                ret = dict_get_int32 (dict, key, &conn_count);
+                if (ret)
+                        goto out;
+
+                for (j = 0; j < conn_count; j++) {
+                        cli_out ("Connection %d:", j+1);
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "brick%d.conn%d.fdtable",
+                                  i, j);
+                        cli_print_volume_status_fdtable (dict, key);
+                        cli_out (" ");
+                }
+        }
+out:
+        cli_out ("----------------------------------------------");
+        return;
+}
+
+void
+cli_print_volume_status_call_frame (dict_t *dict, char *prefix)
+{
+        int             ret = -1;
+        char            key[1024] = {0,};
+        int             ref_count = 0;
+        char            *translator = 0;
+        int             complete = 0;
+        char            *parent = NULL;
+        char            *wind_from = NULL;
+        char            *wind_to = NULL;
+        char            *unwind_from = NULL;
+        char            *unwind_to = NULL;
+
+        if (!dict || !prefix)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.refcount", prefix);
+        ret = dict_get_int32 (dict, key, &ref_count);
+        if (ret)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.translator", prefix);
+        ret = dict_get_str (dict, key, &translator);
+        if (ret)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.complete", prefix);
+        ret = dict_get_int32 (dict, key, &complete);
+        if (ret)
+                return;
+
+        cli_out ("  Ref Count   = %d", ref_count);
+        cli_out ("  Translator  = %s", translator);
+        cli_out ("  Completed   = %s", (complete ? "Yes" : "No"));
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.parent", prefix);
+        ret = dict_get_str (dict, key, &parent);
+        if (!ret)
+                cli_out ("  Parent      = %s", parent);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.windfrom", prefix);
+        ret = dict_get_str (dict, key, &wind_from);
+        if (!ret)
+                cli_out ("  Wind From   = %s", wind_from);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.windto", prefix);
+        ret = dict_get_str (dict, key, &wind_to);
+        if (!ret)
+                cli_out ("  Wind To     = %s", wind_to);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.unwindfrom", prefix);
+        ret = dict_get_str (dict, key, &unwind_from);
+        if (!ret)
+                cli_out ("  Unwind From = %s", unwind_from);
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.unwindto", prefix);
+        ret = dict_get_str (dict, key, &unwind_to);
+        if (!ret)
+                cli_out ("  Unwind To   = %s", unwind_to);
+}
+
+void
+cli_print_volume_status_call_stack (dict_t *dict, char *prefix)
+{
+        int             ret = -1;
+        char            key[1024] = {0,};
+        int             uid = 0;
+        int             gid = 0;
+        int             pid = 0;
+        uint64_t        unique = 0;
+        //char            *op = NULL;
+        int             count = 0;
+        int             i = 0;
+
+        if (!dict || !prefix)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.uid", prefix);
+        ret = dict_get_int32 (dict, key, &uid);
+        if (ret)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.gid", prefix);
+        ret = dict_get_int32 (dict, key, &gid);
+        if (ret)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.pid", prefix);
+        ret = dict_get_int32 (dict, key, &pid);
+        if (ret)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.unique", prefix);
+        ret = dict_get_uint64 (dict, key, &unique);
+        if (ret)
+                return;
+
+        /*
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.op", prefix);
+        ret = dict_get_str (dict, key, &op);
+        if (ret)
+                return;
+        */
+
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.count", prefix);
+        ret = dict_get_int32 (dict, key, &count);
+        if (ret)
+                return;
+
+        cli_out (" UID    : %d", uid);
+        cli_out (" GID    : %d", gid);
+        cli_out (" PID    : %d", pid);
+        cli_out (" Unique : %"PRIu64, unique);
+        //cli_out ("\tOp     : %s", op);
+        cli_out (" Frames : %d", count);
+
+        for (i = 0; i < count; i++) {
+                cli_out (" Frame %d", i+1);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.frame%d", prefix, i);
+                cli_print_volume_status_call_frame (dict, key);
+        }
+
+        cli_out (" ");
+}
+
+void
+cli_print_volume_status_callpool (dict_t *dict, gf_boolean_t notbrick)
+{
+        int             ret = -1;
+        char            *volname = NULL;
+        int             brick_index_max = -1;
+        int             other_count = 0;
+        int             index_max = 0;
+        char            *hostname = NULL;
+        char            *path = NULL;
+        int             online = -1;
+        int             call_count = 0;
+        char            key[1024] = {0,};
+        int             i = 0;
+        int             j = 0;
+
+        GF_ASSERT (dict);
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
+        cli_out ("Pending calls for volume %s", volname);
+
+        ret = dict_get_int32 (dict, "brick-index-max", &brick_index_max);
+        if (ret)
+                goto out;
+        ret = dict_get_int32 (dict, "other-count", &other_count);
+        if (ret)
+                goto out;
+
+        index_max = brick_index_max + other_count;
+
+        for (i = 0; i <= index_max; i++) {
+                cli_out ("----------------------------------------------");
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.hostname", i);
+                ret = dict_get_str (dict, key, &hostname);
+                if (ret)
+                        goto out;
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.path", i);
+                ret = dict_get_str (dict, key, &path);
+                if (ret)
+                        goto out;
+
+                if (notbrick)
+                        cli_out ("%s : %s", hostname, path);
+                else
+                        cli_out ("Brick : %s:%s", hostname, path);
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.status", i);
+                ret = dict_get_int32 (dict, key, &online);
+                if (ret)
+                        goto out;
+                if (!online) {
+                        if (notbrick)
+                                cli_out ("%s is offline", hostname);
+                        else
+                                cli_out ("Brick is offline");
+                        continue;
+                }
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "brick%d.callpool.count", i);
+                ret = dict_get_int32 (dict, key, &call_count);
+                if (ret)
+                        goto out;
+                cli_out ("Pending calls: %d", call_count);
+
+                if (0 == call_count)
+                        continue;
+
+                for (j = 0; j < call_count; j++) {
+                        cli_out ("Call Stack%d", j+1);
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key),
+                                  "brick%d.callpool.stack%d", i, j);
+                        cli_print_volume_status_call_stack (dict, key);
+                }
+        }
+
+out:
+        cli_out ("----------------------------------------------");
+        return;
+}
+
+static int
+gf_cli_status_cbk (struct rpc_req *req, struct iovec *iov,
+                      int count, void *myframe)
+{
+        int                             ret             = -1;
+        int                             brick_index_max = -1;
+        int                             other_count     = 0;
+        int                             index_max       = 0;
+        int                             i               = 0;
+        int                             pid             = -1;
+        uint32_t                        cmd             = 0;
+        gf_boolean_t                    notbrick        = _gf_false;
+        char                            key[1024]       = {0,};
+        char                           *hostname        = NULL;
+        char                           *path            = NULL;
+        char                           *volname         = NULL;
+        dict_t                         *dict            = NULL;
+        gf_cli_rsp                      rsp             = {0,};
+        cli_volume_status_t             status          = {0};
+        cli_local_t                    *local           = NULL;
+        gf_boolean_t                    wipe_local      = _gf_false;
+        char                            msg[1024]       = {0,};
 
         if (req->rpc_status == -1)
                 goto out;
@@ -3824,10 +5079,40 @@ gf_cli3_1_status_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_DEBUG, "Received response to status cmd");
 
-        if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
-        else if (rsp.op_ret)
-                cli_out ("Unable to obtain volume status information.");
+        local = ((call_frame_t *)myframe)->local;
+        if (!local) {
+                local = cli_local_get ();
+                if (!local) {
+                        ret = -1;
+                        gf_log ("cli", GF_LOG_ERROR, "Failed to get local");
+                        goto out;
+                }
+                wipe_local = _gf_true;
+        }
+
+        if (rsp.op_ret) {
+                if (strcmp (rsp.op_errstr, ""))
+                        snprintf (msg, sizeof (msg), "%s", rsp.op_errstr);
+                else
+                        snprintf (msg, sizeof (msg), "Unable to obtain volume "
+                                  "status information.");
+
+                if (global_state->mode & GLUSTER_MODE_XML) {
+                       cli_xml_output_str ("volStatus", msg, rsp.op_ret,
+                                           rsp.op_errno, rsp.op_errstr);
+                       ret = 0;
+                       goto out;
+                }
+
+                cli_err ("%s", msg);
+                if (local && local->all) {
+                        ret = 0;
+                        cli_out (" ");
+                } else
+                        ret = -1;
+
+                goto out;
+        }
 
         dict = dict_new ();
         if (!dict)
@@ -3839,108 +5124,324 @@ gf_cli3_1_status_cbk (struct rpc_req *req, struct iovec *iov,
         if (ret)
                 goto out;
 
+        ret = dict_get_uint32 (dict, "cmd", &cmd);
+        if (ret)
+                goto out;
+
+        if ((cmd & GF_CLI_STATUS_ALL)) {
+                if (local && local->dict) {
+                        dict_ref (dict);
+                        ret = dict_set_static_ptr (local->dict, "rsp-dict", dict);
+                        ret = 0;
+                } else {
+                        gf_log ("cli", GF_LOG_ERROR, "local not found");
+                        ret = -1;
+                }
+                goto out;
+        }
+
+        if ((cmd & GF_CLI_STATUS_NFS) || (cmd & GF_CLI_STATUS_SHD))
+                notbrick = _gf_true;
 
         ret = dict_get_int32 (dict, "count", &count);
         if (ret)
                 goto out;
+        if (count == 0) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_get_int32 (dict, "brick-index-max", &brick_index_max);
+        if (ret)
+                goto out;
+        ret = dict_get_int32 (dict, "other-count", &other_count);
+        if (ret)
+                goto out;
+
+        index_max = brick_index_max + other_count;
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                if (!local->all) {
+                        ret = cli_xml_output_vol_status_begin (local,
+                                                               rsp.op_ret,
+                                                               rsp.op_errno,
+                                                               rsp.op_errstr);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                                goto out;
+                        }
+                }
+                ret = cli_xml_output_vol_status (local, dict);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                        goto out;
+                }
+
+                if (!local->all) {
+                        ret = cli_xml_output_vol_status_end (local);
+                        if (ret) {
+                                gf_log ("cli", GF_LOG_ERROR,
+                                        "Error outputting to xml");
+                        }
+                }
+                goto out;
+        }
+
+        status.brick = GF_CALLOC (1, PATH_MAX + 256, gf_common_mt_strdup);
+
+        switch (cmd & GF_CLI_STATUS_MASK) {
+                case GF_CLI_STATUS_MEM:
+                        cli_print_volume_status_mem (dict, notbrick);
+                        goto cont;
+                        break;
+                case GF_CLI_STATUS_CLIENTS:
+                        cli_print_volume_status_clients (dict, notbrick);
+                        goto cont;
+                        break;
+                case GF_CLI_STATUS_INODE:
+                        cli_print_volume_status_inode (dict, notbrick);
+                        goto cont;
+                        break;
+                case GF_CLI_STATUS_FD:
+                        cli_print_volume_status_fd (dict, notbrick);
+                        goto cont;
+                        break;
+                case GF_CLI_STATUS_CALLPOOL:
+                        cli_print_volume_status_callpool (dict, notbrick);
+                        goto cont;
+                        break;
+                default:
+                        break;
+        }
 
         ret = dict_get_str (dict, "volname", &volname);
+        if (ret)
+                goto out;
 
-        cli_out ("Brick status for volume: %s", volname);
-        cli_out ("Brick\t\t\t\t\t\t\tPort\tOnline\tPID");
-        for (i = 0; i < count; i++) {
+        cli_out ("Status of volume: %s", volname);
+
+        if ((cmd & GF_CLI_STATUS_DETAIL) == 0) {
+                cli_out ("Gluster process\t\t\t\t\t\tPort\tOnline\tPid");
+                cli_print_line (CLI_BRICK_STATUS_LINE_LEN);
+        }
+
+        for (i = 0; i <= index_max; i++) {
+
+
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "brick%d.hostname", i);
                 ret = dict_get_str (dict, key, &hostname);
                 if (ret)
-                        goto out;
+                        continue;
 
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "brick%d.path", i);
                 ret = dict_get_str (dict, key, &path);
                 if (ret)
-                        goto out;
+                        continue;
+
+                /* Brick/not-brick is handled seperately here as all
+                 * types of nodes are contained in the default output
+                 */
+                memset (status.brick, 0, PATH_MAX + 255);
+                if (!strcmp (hostname, "NFS Server") ||
+                    !strcmp (hostname, "Self-heal Daemon"))
+                        snprintf (status.brick, PATH_MAX + 255, "%s on %s",
+                                  hostname, path);
+                else
+                        snprintf (status.brick, PATH_MAX + 255, "Brick %s:%s",
+                                  hostname, path);
 
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "brick%d.port", i);
-                ret = dict_get_int32 (dict, key, &port);
+                ret = dict_get_int32 (dict, key, &(status.port));
                 if (ret)
-                        goto out;
+                        continue;
 
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "brick%d.status", i);
-                ret = dict_get_int32 (dict, key, &online);
+                ret = dict_get_int32 (dict, key, &(status.online));
                 if (ret)
-                        goto out;
+                        continue;
 
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "brick%d.pid", i);
                 ret = dict_get_int32 (dict, key, &pid);
                 if (ret)
-                        goto out;
+                        continue;
                 if (pid == -1)
-                        ret = gf_asprintf (&pid_str, "%s", "N/A");
+                        ret = gf_asprintf (&(status.pid_str), "%s", "N/A");
                 else
-                        ret = gf_asprintf (&pid_str, "%d", pid);
+                        ret = gf_asprintf (&(status.pid_str), "%d", pid);
 
                 if (ret == -1)
                         goto out;
 
-                snprintf (brick, sizeof (brick) -1, "%s:%s", hostname, path);
+                if ((cmd & GF_CLI_STATUS_DETAIL)) {
+                        ret = cli_get_detail_status (dict, i, &status);
+                        if (ret)
+                                goto out;
+                        cli_print_line (CLI_BRICK_STATUS_LINE_LEN);
+                        cli_print_detailed_status (&status);
 
-                cli_print_line (CLI_BRICK_STATUS_LINE_LEN);
-                cli_print_brick_status (brick, port, online, pid_str);
-                if (pid_str)
-                        GF_FREE (pid_str);
+                } else {
+                        cli_print_brick_status (&status);
+                }
         }
-
+        cli_out (" ");
+cont:
         ret = rsp.op_ret;
 
- out:
+out:
+        if (dict)
+                dict_unref (dict);
+        GF_FREE (status.brick);
+        if (local && wipe_local) {
+                cli_local_wipe (local);
+        }
+
         cli_cmd_broadcast_response (ret);
         return ret;
 }
 
 int32_t
-gf_cli3_1_status_volume (call_frame_t *frame, xlator_t *this,
-                            void *data)
+gf_cli_status_volume (call_frame_t *frame, xlator_t *this,
+                         void *data)
 {
         gf_cli_req                      req  = {{0,}};
-        int                             ret  = 0;
-        dict_t                          *dict = NULL;
+        int                             ret  = -1;
+        dict_t                         *dict = NULL;
 
-        if (!frame || !this || !data) {
-                ret = -1;
+        if (!frame || !this || !data)
                 goto out;
-        }
 
         dict = data;
 
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
-
-                goto out;
-        }
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_STATUS_VOLUME, NULL,
-                              this, gf_cli3_1_status_cbk,
-                              (xdrproc_t)xdr_gf_cli_req);
-
+        ret = cli_to_glusterd (&req, frame, gf_cli_status_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_STATUS_VOLUME, this, cli_rpc_prog,
+                               NULL);
  out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning: %d", ret);
         return ret;
 }
 
+int
+gf_cli_status_volume_all (call_frame_t *frame, xlator_t *this, void *data)
+{
+        int              i            = 0;
+        int              ret          = -1;
+        int              vol_count    = -1;
+        uint32_t         cmd          = 0;
+        char             key[1024]    = {0};
+        char            *volname      = NULL;
+        void            *vol_dict     = NULL;
+        dict_t          *dict         = NULL;
+        cli_local_t     *local        = NULL;
+
+        if (frame->local) {
+                local = frame->local;
+                local->all = _gf_true;
+        } else
+                goto out;
+
+        ret = dict_get_uint32 (local->dict, "cmd", &cmd);
+        if (ret)
+                goto out;
+
+
+        ret = gf_cli_status_volume (frame, this, data);
+        if (ret)
+                goto out;
+
+        ret = dict_get_ptr (local->dict, "rsp-dict", &vol_dict);
+        if (ret)
+                goto out;
+
+        ret = dict_get_int32 ((dict_t *)vol_dict, "vol_count", &vol_count);
+        if (ret) {
+                cli_err ("Failed to get names of volumes");
+                goto out;
+        }
+
+        if (vol_count == 0) {
+                cli_err ("No volumes present");
+                ret = 0;
+                goto out;
+        }
+
+        /* remove the "all" flag in cmd */
+        cmd &= ~GF_CLI_STATUS_ALL;
+        cmd |= GF_CLI_STATUS_VOL;
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                //TODO: Pass proper op_* values
+                ret = cli_xml_output_vol_status_begin (local, 0,0, NULL);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                        goto out;
+                }
+        }
+
+        for (i = 0; i < vol_count; i++) {
+
+                dict = dict_new ();
+                if (!dict)
+                        goto out;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "vol%d", i);
+                ret = dict_get_str (vol_dict, key, &volname);
+                if (ret)
+                        goto out;
+
+                ret = dict_set_str (dict, "volname", volname);
+                if (ret)
+                        goto out;
+
+                ret = dict_set_uint32 (dict, "cmd", cmd);
+                if (ret)
+                        goto out;
+
+                ret = gf_cli_status_volume (frame, this, dict);
+                if (ret)
+                        goto out;
+
+                dict_unref (dict);
+        }
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_status_end (local);
+        }
+
+ out:
+        if (ret)
+                gf_log ("cli", GF_LOG_ERROR, "status all failed");
+
+        if (vol_dict)
+                dict_unref (vol_dict);
+
+        if (ret && dict)
+                dict_unref (dict);
+
+        if (local)
+                cli_local_wipe (local);
+
+        if (frame)
+                frame->local = NULL;
+
+        return ret;
+}
+
 static int
-gf_cli3_1_mount_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_mount_cbk (struct rpc_req *req, struct iovec *iov,
                   int count, void *myframe)
 {
         gf1_cli_mount_rsp rsp   = {0,};
-        int               ret   = 0;
+        int               ret   = -1;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -3959,9 +5460,9 @@ gf_cli3_1_mount_cbk (struct rpc_req *req, struct iovec *iov,
                 cli_out ("%s", rsp.path);
         } else {
                 /* weird sounding but easy to parse... */
-                cli_out ("%d : failed with this errno (%s)",
+                cli_err ("%d : failed with this errno (%s)",
                          rsp.op_errno, strerror (rsp.op_errno));
-                ret = 1;
+                ret = -1;
         }
 
 out:
@@ -3970,7 +5471,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_mount (call_frame_t *frame, xlator_t *this, void *data)
+gf_cli_mount (call_frame_t *frame, xlator_t *this, void *data)
 {
         gf1_cli_mount_req  req  = {0,};
         int                ret  = -1;
@@ -3986,7 +5487,7 @@ gf_cli3_1_mount (call_frame_t *frame, xlator_t *this, void *data)
 
         req.label = label;
         ret = dict_allocate_and_serialize (dict, &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
+                                           &req.dict.dict_len);
         if (ret) {
                 ret = -1;
                 goto out;
@@ -3994,7 +5495,7 @@ gf_cli3_1_mount (call_frame_t *frame, xlator_t *this, void *data)
 
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_MOUNT, NULL,
-                              this, gf_cli3_1_mount_cbk,
+                              this, gf_cli_mount_cbk,
                               (xdrproc_t)xdr_gf1_cli_mount_req);
 
 out:
@@ -4003,11 +5504,11 @@ out:
 }
 
 static int
-gf_cli3_1_umount_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_umount_cbk (struct rpc_req *req, struct iovec *iov,
                    int count, void *myframe)
 {
         gf1_cli_umount_rsp rsp   = {0,};
-        int               ret   = 0;
+        int               ret   = -1;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -4024,8 +5525,8 @@ gf_cli3_1_umount_cbk (struct rpc_req *req, struct iovec *iov,
         if (rsp.op_ret == 0)
                 ret = 0;
         else {
-                cli_out ("umount failed");
-                ret = 1;
+                cli_err ("umount failed");
+                ret = -1;
         }
 
 out:
@@ -4034,7 +5535,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_umount (call_frame_t *frame, xlator_t *this, void *data)
+gf_cli_umount (call_frame_t *frame, xlator_t *this, void *data)
 {
         gf1_cli_umount_req  req  = {0,};
         int                ret  = -1;
@@ -4056,7 +5557,7 @@ gf_cli3_1_umount (call_frame_t *frame, xlator_t *this, void *data)
 
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
                               GLUSTER_CLI_UMOUNT, NULL,
-                              this, gf_cli3_1_umount_cbk,
+                              this, gf_cli_umount_cbk,
                               (xdrproc_t)xdr_gf1_cli_umount_req);
 
  out:
@@ -4064,16 +5565,75 @@ gf_cli3_1_umount (call_frame_t *frame, xlator_t *this, void *data)
         return ret;
 }
 
+void
+cmd_heal_volume_brick_out (dict_t *dict, int brick)
+{
+        uint64_t        num_entries = 0;
+        int             ret = 0;
+        char            key[256] = {0};
+        char           *hostname = NULL;
+        char           *path = NULL;
+        char           *status = NULL;
+        uint64_t        i = 0;
+        uint32_t        time = 0;
+        char            timestr[32] = {0};
+
+        snprintf (key, sizeof key, "%d-hostname", brick);
+        ret = dict_get_str (dict, key, &hostname);
+        if (ret)
+                goto out;
+        snprintf (key, sizeof key, "%d-path", brick);
+        ret = dict_get_str (dict, key, &path);
+        if (ret)
+                goto out;
+        cli_out ("\nBrick %s:%s", hostname, path);
+        snprintf (key, sizeof key, "%d-count", brick);
+        ret = dict_get_uint64 (dict, key, &num_entries);
+        cli_out ("Number of entries: %"PRIu64, num_entries);
+        snprintf (key, sizeof key, "%d-status", brick);
+        ret = dict_get_str (dict, key, &status);
+        if (status && strlen (status))
+                cli_out ("Status: %s", status);
+        for (i = 0; i < num_entries; i++) {
+                snprintf (key, sizeof key, "%d-%"PRIu64, brick, i);
+                ret = dict_get_str (dict, key, &path);
+                if (ret)
+                        continue;
+                time = 0;
+                snprintf (key, sizeof key, "%d-%"PRIu64"-time", brick, i);
+                ret = dict_get_uint32 (dict, key, &time);
+                if (!time) {
+                        cli_out ("%s", path);
+                } else {
+                        gf_time_fmt (timestr, sizeof timestr,
+                                     time, gf_timefmt_FT);
+                        if (i == 0) {
+                                cli_out ("at                    path on brick");
+                                cli_out ("-----------------------------------");
+                        }
+                        cli_out ("%s %s", timestr, path);
+                }
+        }
+out:
+        return;
+}
+
 int
-gf_cli3_1_heal_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_heal_volume_cbk (struct rpc_req *req, struct iovec *iov,
                              int count, void *myframe)
 {
         gf_cli_rsp              rsp   = {0,};
-        int                     ret   = 0;
+        int                     ret   = -1;
         cli_local_t             *local = NULL;
         char                    *volname = NULL;
         call_frame_t            *frame = NULL;
+        dict_t                  *input_dict = NULL;
         dict_t                  *dict = NULL;
+        int                     brick_count = 0;
+        int                     i = 0;
+        gf_xl_afr_op_t          heal_op = GF_AFR_OP_INVALID;
+        char                    *operation = NULL;
+        char                    *substr = NULL;
 
         if (-1 == req->rpc_status) {
                 goto out;
@@ -4087,15 +5647,27 @@ gf_cli3_1_heal_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         frame = myframe;
 
-        if (frame) {
+        if (frame)
                 local = frame->local;
-                frame->local = NULL;
+
+        if (local) {
+                input_dict = local->dict;
+                ret = dict_get_int32 (input_dict, "heal-op",
+                                      (int32_t*)&heal_op);
         }
+//TODO: Proper XML output
+//#if (HAVE_LIB_XML)
+//        if (global_state->mode & GLUSTER_MODE_XML) {
+//                ret = cli_xml_output_dict ("volHeal", dict, rsp.op_ret,
+//                                           rsp.op_errno, rsp.op_errstr);
+//                if (ret)
+//                        gf_log ("cli", GF_LOG_ERROR,
+//                                "Error outputting to xml");
+//                goto out;
+//        }
+//#endif
 
-        if (local)
-                dict = local->dict;
-
-        ret = dict_get_str (dict, "volname", &volname);
+        ret = dict_get_str (input_dict, "volname", &volname);
         if (ret) {
                 gf_log (THIS->name, GF_LOG_ERROR, "failed to get volname");
                 goto out;
@@ -4103,34 +5675,79 @@ gf_cli3_1_heal_volume_cbk (struct rpc_req *req, struct iovec *iov,
 
         gf_log ("cli", GF_LOG_INFO, "Received resp to heal volume");
 
-        if (rsp.op_ret && strcmp (rsp.op_errstr, ""))
-                cli_out ("%s", rsp.op_errstr);
-        else
-                cli_out ("Starting heal on volume %s has been %s", volname,
-                        (rsp.op_ret) ? "unsuccessful": "successful");
+        if ((heal_op == GF_AFR_OP_HEAL_FULL) ||
+            (heal_op == GF_AFR_OP_HEAL_INDEX)) {
+                operation = "Launching Heal operation";
+                substr = "\nUse heal info commands to check status";
+        } else {
+                operation = "Gathering Heal info";
+                substr = "";
+        }
 
+        if (rsp.op_ret) {
+                if (strcmp (rsp.op_errstr, "")) {
+                        cli_err ("%s", rsp.op_errstr);
+                } else {
+                        cli_err ("%s on volume %s has been unsuccessful",
+                                 operation, volname);
+                }
+
+                ret = rsp.op_ret;
+                goto out;
+        } else {
+                cli_out ("%s on volume %s has been successful%s", operation,
+                         volname, substr);
+        }
+
+        ret = rsp.op_ret;
+        if ((heal_op == GF_AFR_OP_HEAL_FULL) ||
+            (heal_op == GF_AFR_OP_HEAL_INDEX))
+                goto out;
+
+        dict = dict_new ();
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_unserialize (rsp.dict.dict_val,
+                                rsp.dict.dict_len,
+                                &dict);
+
+        if (ret) {
+                gf_log ("", GF_LOG_ERROR,
+                                "Unable to allocate memory");
+                goto out;
+        } else {
+                dict->extra_stdfree = rsp.dict.dict_val;
+        }
+        ret = dict_get_int32 (dict, "count", &brick_count);
+        if (ret)
+                goto out;
+
+        if (!brick_count) {
+                cli_err ("All bricks of volume %s are down.", volname);
+                goto out;
+        }
+
+        for (i = 0; i < brick_count; i++)
+                cmd_heal_volume_brick_out (dict, i);
         ret = rsp.op_ret;
 
 out:
         cli_cmd_broadcast_response (ret);
-        if (local)
-                cli_local_wipe (local);
-        if (rsp.dict.dict_val)
-                free (rsp.dict.dict_val);
-        if (rsp.op_errstr)
-                free (rsp.op_errstr);
+        free (rsp.op_errstr);
         if (dict)
                 dict_unref (dict);
         return ret;
 }
 
 int32_t
-gf_cli3_1_heal_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_heal_volume (call_frame_t *frame, xlator_t *this,
                          void *data)
 {
         gf_cli_req              req = {{0,}};
         int                     ret = 0;
-        cli_local_t             *local = NULL;
         dict_t                  *dict = NULL;
 
         if (!frame || !this ||  !data) {
@@ -4139,43 +5756,27 @@ gf_cli3_1_heal_volume (call_frame_t *frame, xlator_t *this,
         }
 
         dict = data;
-        local = cli_local_get ();
 
-        if (local) {
-                local->dict = dict_ref (dict);
-                frame->local = local;
-        }
-
-        ret = dict_allocate_and_serialize (dict,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
-
-                goto out;
-        }
-
-        ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_HEAL_VOLUME, NULL,
-                              this, gf_cli3_1_heal_volume_cbk,
-                              (xdrproc_t) xdr_gf_cli_req);
+        ret = cli_to_glusterd (&req, frame, gf_cli_heal_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, dict,
+                               GLUSTER_CLI_HEAL_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
 out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
+        GF_FREE (req.dict.dict_val);
 
         return ret;
 }
 
 int32_t
-gf_cli3_1_statedump_volume_cbk (struct rpc_req *req, struct iovec *iov,
+gf_cli_statedump_volume_cbk (struct rpc_req *req, struct iovec *iov,
                                 int count, void *myframe)
 {
         gf_cli_rsp                      rsp = {0,};
         int                             ret = -1;
+        char                            msg[1024] = {0,};
 
         if (-1 == req->rpc_status)
                 goto out;
@@ -4185,12 +5786,25 @@ gf_cli3_1_statedump_volume_cbk (struct rpc_req *req, struct iovec *iov,
                 gf_log (THIS->name, GF_LOG_ERROR, "XDR decoding failed");
                 goto out;
         }
-        gf_log ("cli", GF_LOG_DEBUG, "Recieved response to statedump");
+        gf_log ("cli", GF_LOG_DEBUG, "Received response to statedump");
         if (rsp.op_ret)
-                cli_out ("%s", rsp.op_errstr);
+                snprintf (msg, sizeof(msg), "%s", rsp.op_errstr);
         else
-                cli_out ("Volume statedump sucessful");
+                snprintf (msg, sizeof (msg), "Volume statedump successful");
 
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_str ("volStatedump", msg, rsp.op_ret,
+                                          rsp.op_errno, rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("volume statedump: failed: %s", msg);
+        else
+                cli_out ("volume statedump: success");
         ret = rsp.op_ret;
 
 out:
@@ -4199,7 +5813,7 @@ out:
 }
 
 int32_t
-gf_cli3_1_statedump_volume (call_frame_t *frame, xlator_t *this,
+gf_cli_statedump_volume (call_frame_t *frame, xlator_t *this,
                             void *data)
 {
         gf_cli_req                      req = {{0,}};
@@ -4211,64 +5825,314 @@ gf_cli3_1_statedump_volume (call_frame_t *frame, xlator_t *this,
 
         options = data;
 
-        ret = dict_allocate_and_serialize (options,
-                                           &req.dict.dict_val,
-                                           (size_t *)&req.dict.dict_len);
-        if (ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR,
-                        "failed to serialize the data");
+        ret = cli_to_glusterd (&req, frame, gf_cli_statedump_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, options,
+                               GLUSTER_CLI_STATEDUMP_VOLUME, this, cli_rpc_prog,
+                               NULL);
 
+out:
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+
+        GF_FREE (req.dict.dict_val);
+        return ret;
+}
+
+int32_t
+gf_cli_list_volume_cbk (struct rpc_req *req, struct iovec *iov,
+                                int count, void *myframe)
+{
+        int             ret = -1;
+        gf_cli_rsp      rsp = {0,};
+        dict_t          *dict = NULL;
+        int             vol_count = 0;;
+        char            *volname = NULL;
+        char            key[1024] = {0,};
+        int             i = 0;
+
+        if (-1 == req->rpc_status)
+                goto out;
+        ret = xdr_to_generic (*iov, &rsp,
+                              (xdrproc_t)xdr_gf_cli_rsp);
+        if (ret < 0) {
+                gf_log (THIS->name, GF_LOG_ERROR, "XDR decoding failed");
                 goto out;
         }
 
+        dict = dict_new ();
+        if (!dict) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = dict_unserialize (rsp.dict.dict_val, rsp.dict.dict_len, &dict);
+        if (ret) {
+                gf_log ("cli", GF_LOG_ERROR, "Unable to allocate memory");
+                goto out;
+        }
+
+        if (global_state->mode & GLUSTER_MODE_XML) {
+                ret = cli_xml_output_vol_list (dict, rsp.op_ret, rsp.op_errno,
+                                               rsp.op_errstr);
+                if (ret)
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Error outputting to xml");
+                goto out;
+        }
+
+        if (rsp.op_ret)
+                cli_err ("%s", rsp.op_errstr);
+        else {
+                ret = dict_get_int32 (dict, "count", &vol_count);
+                if (ret)
+                        goto out;
+
+                if (vol_count == 0) {
+                        cli_err ("No volumes present in cluster");
+                        goto out;
+                }
+                for (i = 0; i < vol_count; i++) {
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "volume%d", i);
+                        ret = dict_get_str (dict, key, &volname);
+                        if (ret)
+                                goto out;
+                        cli_out ("%s", volname);
+                }
+        }
+
+        ret = rsp.op_ret;
+
+out:
+        cli_cmd_broadcast_response (ret);
+        return ret;
+}
+
+int32_t
+gf_cli_list_volume (call_frame_t *frame, xlator_t *this, void *data)
+{
+        int             ret = -1;
+        gf_cli_req      req = {{0,}};
+
+        if (!frame || !this)
+                goto out;
+
         ret = cli_cmd_submit (&req, frame, cli_rpc_prog,
-                              GLUSTER_CLI_STATEDUMP_VOLUME, NULL,
-                              this, gf_cli3_1_statedump_volume_cbk,
+                              GLUSTER_CLI_LIST_VOLUME, NULL,
+                              this, gf_cli_list_volume_cbk,
                               (xdrproc_t)xdr_gf_cli_req);
 
 out:
-        if (options)
-                dict_destroy (options);
+        gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+}
+
+int32_t
+gf_cli_clearlocks_volume_cbk (struct rpc_req *req, struct iovec *iov,
+                                  int count, void *myframe)
+{
+        gf_cli_rsp                      rsp = {0,};
+        int                             ret = -1;
+        char                            *lk_summary = NULL;
+        char                            *volname = NULL;
+        dict_t                          *dict = NULL;
+
+        if (-1 == req->rpc_status)
+                goto out;
+        ret = xdr_to_generic (*iov, &rsp,
+                              (xdrproc_t)xdr_gf_cli_rsp);
+        if (ret < 0) {
+
+                gf_log ("cli", GF_LOG_ERROR, "XDR decoding failed");
+                goto out;
+        }
+        gf_log ("cli", GF_LOG_DEBUG, "Received response to clear-locks");
+
+        if (rsp.op_ret) {
+                cli_err ("Volume clear-locks unsuccessful");
+                cli_err ("%s", rsp.op_errstr);
+
+        } else {
+                if (!rsp.dict.dict_len) {
+                        cli_err ("Possibly no locks cleared");
+                        ret = 0;
+                        goto out;
+                }
+
+                dict = dict_new ();
+
+                if (!dict) {
+                        ret = -1;
+                        goto out;
+                }
+
+                ret = dict_unserialize (rsp.dict.dict_val,
+                                        rsp.dict.dict_len,
+                                        &dict);
+
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Unable to serialize response dictionary");
+                        goto out;
+                }
+
+                ret = dict_get_str (dict, "volname", &volname);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Unable to get volname "
+                                "from dictionary");
+                        goto out;
+                }
+
+                ret = dict_get_str (dict, "lk-summary", &lk_summary);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR, "Unable to get lock "
+                                "summary from dictionary");
+                        goto out;
+                }
+                cli_out ("Volume clear-locks successful");
+                cli_out ("%s", lk_summary);
+
+        }
+
+        ret = rsp.op_ret;
+
+out:
+        if (dict)
+                dict_unref (dict);
+        cli_cmd_broadcast_response (ret);
+        return ret;
+}
+
+int32_t
+gf_cli_clearlocks_volume (call_frame_t *frame, xlator_t *this,
+                             void *data)
+{
+        gf_cli_req                      req = {{0,}};
+        dict_t                          *options = NULL;
+        int                             ret = -1;
+
+        if (!frame || !this || !data)
+                goto out;
+
+        options = data;
+
+        ret = cli_to_glusterd (&req, frame, gf_cli_clearlocks_volume_cbk,
+                               (xdrproc_t) xdr_gf_cli_req, options,
+                               GLUSTER_CLI_CLRLOCKS_VOLUME, this, cli_rpc_prog,
+                               NULL);
+out:
         gf_log ("cli", GF_LOG_DEBUG, "Returning %d", ret);
 
-        if (req.dict.dict_val)
-                GF_FREE (req.dict.dict_val);
+        GF_FREE (req.dict.dict_val);
         return ret;
+}
+
+int
+cli_to_glusterd (gf_cli_req *req, call_frame_t *frame,
+                 fop_cbk_fn_t cbkfn, xdrproc_t xdrproc, dict_t *dict,
+                 int procnum, xlator_t *this, rpc_clnt_prog_t *prog,
+                 struct iobref *iobref)
+{
+        int                ret = 0;
+        size_t             len = 0;
+        char               *cmd = NULL;
+        int                i = 0;
+        const char         **words = NULL;
+        cli_local_t        *local = NULL;
+
+        if (!this || !frame || !dict) {
+                ret = -1;
+                goto out;
+        }
+
+        if (!frame->local) {
+                ret = -1;
+                goto out;
+        }
+
+        local = frame->local;
+
+        if (!local->words) {
+                ret = -1;
+                goto out;
+        }
+
+        words = local->words;
+
+        while (words[i])
+                len += strlen (words[i++]) + 1;
+
+        cmd = GF_CALLOC (1, len, gf_common_mt_char);
+
+        if (!cmd) {
+                ret = -1;
+                goto out;
+        }
+
+        for (i = 0; words[i]; i++) {
+                strncat (cmd, words[i], strlen (words[i]));
+                if (words[i+1] != NULL)
+                        strncat (cmd, " ", strlen (" "));
+        }
+
+        cmd [len - 1] = '\0';
+
+        ret = dict_set_dynstr (dict, "cmd-str", cmd);
+        if (ret)
+                goto out;
+
+        ret = dict_allocate_and_serialize (dict, &(req->dict).dict_val,
+                                           &(req->dict).dict_len);
+
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "failed to get serialized length of dict");
+                goto out;
+        }
+
+        ret = cli_cmd_submit (req, frame, prog, procnum, iobref, this,
+                              cbkfn, (xdrproc_t) xdrproc);
+
+out:
+        return ret;
+
 }
 
 struct rpc_clnt_procedure gluster_cli_actors[GLUSTER_CLI_MAXVALUE] = {
         [GLUSTER_CLI_NULL]             = {"NULL", NULL },
-        [GLUSTER_CLI_PROBE]            = {"PROBE_QUERY", gf_cli3_1_probe},
-        [GLUSTER_CLI_DEPROBE]          = {"DEPROBE_QUERY", gf_cli3_1_deprobe},
-        [GLUSTER_CLI_LIST_FRIENDS]     = {"LIST_FRIENDS", gf_cli3_1_list_friends},
-        [GLUSTER_CLI_CREATE_VOLUME]    = {"CREATE_VOLUME", gf_cli3_1_create_volume},
-        [GLUSTER_CLI_DELETE_VOLUME]    = {"DELETE_VOLUME", gf_cli3_1_delete_volume},
-        [GLUSTER_CLI_START_VOLUME]     = {"START_VOLUME", gf_cli3_1_start_volume},
-        [GLUSTER_CLI_STOP_VOLUME]      = {"STOP_VOLUME", gf_cli3_1_stop_volume},
-        [GLUSTER_CLI_RENAME_VOLUME]    = {"RENAME_VOLUME", gf_cli3_1_rename_volume},
-        [GLUSTER_CLI_DEFRAG_VOLUME]    = {"DEFRAG_VOLUME", gf_cli3_1_defrag_volume},
-        [GLUSTER_CLI_GET_VOLUME]       = {"GET_VOLUME", gf_cli3_1_get_volume},
-        [GLUSTER_CLI_GET_NEXT_VOLUME]  = {"GET_NEXT_VOLUME", gf_cli3_1_get_next_volume},
-        [GLUSTER_CLI_SET_VOLUME]       = {"SET_VOLUME", gf_cli3_1_set_volume},
-        [GLUSTER_CLI_ADD_BRICK]        = {"ADD_BRICK", gf_cli3_1_add_brick},
-        [GLUSTER_CLI_REMOVE_BRICK]     = {"REMOVE_BRICK", gf_cli3_1_remove_brick},
-        [GLUSTER_CLI_REPLACE_BRICK]    = {"REPLACE_BRICK", gf_cli3_1_replace_brick},
-        [GLUSTER_CLI_LOG_ROTATE]       = {"LOG ROTATE", gf_cli3_1_log_rotate},
-        [GLUSTER_CLI_GETSPEC]          = {"GETSPEC", gf_cli3_1_getspec},
-        [GLUSTER_CLI_PMAP_PORTBYBRICK] = {"PMAP PORTBYBRICK", gf_cli3_1_pmap_b2p},
-        [GLUSTER_CLI_SYNC_VOLUME]      = {"SYNC_VOLUME", gf_cli3_1_sync_volume},
-        [GLUSTER_CLI_RESET_VOLUME]     = {"RESET_VOLUME", gf_cli3_1_reset_volume},
-        [GLUSTER_CLI_FSM_LOG]          = {"FSM_LOG", gf_cli3_1_fsm_log},
-        [GLUSTER_CLI_GSYNC_SET]        = {"GSYNC_SET", gf_cli3_1_gsync_set},
-        [GLUSTER_CLI_PROFILE_VOLUME]   = {"PROFILE_VOLUME", gf_cli3_1_profile_volume},
-        [GLUSTER_CLI_QUOTA]            = {"QUOTA", gf_cli3_1_quota},
-        [GLUSTER_CLI_TOP_VOLUME]       = {"TOP_VOLUME", gf_cli3_1_top_volume},
-        [GLUSTER_CLI_GETWD]            = {"GETWD", gf_cli3_1_getwd},
-        [GLUSTER_CLI_STATUS_VOLUME]    = {"STATUS_VOLUME", gf_cli3_1_status_volume},
-        [GLUSTER_CLI_MOUNT]            = {"MOUNT", gf_cli3_1_mount},
-        [GLUSTER_CLI_UMOUNT]           = {"UMOUNT", gf_cli3_1_umount},
-        [GLUSTER_CLI_HEAL_VOLUME]      = {"HEAL_VOLUME", gf_cli3_1_heal_volume},
-        [GLUSTER_CLI_STATEDUMP_VOLUME] = {"STATEDUMP_VOLUME", gf_cli3_1_statedump_volume},
+        [GLUSTER_CLI_PROBE]            = {"PROBE_QUERY", gf_cli_probe},
+        [GLUSTER_CLI_DEPROBE]          = {"DEPROBE_QUERY", gf_cli_deprobe},
+        [GLUSTER_CLI_LIST_FRIENDS]     = {"LIST_FRIENDS", gf_cli_list_friends},
+        [GLUSTER_CLI_CREATE_VOLUME]    = {"CREATE_VOLUME", gf_cli_create_volume},
+        [GLUSTER_CLI_DELETE_VOLUME]    = {"DELETE_VOLUME", gf_cli_delete_volume},
+        [GLUSTER_CLI_START_VOLUME]     = {"START_VOLUME", gf_cli_start_volume},
+        [GLUSTER_CLI_STOP_VOLUME]      = {"STOP_VOLUME", gf_cli_stop_volume},
+        [GLUSTER_CLI_RENAME_VOLUME]    = {"RENAME_VOLUME", gf_cli_rename_volume},
+        [GLUSTER_CLI_DEFRAG_VOLUME]    = {"DEFRAG_VOLUME", gf_cli_defrag_volume},
+        [GLUSTER_CLI_GET_VOLUME]       = {"GET_VOLUME", gf_cli_get_volume},
+        [GLUSTER_CLI_GET_NEXT_VOLUME]  = {"GET_NEXT_VOLUME", gf_cli_get_next_volume},
+        [GLUSTER_CLI_SET_VOLUME]       = {"SET_VOLUME", gf_cli_set_volume},
+        [GLUSTER_CLI_ADD_BRICK]        = {"ADD_BRICK", gf_cli_add_brick},
+        [GLUSTER_CLI_REMOVE_BRICK]     = {"REMOVE_BRICK", gf_cli_remove_brick},
+        [GLUSTER_CLI_REPLACE_BRICK]    = {"REPLACE_BRICK", gf_cli_replace_brick},
+        [GLUSTER_CLI_LOG_ROTATE]       = {"LOG ROTATE", gf_cli_log_rotate},
+        [GLUSTER_CLI_GETSPEC]          = {"GETSPEC", gf_cli_getspec},
+        [GLUSTER_CLI_PMAP_PORTBYBRICK] = {"PMAP PORTBYBRICK", gf_cli_pmap_b2p},
+        [GLUSTER_CLI_SYNC_VOLUME]      = {"SYNC_VOLUME", gf_cli_sync_volume},
+        [GLUSTER_CLI_RESET_VOLUME]     = {"RESET_VOLUME", gf_cli_reset_volume},
+        [GLUSTER_CLI_FSM_LOG]          = {"FSM_LOG", gf_cli_fsm_log},
+        [GLUSTER_CLI_GSYNC_SET]        = {"GSYNC_SET", gf_cli_gsync_set},
+        [GLUSTER_CLI_PROFILE_VOLUME]   = {"PROFILE_VOLUME", gf_cli_profile_volume},
+        [GLUSTER_CLI_QUOTA]            = {"QUOTA", gf_cli_quota},
+        [GLUSTER_CLI_TOP_VOLUME]       = {"TOP_VOLUME", gf_cli_top_volume},
+        [GLUSTER_CLI_GETWD]            = {"GETWD", gf_cli_getwd},
+        [GLUSTER_CLI_STATUS_VOLUME]    = {"STATUS_VOLUME", gf_cli_status_volume},
+        [GLUSTER_CLI_STATUS_ALL]       = {"STATUS_ALL", gf_cli_status_volume_all},
+        [GLUSTER_CLI_MOUNT]            = {"MOUNT", gf_cli_mount},
+        [GLUSTER_CLI_UMOUNT]           = {"UMOUNT", gf_cli_umount},
+        [GLUSTER_CLI_HEAL_VOLUME]      = {"HEAL_VOLUME", gf_cli_heal_volume},
+        [GLUSTER_CLI_STATEDUMP_VOLUME] = {"STATEDUMP_VOLUME", gf_cli_statedump_volume},
+        [GLUSTER_CLI_LIST_VOLUME]      = {"LIST_VOLUME", gf_cli_list_volume},
+        [GLUSTER_CLI_CLRLOCKS_VOLUME]  = {"CLEARLOCKS_VOLUME", gf_cli_clearlocks_volume},
 };
 
 struct rpc_clnt_program cli_prog = {

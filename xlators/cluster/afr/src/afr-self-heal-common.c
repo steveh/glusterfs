@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "glusterfs.h"
@@ -26,6 +17,30 @@
 #include "afr-self-heal-common.h"
 #include "afr-self-heal.h"
 #include "pump.h"
+
+void
+afr_sh_reset (call_frame_t *frame, xlator_t *this)
+{
+        afr_local_t     *local = NULL;
+        afr_self_heal_t *sh = NULL;
+        afr_private_t   *priv = NULL;
+
+        local = frame->local;
+        sh = &local->self_heal;
+        priv = this->private;
+
+        memset (sh->child_errno, 0,
+                sizeof (*sh->child_errno) * priv->child_count);
+        memset (sh->buf, 0, sizeof (*sh->buf) * priv->child_count);
+        memset (sh->parentbufs, 0,
+                sizeof (*sh->parentbufs) * priv->child_count);
+        memset (sh->success, 0, sizeof (*sh->success) * priv->child_count);
+        memset (sh->locked_nodes, 0,
+                sizeof (*sh->locked_nodes) * priv->child_count);
+        sh->active_sinks = 0;
+
+        afr_reset_xattr (sh->xattr, priv->child_count);
+}
 
 //Intersection[child]=1 if child is part of intersection
 void
@@ -81,21 +96,6 @@ afr_sh_mark_source_sinks (call_frame_t *frame, xlator_t *this)
         sh->active_sinks = active_sinks;
 }
 
-/**
- * sink_count - return number of sinks in sources array
- */
-
-int
-afr_sh_sink_count (int sources[], int child_count)
-{
-        int i = 0;
-        int sinks = 0;
-        for (i = 0; i < child_count; i++)
-                if (!sources[i])
-                        sinks++;
-        return sinks;
-}
-
 int
 afr_sh_source_count (int sources[], int child_count)
 {
@@ -135,8 +135,7 @@ afr_sh_print_pending_matrix (int32_t *pending_matrix[], xlator_t *this)
                         ptr += sprintf (ptr, "%d ", pending_matrix[i][j]);
                 }
                 sprintf (ptr, "]");
-                gf_log (this->name, GF_LOG_DEBUG,
-                        "pending_matrix: %s", buf);
+                gf_log (this->name, GF_LOG_DEBUG, "pending_matrix: %s", buf);
         }
 
         GF_FREE (buf);
@@ -180,6 +179,7 @@ afr_mark_ignorant_subvols_as_pending (int32_t **pending_matrix,
 
 int
 afr_build_pending_matrix (char **pending_key, int32_t **pending_matrix,
+                          unsigned char *ignorant_subvols,
                           dict_t *xattr[], afr_transaction_type type,
                           size_t child_count)
 {
@@ -190,12 +190,6 @@ afr_build_pending_matrix (char **pending_key, int32_t **pending_matrix,
         int            i                = 0;
         int            j                = 0;
         int            k                = 0;
-        unsigned char *ignorant_subvols = NULL;
-
-        ignorant_subvols = GF_CALLOC (sizeof (*ignorant_subvols), child_count,
-                                      gf_afr_mt_char);
-        if (NULL == ignorant_subvols)
-                goto out;
 
         afr_init_pending_matrix (pending_matrix, child_count);
 
@@ -213,7 +207,8 @@ afr_build_pending_matrix (char **pending_key, int32_t **pending_matrix,
                                  * subvolume.
                                  */
 
-                                ignorant_subvols[i] = 1;
+                                if (ignorant_subvols)
+                                        ignorant_subvols[i] = 1;
                                 continue;
                         }
 
@@ -224,19 +219,14 @@ afr_build_pending_matrix (char **pending_key, int32_t **pending_matrix,
                 }
         }
 
-        afr_mark_ignorant_subvols_as_pending (pending_matrix,
-                                              ignorant_subvols,
-                                              child_count);
-        GF_FREE (ignorant_subvols);
-out:
         return ret;
 }
 
 typedef enum {
+        AFR_NODE_INVALID,
         AFR_NODE_INNOCENT,
         AFR_NODE_FOOL,
         AFR_NODE_WISE,
-        AFR_NODE_INVALID = -1,
 } afr_node_type;
 
 typedef struct {
@@ -483,30 +473,24 @@ afr_mark_biggest_of_fools_as_source (int32_t *sources, int32_t **pending_matrix,
                                                        characters, child_count,
                                                        biggest_witness);
 out:
-        if (witnesses)
-                GF_FREE (witnesses);
+        GF_FREE (witnesses);
         return nsources;
 }
 
 int
 afr_mark_child_as_source_by_uid (int32_t *sources, struct iatt *bufs,
-                                 int32_t *valid_children, int child_count,
-                                 uint32_t uid)
+                                 int32_t *success_children,
+                                 unsigned int child_count, uint32_t uid)
 {
         int     i        = 0;
         int     nsources = 0;
         int     child    = 0;
 
-        GF_ASSERT (bufs);
-        GF_ASSERT (valid_children);
-        GF_ASSERT (sources);
-        GF_ASSERT (child_count > 0);
-
         for (i = 0; i < child_count; i++) {
-                if (-1 == valid_children[i])
-                        continue;
+                if (-1 == success_children[i])
+                        break;
 
-                child = valid_children[i];
+                child = success_children[i];
                 if (uid == bufs[child].ia_uid) {
                         sources[child] = 1;
                         nsources++;
@@ -516,21 +500,17 @@ afr_mark_child_as_source_by_uid (int32_t *sources, struct iatt *bufs,
 }
 
 int
-afr_get_child_with_lowest_uid (struct iatt *bufs, int32_t *valid_children,
-                               int child_count)
+afr_get_child_with_lowest_uid (struct iatt *bufs, int32_t *success_children,
+                               unsigned int child_count)
 {
         int     i        = 0;
         int     smallest = -1;
         int     child    = 0;
 
-        GF_ASSERT (bufs);
-        GF_ASSERT (valid_children);
-        GF_ASSERT (child_count > 0);
-
         for (i = 0; i < child_count; i++) {
-                if (-1 == valid_children[i])
-                        continue;
-                child = valid_children[i];
+                if (-1 == success_children[i])
+                        break;
+                child = success_children[i];
                 if ((smallest == -1) ||
                     (bufs[child].ia_uid < bufs[smallest].ia_uid)) {
                         smallest = child;
@@ -540,21 +520,93 @@ afr_get_child_with_lowest_uid (struct iatt *bufs, int32_t *valid_children,
 }
 
 static int
-afr_sh_mark_lowest_uid_as_source (struct iatt *bufs, int32_t *valid_children,
+afr_sh_mark_lowest_uid_as_source (struct iatt *bufs, int32_t *success_children,
                                   int child_count, int32_t *sources)
 {
         int   nsources              = 0;
         int   smallest              = 0;
 
-        smallest = afr_get_child_with_lowest_uid (bufs, valid_children,
+        smallest = afr_get_child_with_lowest_uid (bufs, success_children,
                                                   child_count);
         if (smallest < 0) {
                 nsources = -1;
                 goto out;
         }
         nsources = afr_mark_child_as_source_by_uid (sources, bufs,
-                                                    valid_children, child_count,
+                                                    success_children, child_count,
                                                     bufs[smallest].ia_uid);
+out:
+        return nsources;
+}
+
+int
+afr_get_no_xattr_dir_read_child (xlator_t *this, int32_t *success_children,
+                                 struct iatt *bufs)
+{
+        afr_private_t *priv = NULL;
+        int            i = 0;
+        int            child = -1;
+        int            read_child = -1;
+
+        priv = this->private;
+        for (i = 0; i < priv->child_count; i++) {
+                child = success_children[i];
+                if (child < 0)
+                        break;
+                if (read_child < 0)
+                        read_child = child;
+                else if (bufs[read_child].ia_size < bufs[child].ia_size)
+                        read_child = child;
+        }
+        return read_child;
+}
+
+int
+afr_sh_mark_zero_size_file_as_sink (struct iatt *bufs, int32_t *success_children,
+                                    int child_count, int32_t *sources)
+{
+        int             nsources = 0;
+        int             i = 0;
+        int             child = 0;
+        gf_boolean_t    sink_exists = _gf_false;
+        gf_boolean_t    source_exists = _gf_false;
+        int             source = -1;
+
+        for (i = 0; i < child_count; i++) {
+                child = success_children[i];
+                if (child < 0)
+                        break;
+                if (!bufs[child].ia_size) {
+                        sink_exists = _gf_true;
+                        continue;
+                }
+                if (!source_exists) {
+                        source_exists = _gf_true;
+                        source = child;
+                        continue;
+                }
+                if (bufs[source].ia_size != bufs[child].ia_size) {
+                        nsources = -1;
+                        goto out;
+                }
+        }
+        if (!source_exists && !sink_exists) {
+                nsources = -1;
+                goto out;
+        }
+
+        if (!source_exists || !sink_exists)
+                goto out;
+
+        for (i = 0; i < child_count; i++) {
+                child = success_children[i];
+                if (child < 0)
+                        break;
+                if (bufs[child].ia_size) {
+                        sources[child] = 1;
+                        nsources++;
+                }
+        }
 out:
         return nsources;
 }
@@ -583,12 +635,10 @@ afr_get_character_str (afr_node_type type)
 
 afr_node_type
 afr_find_child_character_type (int32_t *pending_row, int32_t child,
-                               int32_t child_count, const char *xlator_name)
+                               unsigned int child_count)
 {
         afr_node_type type = AFR_NODE_INVALID;
 
-        GF_ASSERT (pending_row);
-        GF_ASSERT (child_count > 0);
         GF_ASSERT ((child >= 0) && (child < child_count));
 
         if (afr_sh_is_innocent (pending_row, child_count))
@@ -597,44 +647,85 @@ afr_find_child_character_type (int32_t *pending_row, int32_t child,
                 type = AFR_NODE_FOOL;
         else if (afr_sh_is_wise (pending_row, child, child_count))
                 type = AFR_NODE_WISE;
-        else
-                GF_ASSERT (0);
-
-        gf_log (xlator_name, GF_LOG_DEBUG, "child %d character %s",
-                child, afr_get_character_str (type));
         return type;
 }
 
 int
 afr_build_sources (xlator_t *this, dict_t **xattr, struct iatt *bufs,
                    int32_t **pending_matrix, int32_t *sources,
-                   int32_t *success_children, afr_transaction_type type)
+                   int32_t *success_children, afr_transaction_type type,
+                   int32_t *subvol_status, gf_boolean_t ignore_ignorant)
 {
         afr_private_t           *priv = NULL;
         afr_self_heal_type      sh_type    = AFR_SELF_HEAL_INVALID;
         int                     nsources   = -1;
+        unsigned char           *ignorant_subvols = NULL;
+        unsigned int            child_count = 0;
 
         priv = this->private;
+        child_count = priv->child_count;
 
         if (afr_get_children_count (success_children, priv->child_count) == 0)
                 goto out;
 
-        afr_build_pending_matrix (priv->pending_key, pending_matrix,
-                                  xattr, type, priv->child_count);
+        if (!ignore_ignorant) {
+                ignorant_subvols = GF_CALLOC (sizeof (*ignorant_subvols),
+                                              child_count, gf_afr_mt_char);
+                if (NULL == ignorant_subvols)
+                        goto out;
+        }
 
+        afr_build_pending_matrix (priv->pending_key, pending_matrix,
+                                  ignorant_subvols, xattr, type,
+                                  priv->child_count);
+
+        if (!ignore_ignorant)
+                afr_mark_ignorant_subvols_as_pending (pending_matrix,
+                                                      ignorant_subvols,
+                                                      priv->child_count);
         sh_type = afr_self_heal_type_for_transaction (type);
         if (AFR_SELF_HEAL_INVALID == sh_type)
                 goto out;
 
         afr_sh_print_pending_matrix (pending_matrix, this);
 
-        nsources = afr_mark_sources (sources, pending_matrix, bufs,
-                                     priv->child_count, sh_type,
-                                     success_children, this->name);
+        nsources = afr_mark_sources (this, sources, pending_matrix, bufs,
+                                     sh_type, success_children, subvol_status);
 out:
+        GF_FREE (ignorant_subvols);
         return nsources;
 }
 
+void
+afr_find_character_types (afr_node_character *characters,
+                          int32_t **pending_matrix, int32_t *success_children,
+                          unsigned int child_count)
+{
+        afr_node_type type  = AFR_NODE_INVALID;
+        int           child = 0;
+        int           i     = 0;
+
+        for (i = 0; i < child_count; i++) {
+                child = success_children[i];
+                if (child == -1)
+                        break;
+                type = afr_find_child_character_type (pending_matrix[child],
+                                                      child, child_count);
+                characters[child].type = type;
+        }
+}
+
+void
+afr_mark_success_children_sources (int32_t *sources, int32_t *success_children,
+                                   unsigned int child_count)
+{
+        int i = 0;
+        for (i = 0; i < child_count; i++) {
+                if (success_children[i] == -1)
+                        break;
+                sources[success_children[i]] = 1;
+        }
+}
 /**
  * mark_sources: Mark all 'source' nodes and return number of source
  * nodes found
@@ -660,17 +751,18 @@ out:
  */
 
 int
-afr_mark_sources (int32_t *sources, int32_t **pending_matrix, struct iatt *bufs,
-                  int32_t child_count, afr_self_heal_type type,
-                  int32_t *valid_children, const char *xlator_name)
+afr_mark_sources (xlator_t *this, int32_t *sources, int32_t **pending_matrix,
+                  struct iatt *bufs, afr_self_heal_type type,
+                  int32_t *success_children, int32_t *subvol_status)
 {
         /* stores the 'characters' (innocent, fool, wise) of the nodes */
-
         afr_node_character *characters =  NULL;
-        int            i              = 0;
-        int            nsources       = -1;
-        xlator_t      *this           = NULL;
+        int                nsources    = -1;
+        unsigned int       child_count = 0;
+        afr_private_t      *priv       = NULL;
 
+        priv = this->private;
+        child_count = priv->child_count;
         characters = GF_CALLOC (sizeof (afr_node_character),
                                 child_count, gf_afr_mt_afr_node_character);
         if (!characters)
@@ -679,28 +771,29 @@ afr_mark_sources (int32_t *sources, int32_t **pending_matrix, struct iatt *bufs,
         this = THIS;
 
         /* start clean */
-        for (i = 0; i < child_count; i++) {
-                sources[i] = 0;
-        }
-
+        memset (sources, 0, sizeof (*sources) * child_count);
         nsources = 0;
-        for (i = 0; i < child_count; i++) {
-                characters[i].type =
-                        afr_find_child_character_type (pending_matrix[i], i,
-                                                       child_count,
-                                                       xlator_name);
-                if (AFR_NODE_INVALID == characters[i].type)
-                        gf_log (xlator_name, GF_LOG_WARNING,
-                                "child %d had invalid xattrs", i);
-        }
-
-        if ((type == AFR_SELF_HEAL_METADATA)
-            && afr_sh_all_nodes_innocent (characters, child_count)) {
-
-                nsources = afr_sh_mark_lowest_uid_as_source (bufs,
-                                                             valid_children,
+        afr_find_character_types (characters, pending_matrix, success_children,
+                                  child_count);
+        if (afr_sh_all_nodes_innocent (characters, child_count)) {
+                switch (type) {
+                case AFR_SELF_HEAL_METADATA:
+                        nsources = afr_sh_mark_lowest_uid_as_source (bufs,
+                                                             success_children,
                                                              child_count,
                                                              sources);
+                        break;
+                case AFR_SELF_HEAL_DATA:
+                        nsources = afr_sh_mark_zero_size_file_as_sink (bufs,
+                                                             success_children,
+                                                             child_count,
+                                                             sources);
+                        if ((nsources < 0) && subvol_status)
+                                *subvol_status |= SPLIT_BRAIN;
+                        break;
+                default:
+                        break;
+                }
                 goto out;
         }
 
@@ -708,17 +801,17 @@ afr_mark_sources (int32_t *sources, int32_t **pending_matrix, struct iatt *bufs,
                 afr_sh_compute_wisdom (pending_matrix, characters, child_count);
 
                 if (afr_sh_wise_nodes_conflict (characters, child_count)) {
-                        /* split-brain */
-                        gf_log (this->name, GF_LOG_INFO,
-                                "split-brain possible, no source detected");
+                        if (subvol_status)
+                                *subvol_status |= SPLIT_BRAIN;
                         nsources = -1;
-
                 } else {
                         nsources = afr_sh_mark_wisest_as_sources (sources,
                                                                   characters,
                                                                   child_count);
                 }
         } else {
+                if (subvol_status)
+                        *subvol_status |= ALL_FOOLS;
                 nsources = afr_mark_biggest_of_fools_as_source (sources,
                                                                 pending_matrix,
                                                                 characters,
@@ -726,14 +819,10 @@ afr_mark_sources (int32_t *sources, int32_t **pending_matrix, struct iatt *bufs,
         }
 
 out:
-        if (nsources == 0) {
-                for (i = 0; i < child_count; i++) {
-                        if (valid_children[i] != -1)
-                                sources[valid_children[i]] = 1;
-                }
-        }
-        if (characters)
-                GF_FREE (characters);
+        if (nsources == 0)
+                afr_mark_success_children_sources (sources, success_children,
+                                                   child_count);
+        GF_FREE (characters);
 
         gf_log (this->name, GF_LOG_DEBUG, "Number of sources: %d", nsources);
         return nsources;
@@ -744,63 +833,36 @@ afr_sh_pending_to_delta (afr_private_t *priv, dict_t **xattr,
                          int32_t *delta_matrix[], unsigned char success[],
                          int child_count, afr_transaction_type type)
 {
-        /* Indexable by result of afr_index_for_transaction_type(): 0 -- 2. */
-        int32_t  pending[3]  = {0,};
-        void    *pending_raw = NULL;
-        int      ret         = 0;
-        int      i           = 0;
-        int      j           = 0;
-        int      k           = 0;
+        int i = 0;
+        int j = 0;
 
-        /* start clean */
-        for (i = 0; i < child_count; i++) {
-                for (j = 0; j < child_count; j++) {
-                        delta_matrix[i][j] = 0;
-                }
-        }
-
-        for (i = 0; i < child_count; i++) {
-                if (pending_raw)
-                        pending_raw = NULL;
-
-                for (j = 0; j < child_count; j++) {
-                        ret = dict_get_ptr (xattr[i], priv->pending_key[j],
-                                            &pending_raw);
-                        if (ret < 0)
-                                gf_log (THIS->name, GF_LOG_DEBUG,
-                                        "Unable to get dict value.");
-                        if (!success[j])
-                                continue;
-
-                        k = afr_index_for_transaction_type (type);
-
-                        if (pending_raw != NULL) {
-                                memcpy (pending, pending_raw, sizeof(pending));
-                                delta_matrix[i][j] = -(ntoh32 (pending[k]));
-                        } else {
-                                delta_matrix[i][j]  = 0;
-                        }
-
-                }
-        }
+        afr_build_pending_matrix (priv->pending_key, delta_matrix, NULL,
+                                  xattr, type, priv->child_count);
+        for (i = 0; i < priv->child_count; i++)
+                for (j = 0; j < priv->child_count; j++)
+                        delta_matrix[i][j] = -delta_matrix[i][j];
 }
 
 
 int
-afr_sh_delta_to_xattr (afr_private_t *priv,
+afr_sh_delta_to_xattr (xlator_t *this,
                        int32_t *delta_matrix[], dict_t *xattr[],
                        int child_count, afr_transaction_type type)
 {
-        int      i       = 0;
-        int      j       = 0;
-        int      k       = 0;
-        int      ret     = 0;
-        int32_t *pending = NULL;
+        int              i       = 0;
+        int              j       = 0;
+        int              k       = 0;
+        int              ret     = 0;
+        int32_t         *pending = NULL;
+        int32_t         *local_pending = NULL;
+        afr_private_t   *priv = NULL;
 
+        priv = this->private;
         for (i = 0; i < child_count; i++) {
                 if (!xattr[i])
                         continue;
 
+                local_pending = NULL;
                 for (j = 0; j < child_count; j++) {
                         pending = GF_CALLOC (sizeof (int32_t), 3,
                                              gf_afr_mt_int32_t);
@@ -813,12 +875,28 @@ afr_sh_delta_to_xattr (afr_private_t *priv,
 
                         pending[k] = hton32 (delta_matrix[i][j]);
 
+                        if (j == i) {
+                                local_pending = pending;
+                                continue;
+                        }
                         ret = dict_set_bin (xattr[i], priv->pending_key[j],
                                             pending,
-                                            3 * sizeof (int32_t));
-                        if (ret < 0)
-                                gf_log (THIS->name, GF_LOG_WARNING,
+                                        AFR_NUM_CHANGE_LOGS * sizeof (int32_t));
+                        if (ret < 0) {
+                                gf_log (this->name, GF_LOG_WARNING,
                                         "Unable to set dict value.");
+                                GF_FREE (pending);
+                        }
+                }
+                if (local_pending) {
+                        ret = dict_set_bin (xattr[i], priv->pending_key[i],
+                                            local_pending,
+                                        AFR_NUM_CHANGE_LOGS * sizeof (int32_t));
+                        if (ret < 0) {
+                                gf_log (this->name, GF_LOG_WARNING,
+                                        "Unable to set dict value.");
+                                GF_FREE (local_pending);
+                        }
                 }
         }
         return 0;
@@ -917,55 +995,25 @@ afr_sh_has_entry_pending (dict_t *xattr, xlator_t *this)
         return 0;
 }
 
-
-/**
- * is_matrix_zero - return true if pending matrix is all zeroes
- */
-
-int
-afr_sh_is_matrix_zero (int32_t *pending_matrix[], int child_count)
-{
-        int i = 0;
-        int j = 0;
-
-        for (i = 0; i < child_count; i++)
-                for (j = 0; j < child_count; j++)
-                        if (pending_matrix[i][j])
-                                return 0;
-        return 1;
-}
-
-
 int
 afr_sh_missing_entries_done (call_frame_t *frame, xlator_t *this)
 {
         afr_local_t     *local = NULL;
         afr_self_heal_t *sh = NULL;
-        afr_private_t   *priv = NULL;
-        int              i = 0;
 
         local = frame->local;
         sh = &local->self_heal;
-        priv = this->private;
 
-//      memset (sh->child_errno, 0, sizeof (int) * priv->child_count);
-        memset (sh->buf, 0, sizeof (struct iatt) * priv->child_count);
+        afr_sh_reset (frame, this);
 
-        for (i = 0; i < priv->child_count; i++) {
-                sh->locked_nodes[i] = 0;
-        }
-
-        for (i = 0; i < priv->child_count; i++) {
-                if (sh->xattr[i])
-                        dict_unref (sh->xattr[i]);
-                sh->xattr[i] = NULL;
-        }
-
-        if (local->govinda_gOvinda || sh->op_failed) {
-                gf_log (this->name, GF_LOG_INFO,
+        if (local->govinda_gOvinda) {
+                gf_log (this->name, GF_LOG_DEBUG,
                         "split brain found, aborting selfheal of %s",
                         local->loc.path);
                 sh->op_failed = 1;
+        }
+
+        if (sh->op_failed) {
                 sh->completion_cbk (frame, this);
         } else {
                 gf_log (this->name, GF_LOG_TRACE,
@@ -1051,7 +1099,7 @@ afr_sh_common_lookup_resp_handler (call_frame_t *frame, void *cookie,
                         sh->success_count++;
                         sh->xattr[child_index] = dict_ref (xattr);
                 } else {
-                        gf_log (this->name, GF_LOG_ERROR, "path %s on subvolume"
+                        gf_log (this->name, GF_LOG_DEBUG, "path %s on subvolume"
                                 " %s => -1 (%s)", loc->path,
                                 priv->children[child_index]->name,
                                 strerror (op_errno));
@@ -1082,8 +1130,7 @@ afr_valid_ia_type (ia_type_t ia_type)
 
 int
 afr_impunge_frame_create (call_frame_t *frame, xlator_t *this,
-                          int active_source, int ret_child, mode_t entry_mode,
-                          call_frame_t **impunge_frame)
+                          int active_source, call_frame_t **impunge_frame)
 {
         afr_local_t     *local         = NULL;
         afr_local_t     *impunge_local = NULL;
@@ -1100,19 +1147,22 @@ afr_impunge_frame_create (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (impunge_local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (impunge_local, out);
 
         local = frame->local;
         new_frame->local = impunge_local;
         impunge_sh = &impunge_local->self_heal;
         impunge_sh->sh_frame = frame;
         impunge_sh->active_source = active_source;
-        impunge_sh->impunge_ret_child = ret_child;
-        impunge_sh->impunging_entry_mode = entry_mode;
         impunge_local->child_up  = memdup (local->child_up,
                                            sizeof (*local->child_up) *
                                            priv->child_count);
         if (!impunge_local->child_up)
+                goto out;
+
+        impunge_local->pending = afr_matrix_create (priv->child_count,
+                                                    AFR_NUM_CHANGE_LOGS);
+        if (!impunge_local->pending)
                 goto out;
 
         ret = afr_sh_common_create (impunge_sh, priv->child_count);
@@ -1129,54 +1179,89 @@ out:
 }
 
 void
-afr_sh_call_entry_impunge_recreate (call_frame_t *frame, xlator_t *this,
-                                    int child_index, struct iatt *buf,
-                                    struct iatt *postparent,
-                                    afr_impunge_done_cbk_t impunge_done)
+afr_sh_missing_entry_call_impunge_recreate (call_frame_t *frame, xlator_t *this,
+                                            struct iatt *buf,
+                                            struct iatt *postparent,
+                                            afr_impunge_done_cbk_t impunge_done)
 {
         call_frame_t    *impunge_frame = NULL;
         afr_local_t     *local = NULL;
         afr_local_t     *impunge_local = NULL;
         afr_self_heal_t *sh = NULL;
+        afr_self_heal_t *impunge_sh = NULL;
         int             ret = 0;
-        mode_t          mode = 0;
+        unsigned int    enoent_count = 0;
+        afr_private_t   *priv = NULL;
+        int             i = 0;
+        int32_t         op_errno = 0;
 
         local = frame->local;
         sh    = &local->self_heal;
-        mode = st_mode_from_ia (buf->ia_prot, buf->ia_type);
-        ret = afr_impunge_frame_create (frame, this, sh->source, child_index,
-                                        mode, &impunge_frame);
+        priv  = this->private;
+
+        enoent_count = afr_errno_count (NULL, sh->child_errno,
+                                        priv->child_count, ENOENT);
+        if (!enoent_count) {
+                gf_log (this->name, GF_LOG_INFO,
+                        "no missing files - %s. proceeding to metadata check",
+                        local->loc.path);
+                goto out;
+        }
+        sh->impunge_done = impunge_done;
+        ret = afr_impunge_frame_create (frame, this, sh->source, &impunge_frame);
         if (ret)
                 goto out;
         impunge_local = impunge_frame->local;
+        impunge_sh    = &impunge_local->self_heal;
         loc_copy (&impunge_local->loc, &local->loc);
-        sh->impunge_done = impunge_done;
-        impunge_local->call_count = 1;
-        afr_sh_entry_impunge_create (impunge_frame, this, child_index, buf,
-                                     postparent);
+        ret = afr_build_parent_loc (&impunge_sh->parent_loc,
+                                    &impunge_local->loc, &op_errno);
+        if (ret) {
+                ret = -op_errno;
+                goto out;
+        }
+        impunge_local->call_count = enoent_count;
+        impunge_sh->entrybuf = sh->buf[sh->source];
+        impunge_sh->parentbuf = sh->parentbufs[sh->source];
+        for (i = 0; i < priv->child_count; i++) {
+                if (!impunge_local->child_up[i]) {
+                        impunge_sh->child_errno[i] = ENOTCONN;
+                        continue;
+                }
+                if (sh->child_errno[i] != ENOENT) {
+                        impunge_sh->child_errno[i] = EEXIST;
+                        continue;
+                }
+        }
+        for (i = 0; i < priv->child_count; i++) {
+                if (sh->child_errno[i] != ENOENT)
+                        continue;
+                afr_sh_entry_impunge_create (impunge_frame, this, i);
+                enoent_count--;
+        }
+        GF_ASSERT (!enoent_count);
         return;
 out:
-        gf_log (this->name, GF_LOG_ERROR, "impunge of %s failed, reason: %s",
-                local->loc.path, strerror (-ret));
-        impunge_done (frame, this, child_index, -1, -ret);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "impunge of %s failed, "
+                        "reason: %s", local->loc.path, strerror (-ret));
+                sh->op_failed = 1;
+        }
+        afr_sh_missing_entries_finish (frame, this);
 }
 
 int
-afr_sh_create_entry_cbk (call_frame_t *frame, xlator_t *this, int child,
+afr_sh_create_entry_cbk (call_frame_t *frame, xlator_t *this,
                          int32_t op_ret, int32_t op_errno)
 {
-        int             call_count = 0;
         afr_local_t     *local = NULL;
+        afr_self_heal_t *sh = NULL;
 
         local = frame->local;
-
-        if (op_ret == -1)
-                gf_log (this->name, GF_LOG_ERROR,
-                        "create entry %s failed, on child %d reason, %s",
-                        local->loc.path, child, strerror (op_errno));
-        call_count = afr_frame_return (frame);
-        if (call_count == 0)
-                afr_sh_missing_entries_finish (frame, this);
+        sh = &local->self_heal;
+        if (op_ret < 0)
+                sh->op_failed = 1;
+        afr_sh_missing_entries_finish (frame, this);
         return 0;
 }
 
@@ -1186,26 +1271,11 @@ sh_missing_entries_create (call_frame_t *frame, xlator_t *this)
         afr_local_t     *local = NULL;
         afr_self_heal_t *sh = NULL;
         int              type = 0;
-        afr_private_t   *priv = NULL;
-        int             enoent_count = 0;
-        int             i = 0;
         struct iatt     *buf = NULL;
         struct iatt     *postparent = NULL;
 
         local = frame->local;
         sh = &local->self_heal;
-        priv = this->private;
-
-        enoent_count = afr_errno_count (NULL, sh->child_errno,
-                                        priv->child_count, ENOENT);
-        if (enoent_count == 0) {
-                gf_log (this->name, GF_LOG_INFO,
-                        "no missing files - %s. proceeding to metadata check",
-                        local->loc.path);
-                /* proceed to next step - metadata self-heal */
-                afr_sh_missing_entries_finish (frame, this);
-                return 0;
-        }
 
         buf = &sh->buf[sh->source];
         postparent = &sh->parentbufs[sh->source];
@@ -1219,17 +1289,9 @@ sh_missing_entries_create (call_frame_t *frame, xlator_t *this)
                 goto out;
         }
 
-        local->call_count = enoent_count;
-        for (i = 0; i < priv->child_count; i++) {
-                //If !child_up errno will be zero
-                if (sh->child_errno[i] != ENOENT)
-                        continue;
-                afr_sh_call_entry_impunge_recreate (frame, this, i,
+        afr_sh_missing_entry_call_impunge_recreate (frame, this,
                                                     buf, postparent,
                                                     afr_sh_create_entry_cbk);
-                enoent_count--;
-        }
-        GF_ASSERT (enoent_count == 0);
 out:
         return 0;
 }
@@ -1244,6 +1306,10 @@ afr_sh_missing_entries_lookup_done (call_frame_t *frame, xlator_t *this,
         ia_type_t       ia_type = IA_INVAL;
         int32_t         nsources = 0;
         loc_t           *loc = NULL;
+        int32_t         subvol_status = 0;
+        afr_transaction_type txn_type = AFR_DATA_TRANSACTION;
+        gf_boolean_t    split_brain = _gf_false;
+        int             read_child = -1;
 
         local = frame->local;
         sh = &local->self_heal;
@@ -1259,16 +1325,38 @@ afr_sh_missing_entries_lookup_done (call_frame_t *frame, xlator_t *this,
 
         //now No chance for the ia_type to conflict
         ia_type = sh->buf[sh->success_children[0]].ia_type;
+        txn_type = afr_transaction_type_get (ia_type);
         nsources = afr_build_sources (this, sh->xattr, sh->buf,
                                       sh->pending_matrix, sh->sources,
-                                      sh->success_children,
-                                      afr_transaction_type_get (ia_type));
+                                      sh->success_children, txn_type,
+                                      &subvol_status, _gf_false);
         if (nsources < 0) {
                 gf_log (this->name, GF_LOG_INFO, "No sources for dir of %s,"
                         " in missing entry self-heal, continuing with the rest"
                         " of the self-heals", local->loc.path);
-                op_errno = EIO;
-                goto out;
+                if (subvol_status & SPLIT_BRAIN) {
+                        split_brain = _gf_true;
+                        switch (txn_type) {
+                        case AFR_DATA_TRANSACTION:
+                                nsources = 1;
+                                sh->sources[sh->success_children[0]] = 1;
+                                break;
+                        case AFR_ENTRY_TRANSACTION:
+                                read_child = afr_get_no_xattr_dir_read_child
+                                                          (this,
+                                                           sh->success_children,
+                                                           sh->buf);
+                                sh->sources[read_child] = 1;
+                                nsources = 1;
+                                break;
+                        default:
+                                op_errno = EIO;
+                                goto out;
+                        }
+                } else {
+                        op_errno = EIO;
+                        goto out;
+                }
         }
 
         afr_get_fresh_children (sh->success_children, sh->sources,
@@ -1285,7 +1373,11 @@ afr_sh_missing_entries_lookup_done (call_frame_t *frame, xlator_t *this,
         sh->type = sh->buf[sh->source].ia_type;
         if (uuid_is_null (loc->inode->gfid))
                 uuid_copy (loc->gfid, sh->buf[sh->source].ia_gfid);
-        sh_missing_entries_create (frame, this);
+        if (split_brain) {
+                afr_sh_missing_entries_finish (frame, this);
+        } else {
+                sh_missing_entries_create (frame, this);
+        }
         return;
 out:
         sh->op_failed = 1;
@@ -1385,6 +1477,7 @@ afr_sh_remove_entry_cbk (call_frame_t *frame, xlator_t *this, int child,
 void
 afr_sh_call_entry_expunge_remove (call_frame_t *frame, xlator_t *this,
                                   int child_index, struct iatt *buf,
+                                  struct iatt *parentbuf,
                                   afr_expunge_done_cbk_t expunge_done)
 {
         call_frame_t    *expunge_frame = NULL;
@@ -1393,13 +1486,14 @@ afr_sh_call_entry_expunge_remove (call_frame_t *frame, xlator_t *this,
         afr_self_heal_t *sh = NULL;
         afr_self_heal_t *expunge_sh = NULL;
         int32_t         op_errno = 0;
+        int             ret = 0;
 
         expunge_frame = copy_frame (frame);
         if (!expunge_frame) {
                 goto out;
         }
 
-        ALLOC_OR_GOTO (expunge_local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (expunge_local, out);
 
         local = frame->local;
         sh = &local->self_heal;
@@ -1407,8 +1501,15 @@ afr_sh_call_entry_expunge_remove (call_frame_t *frame, xlator_t *this,
         expunge_sh = &expunge_local->self_heal;
         expunge_sh->sh_frame = frame;
         loc_copy (&expunge_local->loc, &local->loc);
+        ret = afr_build_parent_loc (&expunge_sh->parent_loc,
+                                    &expunge_local->loc, &op_errno);
+        if (ret) {
+                ret = -op_errno;
+                goto out;
+        }
         sh->expunge_done = expunge_done;
-        afr_sh_entry_expunge_remove (expunge_frame, this, child_index, buf);
+        afr_sh_entry_expunge_remove (expunge_frame, this, child_index, buf,
+                                     parentbuf);
         return;
 out:
         gf_log (this->name, GF_LOG_ERROR, "Expunge of %s failed, reason: %s",
@@ -1455,7 +1556,8 @@ afr_sh_purge_stale_entries_done (call_frame_t *frame, xlator_t *this)
                                               afr_sh_missing_entries_lookup_done,
                                               sh->sh_gfid_req,
                                               AFR_LOOKUP_FAIL_CONFLICTS|
-                                              AFR_LOOKUP_FAIL_MISSING_GFIDS);
+                                              AFR_LOOKUP_FAIL_MISSING_GFIDS,
+                                              NULL);
                 } else {
                         //No need to set gfid so goto missing entries lookup done
                         //Behave as if you have done the lookup
@@ -1540,6 +1642,7 @@ afr_sh_purge_entry_common (call_frame_t *frame, xlator_t *this,
                         "on %d", local->loc.path, i);
                 afr_sh_call_entry_expunge_remove (frame, this,
                                                   (long) i, &sh->buf[i],
+                                                  &sh->parentbufs[i],
                                                   afr_sh_remove_entry_cbk);
         }
 out:
@@ -1696,40 +1799,42 @@ afr_sh_find_fresh_parents (call_frame_t *frame, xlator_t *this,
         int             enoent_count = 0;
         int             nsources = 0;
         int             source  = -1;
+        int32_t         subvol_status = 0;
 
         local = frame->local;
         sh = &local->self_heal;
         priv = this->private;
 
-        /* If We can't find a fresh parent directory here,
-         * we wont know which subvol is correct without finding a parent dir
-         * upwards which has correct xattrs, for that we may have to
-         * do lookups till root, we dont wanna do that,
-         * instead make sure that if there are conflicting gfid
-         * parent dirs, self-heal thus lookup is failed with EIO.
-         * if there are missing entries we dont know whether to delete or
-         * create so fail with EIO,
-         * If there are conflicting xattr fail with EIO.
-         */
         if (op_ret < 0)
                 goto out;
         enoent_count = afr_errno_count (NULL, sh->child_errno,
                                         priv->child_count, ENOENT);
         if (enoent_count > 0) {
-                gf_log (this->name, GF_LOG_ERROR, "Parent dir missing for %s,"
-                        " in missing entry self-heal, aborting self-heal",
+                gf_log (this->name, GF_LOG_INFO, "Parent dir missing for %s,"
+                        " in missing entry self-heal, aborting missing-entry "
+                        "self-heal",
                         local->loc.path);
-                goto out;
+                afr_sh_missing_entries_finish (frame, this);
+                return;
         }
 
         nsources = afr_build_sources (this, sh->xattr, sh->buf,
                                       sh->pending_matrix, sh->sources,
                                       sh->success_children,
-                                      AFR_ENTRY_TRANSACTION);
-        if (nsources < 0) {
-                gf_log (this->name, GF_LOG_ERROR, "No sources for dir of %s,"
-                        " in missing entry self-heal, aborting self-heal",
-                        local->loc.path);
+                                      AFR_ENTRY_TRANSACTION, &subvol_status,
+                                      _gf_true);
+        if ((subvol_status & ALL_FOOLS) ||
+            (subvol_status & SPLIT_BRAIN)) {
+                gf_log (this->name, GF_LOG_INFO, "%s: Performing conservative "
+                        "merge", sh->parent_loc.path);
+                afr_mark_success_children_sources (sh->sources,
+                                                   sh->success_children,
+                                                   priv->child_count);
+        } else if (nsources < 0) {
+                gf_log (this->name, GF_LOG_ERROR, "No sources for dir "
+                        "of %s, in missing entry self-heal, aborting "
+                        "self-heal", local->loc.path);
+                op_errno = EIO;
                 goto out;
         }
 
@@ -1737,16 +1842,18 @@ afr_sh_find_fresh_parents (call_frame_t *frame, xlator_t *this,
         if (source == -1) {
                 GF_ASSERT (0);
                 gf_log (this->name, GF_LOG_DEBUG, "No active sources found.");
+                op_errno = EIO;
                 goto out;
         }
         afr_get_fresh_children (sh->success_children, sh->sources,
                                 sh->fresh_parent_dirs, priv->child_count);
         afr_sh_common_lookup (frame, this, &local->loc,
-                              afr_sh_children_lookup_done, NULL, 0);
+                              afr_sh_children_lookup_done, NULL, 0,
+                              NULL);
         return;
 
 out:
-        afr_sh_set_error (sh, EIO);
+        afr_sh_set_error (sh, op_errno);
         sh->op_failed = 1;
         afr_sh_missing_entries_finish (frame, this);
         return;
@@ -1776,7 +1883,7 @@ afr_sh_common_reset (afr_self_heal_t *sh, unsigned int child_count)
 int
 afr_sh_common_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
                       afr_lookup_done_cbk_t lookup_done , uuid_t gfid,
-                      int32_t flags)
+                      int32_t flags, dict_t *xdata)
 {
         afr_local_t    *local = NULL;
         int             i = 0;
@@ -1858,7 +1965,8 @@ afr_sh_post_nb_entrylk_conflicting_sh_cbk (call_frame_t *frame, xlator_t *this)
                         "Non blocking entrylks done. Proceeding to FOP");
                 afr_sh_common_lookup (frame, this, &sh->parent_loc,
                                       afr_sh_find_fresh_parents,
-                                      NULL, AFR_LOOKUP_FAIL_CONFLICTS);
+                                      NULL, AFR_LOOKUP_FAIL_CONFLICTS,
+                                      NULL);
         }
 
         return 0;
@@ -1885,7 +1993,8 @@ afr_sh_post_nb_entrylk_gfid_sh_cbk (call_frame_t *frame, xlator_t *this)
                 afr_sh_common_lookup (frame, this, &local->loc,
                                       afr_sh_missing_entries_lookup_done,
                                       sh->sh_gfid_req, AFR_LOOKUP_FAIL_CONFLICTS|
-                                      AFR_LOOKUP_FAIL_MISSING_GFIDS);
+                                      AFR_LOOKUP_FAIL_MISSING_GFIDS,
+                                      NULL);
         }
 
         return 0;
@@ -1921,6 +2030,9 @@ afr_self_heal_parent_entrylk (call_frame_t *frame, xlator_t *this,
 {
         afr_local_t         *local    = NULL;
         afr_self_heal_t     *sh       = NULL;
+        afr_internal_lock_t *int_lock = NULL;
+        int                 ret       = -1;
+        int32_t             op_errno  = 0;
 
         local    = frame->local;
         sh       = &local->self_heal;
@@ -1929,11 +2041,17 @@ afr_self_heal_parent_entrylk (call_frame_t *frame, xlator_t *this,
                 "attempting to recreate missing entries for path=%s",
                 local->loc.path);
 
-        GF_ASSERT (local->loc.parent);
-        afr_build_parent_loc (&sh->parent_loc, &local->loc);
+        ret = afr_build_parent_loc (&sh->parent_loc, &local->loc, &op_errno);
+        if (ret)
+                goto out;
 
         afr_sh_entrylk (frame, this, &sh->parent_loc, NULL,
                         lock_cbk);
+        return 0;
+out:
+        int_lock = &local->internal_lock;
+        int_lock->lock_op_ret = -1;
+        lock_cbk (frame, this);
         return 0;
 }
 
@@ -1964,8 +2082,7 @@ afr_local_t *afr_local_copy (afr_local_t *l, xlator_t *this)
 
         sh = &l->self_heal;
 
-        lc = GF_CALLOC (1, sizeof (afr_local_t),
-                        gf_afr_mt_afr_local_t);
+        lc = mem_get0 (this->local_pool);
         if (!lc)
                 goto out;
 
@@ -1978,6 +2095,7 @@ afr_local_t *afr_local_copy (afr_local_t *l, xlator_t *this)
         shc->do_data_self_heal = sh->do_data_self_heal;
         shc->do_metadata_self_heal = sh->do_metadata_self_heal;
         shc->do_entry_self_heal = sh->do_entry_self_heal;
+        shc->force_confirm_spb = sh->force_confirm_spb;
         shc->forced_merge = sh->forced_merge;
         shc->background = sh->background;
         shc->type = sh->type;
@@ -2045,25 +2163,34 @@ afr_self_heal_completion_cbk (call_frame_t *bgsh_frame, xlator_t *this)
         local = bgsh_frame->local;
         sh    = &local->self_heal;
 
-        if (local->govinda_gOvinda)
+        if (local->govinda_gOvinda || sh->mdata_spb || sh->data_spb) {
                 split_brain = _gf_true;
+                sh->op_failed = 1;
+        }
 
         afr_set_split_brain (this, sh->inode, split_brain);
 
         afr_self_heal_type_str_get (sh, sh_type_str,
                                     sizeof(sh_type_str));
         if (sh->op_failed) {
-                gf_log (this->name, GF_LOG_ERROR, "background %s self-heal "
+                gf_loglevel_t     loglevel = GF_LOG_ERROR;
+                if (priv->shd.iamshd)
+                        loglevel = GF_LOG_DEBUG;
+
+                gf_log (this->name, loglevel, "background %s self-heal "
                         "failed on %s", sh_type_str, local->loc.path);
+
         } else {
-                gf_log (this->name, GF_LOG_INFO, "background %s self-heal "
+                gf_log (this->name, GF_LOG_DEBUG, "background %s self-heal "
                         "completed on %s", sh_type_str, local->loc.path);
+
         }
 
         FRAME_SU_UNDO (bgsh_frame, afr_local_t);
 
         if (!sh->unwound && sh->unwind) {
-                sh->unwind (sh->orig_frame, this, sh->op_ret, sh->op_errno);
+                sh->unwind (sh->orig_frame, this, sh->op_ret, sh->op_errno,
+                            sh->op_failed);
         }
 
         if (sh->background) {
@@ -2085,7 +2212,6 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
         afr_local_t     *local = NULL;
         afr_self_heal_t *sh = NULL;
         afr_private_t   *priv = NULL;
-        int              i = 0;
         int32_t          op_errno = 0;
         int              ret = 0;
         afr_self_heal_t *orig_sh = NULL;
@@ -2106,11 +2232,11 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
                 local->self_heal.do_data_self_heal,
                 local->self_heal.do_entry_self_heal);
 
-        op_errno = ENOMEM;
+        op_errno        = ENOMEM;
         sh_frame        = copy_frame (frame);
         if (!sh_frame)
                 goto out;
-        afr_set_lk_owner (sh_frame, this);
+        afr_set_lk_owner (sh_frame, this, sh_frame->root);
         afr_set_low_priority (sh_frame);
 
         sh_local        = afr_local_copy (local, this);
@@ -2120,7 +2246,6 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
         sh              = &sh_local->self_heal;
 
         sh->inode       = inode_ref (inode);
-
         sh->orig_frame  = frame;
 
         sh->completion_cbk = afr_self_heal_completion_cbk;
@@ -2139,30 +2264,16 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
         if (!sh->locked_nodes)
                 goto out;
 
-        sh->pending_matrix = GF_CALLOC (sizeof (int32_t *), priv->child_count,
-                                        gf_afr_mt_int32_t);
+        sh->pending_matrix = afr_matrix_create (priv->child_count,
+                                                priv->child_count);
         if (!sh->pending_matrix)
                 goto out;
 
-        for (i = 0; i < priv->child_count; i++) {
-                sh->pending_matrix[i] = GF_CALLOC (sizeof (int32_t),
-                                                   priv->child_count,
-                                                   gf_afr_mt_int32_t);
-                if (!sh->pending_matrix[i])
-                        goto out;
-        }
-
-        sh->delta_matrix = GF_CALLOC (sizeof (int32_t *), priv->child_count,
-                                      gf_afr_mt_int32_t);
+        sh->delta_matrix = afr_matrix_create (priv->child_count,
+                                              priv->child_count);
         if (!sh->delta_matrix)
                 goto out;
-        for (i = 0; i < priv->child_count; i++) {
-                sh->delta_matrix[i] = GF_CALLOC (sizeof (int32_t),
-                                                 priv->child_count,
-                                                 gf_afr_mt_int32_t);
-                if (!sh->delta_matrix)
-                        goto out;
-        }
+
         sh->fresh_parent_dirs = afr_children_create (priv->child_count);
         if (!sh->fresh_parent_dirs)
                 goto out;
@@ -2186,6 +2297,11 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
                         }
                 }
                 UNLOCK (&priv->lock);
+        }
+
+        if (!local->loc.parent) {
+                sh->do_missing_entry_self_heal = _gf_false;
+                sh->do_gfid_self_heal = _gf_false;
         }
 
         FRAME_SU_DO (sh_frame, afr_local_t);
@@ -2212,7 +2328,9 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
 
 out:
         if (op_errno) {
-                orig_sh->unwind (frame, this, -1, op_errno);
+                orig_sh->unwind (frame, this, -1, op_errno, 1);
+                if (sh_frame)
+                        AFR_STACK_DESTROY (sh_frame);
         }
         return 0;
 }
@@ -2269,13 +2387,21 @@ afr_self_heal_type_for_transaction (afr_transaction_type type)
 }
 
 int
-afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name, uuid_t gfid)
+afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name)
 {
         int   ret = -1;
+        uuid_t pargfid = {0};
 
-        if (!child) {
+        if (!child)
                 goto out;
-        }
+
+        if (!uuid_is_null (parent->inode->gfid))
+                uuid_copy (pargfid, parent->inode->gfid);
+        else if (!uuid_is_null (parent->gfid))
+                uuid_copy (pargfid, parent->gfid);
+
+        if (uuid_is_null (pargfid))
+                goto out;
 
         if (strcmp (parent->path, "/") == 0)
                 ret = gf_asprintf ((char **)&child->path, "/%s", name);
@@ -2288,27 +2414,111 @@ afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name, uu
                         "asprintf failed while setting child path");
         }
 
-        if (!child->path) {
-                goto out;
-        }
-
         child->name = strrchr (child->path, '/');
         if (child->name)
                 child->name++;
 
         child->parent = inode_ref (parent->inode);
         child->inode = inode_new (parent->inode->table);
+        uuid_copy (child->pargfid, pargfid);
 
         if (!child->inode) {
                 ret = -1;
                 goto out;
         }
-        uuid_copy (child->gfid, gfid);
 
         ret = 0;
 out:
-        if (ret == -1)
+        if ((ret == -1) && child)
                 loc_wipe (child);
 
         return ret;
+}
+
+int
+afr_sh_erase_pending (call_frame_t *frame, xlator_t *this,
+                      afr_transaction_type type, afr_fxattrop_cbk_t cbk,
+                      int (*finish)(call_frame_t *frame, xlator_t *this))
+{
+        afr_local_t     *local = NULL;
+        afr_self_heal_t *sh = NULL;
+        afr_private_t   *priv = NULL;
+        int              call_count = 0;
+        int              i = 0;
+        dict_t          **erase_xattr = NULL;
+        int             ret = -1;
+
+        local = frame->local;
+        sh = &local->self_heal;
+        priv = this->private;
+
+        afr_sh_pending_to_delta (priv, sh->xattr, sh->delta_matrix,
+                                 sh->success, priv->child_count, type);
+
+        erase_xattr = GF_CALLOC (sizeof (*erase_xattr), priv->child_count,
+                                 gf_afr_mt_dict_t);
+        if (!erase_xattr)
+                goto out;
+
+        for (i = 0; i < priv->child_count; i++) {
+                if (sh->xattr[i]) {
+                        call_count++;
+                        erase_xattr[i] = dict_new ();
+                        if (!erase_xattr[i])
+                                goto out;
+                }
+        }
+
+        afr_sh_delta_to_xattr (this, sh->delta_matrix, erase_xattr,
+                               priv->child_count, type);
+
+        gf_log (this->name, GF_LOG_DEBUG, "Delta matrix for: %s",
+                lkowner_utoa (&frame->root->lk_owner));
+        afr_sh_print_pending_matrix (sh->delta_matrix, this);
+        local->call_count = call_count;
+        if (call_count == 0) {
+                ret = 0;
+                finish (frame, this);
+                goto out;
+        }
+
+        for (i = 0; i < priv->child_count; i++) {
+                if (!erase_xattr[i])
+                        continue;
+
+                if (sh->healing_fd) {//true for ENTRY, reg file DATA transaction
+                        STACK_WIND_COOKIE (frame, cbk, (void *) (long) i,
+                                           priv->children[i],
+                                           priv->children[i]->fops->fxattrop,
+                                           sh->healing_fd,
+                                           GF_XATTROP_ADD_ARRAY, erase_xattr[i],
+                                           NULL);
+                } else {
+                        STACK_WIND_COOKIE (frame, cbk, (void *) (long) i,
+                                           priv->children[i],
+                                           priv->children[i]->fops->xattrop,
+                                           &local->loc,
+                                           GF_XATTROP_ADD_ARRAY, erase_xattr[i],
+                                           NULL);
+                }
+        }
+
+        ret = 0;
+out:
+        if (erase_xattr) {
+                for (i = 0; i < priv->child_count; i++) {
+                        if (erase_xattr[i]) {
+                                dict_unref (erase_xattr[i]);
+                        }
+                }
+        }
+
+        GF_FREE (erase_xattr);
+
+        if (ret < 0) {
+                sh->op_failed = _gf_true;
+                finish (frame, this);
+        }
+
+        return 0;
 }

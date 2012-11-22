@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -30,6 +21,7 @@
 #include "name.h"
 #include "byte-order.h"
 #include "xlator.h"
+#include "xdr-rpc.h"
 #include <signal.h>
 
 #define GF_RDMA_LOG_NAME "rpc-transport/rdma"
@@ -192,8 +184,9 @@ gf_rdma_new_post (gf_rdma_device_t *device, int32_t len,
                                post->buf_size,
                                IBV_ACCESS_LOCAL_WRITE);
         if (!post->mr) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
-                        "memory registration failed");
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "memory registration failed (%s)",
+                        strerror (errno));
                 goto out;
         }
 
@@ -203,9 +196,7 @@ gf_rdma_new_post (gf_rdma_device_t *device, int32_t len,
         ret = 0;
 out:
         if (ret != 0) {
-                if (post->buf != NULL) {
-                        free (post->buf);
-                }
+                free (post->buf);
 
                 GF_FREE (post);
                 post = NULL;
@@ -299,7 +290,6 @@ __gf_rdma_ioq_entry_free (gf_rdma_ioq_t *entry)
                 iobref_unref (entry->msg.request.rsp_iobref);
                 entry->msg.request.rsp_iobref = NULL;
         }
-        /* TODO: use mem-pool */
         mem_put (entry);
 }
 
@@ -364,33 +354,33 @@ gf_rdma_post_send (struct ibv_qp *qp, gf_rdma_post_t *post, int32_t len)
 
 int
 __gf_rdma_encode_error(gf_rdma_peer_t *peer, gf_rdma_reply_info_t *reply_info,
-                       struct iovec *rpchdr, uint32_t *ptr,
+                       struct iovec *rpchdr, gf_rdma_header_t *hdr,
                        gf_rdma_errcode_t err)
 {
-        uint32_t       *startp  = NULL;
         struct rpc_msg *rpc_msg = NULL;
 
-        startp = ptr;
         if (reply_info != NULL) {
-                *ptr++ = hton32(reply_info->rm_xid);
+                hdr->rm_xid = hton32(reply_info->rm_xid);
         } else {
                 rpc_msg = rpchdr[0].iov_base; /* assume rpchdr contains
                                                * only one vector.
                                                * (which is true)
                                                */
-                *ptr++ = rpc_msg->rm_xid;
+                hdr->rm_xid = rpc_msg->rm_xid;
         }
 
-        *ptr++ = hton32(GF_RDMA_VERSION);
-        *ptr++ = hton32(peer->send_count);
-        *ptr++ = hton32(GF_RDMA_ERROR);
-        *ptr++ = hton32(err);
+        hdr->rm_vers = hton32(GF_RDMA_VERSION);
+        hdr->rm_credit = hton32(peer->send_count);
+        hdr->rm_type = hton32(GF_RDMA_ERROR);
+        hdr->rm_body.rm_error.rm_type = hton32(err);
         if (err == ERR_VERS) {
-                *ptr++ = hton32(GF_RDMA_VERSION);
-                *ptr++ = hton32(GF_RDMA_VERSION);
+                hdr->rm_body.rm_error.rm_version.gf_rdma_vers_low
+                        = hton32(GF_RDMA_VERSION);
+                hdr->rm_body.rm_error.rm_version.gf_rdma_vers_high
+                        = hton32(GF_RDMA_VERSION);
         }
 
-        return (int)((unsigned long)ptr - (unsigned long)startp);
+        return sizeof (*hdr);
 }
 
 
@@ -402,7 +392,7 @@ __gf_rdma_send_error (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         int32_t  ret = -1, len = 0;
 
         len = __gf_rdma_encode_error (peer, reply_info, entry->rpchdr,
-                                      (uint32_t *)post->buf, err);
+                                      (gf_rdma_header_t *)post->buf, err);
         if (len == -1) {
                 gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
                         "encode error returned -1");
@@ -461,8 +451,10 @@ __gf_rdma_create_read_chunks_from_vector (gf_rdma_peer_t *peer,
                                  vector[i].iov_len,
                                  IBV_ACCESS_REMOTE_READ);
                 if (!mr) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
-                                "memory registration failed");
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "memory registration failed (%s) (peer:%s)",
+                                strerror (errno),
+                                peer->trans->peerinfo.identifier);
                         goto out;
                 }
 
@@ -511,8 +503,8 @@ __gf_rdma_create_read_chunks (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                                                 entry->rpchdr_count,
                                                                 request_ctx);
                 if (ret == -1) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
-                                "cannot create read chunks from vector, "
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "cannot create read chunks from vector "
                                 "entry->rpchdr");
                         goto out;
                 }
@@ -524,8 +516,8 @@ __gf_rdma_create_read_chunks (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                                                 entry->proghdr_count,
                                                                 request_ctx);
                 if (ret == -1) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
-                                "cannot create read chunks from vector, "
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "cannot create read chunks from vector "
                                 "entry->proghdr");
                 }
 
@@ -537,8 +529,8 @@ __gf_rdma_create_read_chunks (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                                                         entry->prog_payload_count,
                                                                         request_ctx);
                         if (ret == -1) {
-                                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
-                                        "cannot create read chunks from vector,"
+                                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                        "cannot create read chunks from vector"
                                         " entry->prog_payload");
                         }
                 }
@@ -551,8 +543,8 @@ __gf_rdma_create_read_chunks (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                                                 entry->prog_payload_count,
                                                                 request_ctx);
                 if (ret == -1) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
-                                "cannot create read chunks from vector, "
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "cannot create read chunks from vector "
                                 "entry->prog_payload");
                 }
         }
@@ -595,8 +587,10 @@ __gf_rdma_create_write_chunks_from_vector (gf_rdma_peer_t *peer,
                                  IBV_ACCESS_REMOTE_WRITE
                                  | IBV_ACCESS_LOCAL_WRITE);
                 if (!mr) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
-                                "memory registration failed");
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "memory registration failed (%s) (peer:%s)",
+                                strerror (errno),
+                                peer->trans->peerinfo.identifier);
                         goto out;
                 }
 
@@ -671,7 +665,7 @@ __gf_rdma_create_write_chunks (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                                                  entry->msg.request.rsp_payload_count,
                                                                  request_ctx);
                 if (ret == -1) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                                 "cannot create write chunks from vector "
                                 "entry->rpc_payload");
                         goto out;
@@ -701,7 +695,7 @@ __gf_rdma_create_write_chunks (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                                                  entry->msg.request.rsphdr_count,
                                                                  request_ctx);
                 if (ret == -1) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                                 "cannot create write chunks from vector "
                                 "entry->rpchdr");
                         goto out;
@@ -1045,10 +1039,11 @@ __gf_rdma_ioq_churn_request (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
 
         chunkptr = &hdr->rm_body.rm_chunks[0];
         if (rtype != gf_rdma_noch) {
-                ret = __gf_rdma_create_read_chunks (peer, entry, rtype, &chunkptr,
+                ret = __gf_rdma_create_read_chunks (peer, entry, rtype,
+                                                    &chunkptr,
                                                     request_ctx);
                 if (ret != 0) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                                 "creation of read chunks failed");
                         goto out;
                 }
@@ -1057,10 +1052,11 @@ __gf_rdma_ioq_churn_request (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         }
 
         if (wtype != gf_rdma_noch) {
-                ret = __gf_rdma_create_write_chunks (peer, entry, wtype, &chunkptr,
+                ret = __gf_rdma_create_write_chunks (peer, entry, wtype,
+                                                     &chunkptr,
                                                      request_ctx);
                 if (ret != 0) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                                 "creation of write/reply chunk failed");
                         goto out;
                 }
@@ -1148,11 +1144,12 @@ __gf_rdma_fill_reply_header (gf_rdma_header_t *header, struct iovec *rpchdr,
 
 int32_t
 __gf_rdma_send_reply_inline (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
-                             gf_rdma_post_t *post, gf_rdma_reply_info_t *reply_info)
+                             gf_rdma_post_t *post,
+                             gf_rdma_reply_info_t *reply_info)
 {
-        gf_rdma_header_t  *header    = NULL;
-        int32_t         send_size = 0, ret = 0;
-        char           *buf       = NULL;
+        gf_rdma_header_t *header    = NULL;
+        int32_t           send_size = 0, ret = 0;
+        char             *buf       = NULL;
 
         send_size = iov_length (entry->rpchdr, entry->rpchdr_count)
                 + iov_length (entry->proghdr, entry->proghdr_count)
@@ -1165,6 +1162,10 @@ __gf_rdma_send_reply_inline (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         if (send_size > GLUSTERFS_RDMA_INLINE_THRESHOLD) {
                 ret = __gf_rdma_send_error (peer, entry, post, reply_info,
                                             ERR_CHUNK);
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "msg size (%d) is greater than maximum size "
+                        "of msg that can be sent inlined (%d)",
+                        send_size, GLUSTERFS_RDMA_INLINE_THRESHOLD);
                 goto out;
         }
 
@@ -1199,7 +1200,7 @@ __gf_rdma_send_reply_inline (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                 ret = send_size;
         } else {
                 gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
-                        "gf_rdma_post_send (to %s) failed with ret = %d (%s)",
+                        "posting send (to %s) failed with ret = %d (%s)",
                         peer->trans->peerinfo.identifier, ret,
                         (ret > 0) ? strerror (ret) : "");
                 gf_rdma_post_unref (post);
@@ -1272,9 +1273,8 @@ __gf_rdma_register_local_mr_for_rdma (gf_rdma_peer_t *peer,
         gf_rdma_private_t *priv   = NULL;
         gf_rdma_device_t  *device = NULL;
 
-        if ((ctx == NULL) || (vector == NULL)) {
-                goto out;
-        }
+        GF_VALIDATE_OR_GOTO (GF_RDMA_LOG_NAME, ctx, out);
+        GF_VALIDATE_OR_GOTO (GF_RDMA_LOG_NAME, vector, out);
 
         priv = peer->trans->private;
         device = priv->device;
@@ -1295,6 +1295,9 @@ __gf_rdma_register_local_mr_for_rdma (gf_rdma_peer_t *peer,
                                                      vector[i].iov_len,
                                                      IBV_ACCESS_LOCAL_WRITE);
                 if (ctx->mr[ctx->mr_count] == NULL) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "registering memory for IBV_ACCESS_LOCAL_WRITE "
+                                "failed (%s)", strerror (errno));
                         goto out;
                 }
 
@@ -1365,7 +1368,8 @@ __gf_rdma_write (gf_rdma_peer_t *peer, gf_rdma_post_t *post, struct iovec *vec,
 
         ret = ibv_post_send(peer->qp, &wr, &bad_wr);
         if (ret) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING, "rdma write to "
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "rdma write to "
                         "client (%s) failed with ret = %d (%s)",
                         peer->trans->peerinfo.identifier, ret,
                         (ret > 0) ? strerror (ret) : "");
@@ -1400,6 +1404,8 @@ __gf_rdma_do_gf_rdma_write (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
         ret = __gf_rdma_register_local_mr_for_rdma (peer, vector, count,
                                                     &post->ctx);
         if (ret == -1) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "registering memory region for rdma failed");
                 goto out;
         }
 
@@ -1411,9 +1417,13 @@ __gf_rdma_do_gf_rdma_write (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
                 xfer_len = min (payload_size,
                                 reply_info->wc_array->wc_array[i].wc_target.rs_length);
 
-                ret = __gf_rdma_write (peer, post, vector, xfer_len, &payload_idx,
+                ret = __gf_rdma_write (peer, post, vector, xfer_len,
+                                       &payload_idx,
                                        &reply_info->wc_array->wc_array[i]);
                 if (ret == -1) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "rdma write to client (%s) failed",
+                                peer->trans->peerinfo.identifier);
                         goto out;
                 }
 
@@ -1432,12 +1442,12 @@ __gf_rdma_send_reply_type_nomsg (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                  gf_rdma_post_t *post,
                                  gf_rdma_reply_info_t *reply_info)
 {
-        gf_rdma_header_t      *header       = NULL;
-        char               *buf          = NULL;
-        uint32_t            payload_size = 0;
-        int                 count        = 0, i = 0;
-        int32_t             ret          = 0;
-        struct iovec        vector[MAX_IOVEC];
+        gf_rdma_header_t *header       = NULL;
+        char             *buf          = NULL;
+        uint32_t          payload_size = 0;
+        int               count        = 0, i = 0;
+        int32_t           ret          = 0;
+        struct iovec      vector[MAX_IOVEC];
 
         header = (gf_rdma_header_t *)post->buf;
 
@@ -1452,9 +1462,10 @@ __gf_rdma_send_reply_type_nomsg (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         /* encode reply chunklist */
         buf = (char *)&header->rm_body.rm_chunks[2];
         ret = __gf_rdma_reply_encode_write_chunks (peer, payload_size, post,
-                                                   reply_info, (uint32_t **)&buf);
+                                                   reply_info,
+                                                   (uint32_t **)&buf);
         if (ret == -1) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "encoding write chunks failed");
                 ret = __gf_rdma_send_error (peer, entry, post, reply_info,
                                             ERR_CHUNK);
@@ -1474,6 +1485,9 @@ __gf_rdma_send_reply_type_nomsg (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         ret = __gf_rdma_do_gf_rdma_write (peer, post, vector, count,
                                           entry->iobref, reply_info);
         if (ret == -1) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "rdma write to peer (%s) failed",
+                        peer->trans->peerinfo.identifier);
                 gf_rdma_post_unref (post);
                 goto out;
         }
@@ -1481,7 +1495,7 @@ __gf_rdma_send_reply_type_nomsg (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         ret = gf_rdma_post_send (peer->qp, post, (buf - post->buf));
         if (ret) {
                 gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
-                        "gf_rdma_post_send to client (%s) failed with "
+                        "posting a send request to client (%s) failed with "
                         "ret = %d (%s)", peer->trans->peerinfo.identifier, ret,
                         (ret > 0) ? strerror (ret) : "");
                 ret = -1;
@@ -1497,12 +1511,13 @@ out:
 
 int32_t
 __gf_rdma_send_reply_type_msg (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
-                               gf_rdma_post_t *post, gf_rdma_reply_info_t *reply_info)
+                               gf_rdma_post_t *post,
+                               gf_rdma_reply_info_t *reply_info)
 {
-        gf_rdma_header_t      *header       = NULL;
-        int32_t             send_size    = 0, ret = 0;
-        char               *ptr          = NULL;
-        uint32_t            payload_size = 0;
+        gf_rdma_header_t *header       = NULL;
+        int32_t           send_size    = 0, ret = 0;
+        char             *ptr          = NULL;
+        uint32_t          payload_size = 0;
 
         send_size = iov_length (entry->rpchdr, entry->rpchdr_count)
                 + iov_length (entry->proghdr, entry->proghdr_count)
@@ -1534,7 +1549,7 @@ __gf_rdma_send_reply_type_msg (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                                    reply_info,
                                                    (uint32_t **)&ptr);
         if (ret == -1) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "encoding write chunks failed");
                 ret = __gf_rdma_send_error (peer, entry, post, reply_info,
                                             ERR_CHUNK);
@@ -1550,6 +1565,8 @@ __gf_rdma_send_reply_type_msg (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
                                           entry->prog_payload_count,
                                           entry->iobref, reply_info);
         if (ret == -1) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING, "rdma write to peer "
+                        "(%s) failed", peer->trans->peerinfo.identifier);
                 gf_rdma_post_unref (post);
                 goto out;
         }
@@ -1624,9 +1641,9 @@ __gf_rdma_ioq_churn_reply (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         int32_t               ret        = -1;
         gf_rdma_chunktype_t   type       = gf_rdma_noch;
 
-        if ((peer == NULL) || (entry == NULL) || (post == NULL)) {
-                goto out;
-        }
+        GF_VALIDATE_OR_GOTO (GF_RDMA_LOG_NAME, peer, out);
+        GF_VALIDATE_OR_GOTO (GF_RDMA_LOG_NAME, entry, out);
+        GF_VALIDATE_OR_GOTO (GF_RDMA_LOG_NAME, post, out);
 
         reply_info = entry->msg.reply_info;
         if (reply_info != NULL) {
@@ -1637,22 +1654,39 @@ __gf_rdma_ioq_churn_reply (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry,
         case gf_rdma_noch:
                 ret = __gf_rdma_send_reply_inline (peer, entry, post,
                                                    reply_info);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "failed to send reply to peer (%s) as an "
+                                "inlined rdma msg",
+                                peer->trans->peerinfo.identifier);
+                }
                 break;
 
         case gf_rdma_replych:
                 ret = __gf_rdma_send_reply_type_nomsg (peer, entry, post,
                                                        reply_info);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "failed to send reply to peer (%s) as "
+                                "RDMA_NOMSG", peer->trans->peerinfo.identifier);
+                }
                 break;
 
         case gf_rdma_writech:
                 ret = __gf_rdma_send_reply_type_msg (peer, entry, post,
                                                      reply_info);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "failed to send reply with write chunks "
+                                "to peer (%s)",
+                                peer->trans->peerinfo.identifier);
+                }
                 break;
 
         default:
                 gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
-                        "invalid chunktype (%d) specified for sending reply",
-                        type);
+                        "invalid chunktype (%d) specified for sending reply "
+                        " (peer:%s)", type, peer->trans->peerinfo.identifier);
                 break;
         }
 
@@ -1688,13 +1722,27 @@ __gf_rdma_ioq_churn_entry (gf_rdma_peer_t *peer, gf_rdma_ioq_t *entry)
 
                 if (post == NULL) {
                         ret = -1;
+                        gf_log_callingfn (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                          "not able to get a post to send msg");
                         goto out;
                 }
 
                 if (entry->is_request) {
                         ret = __gf_rdma_ioq_churn_request (peer, entry, post);
+                        if (ret < 0) {
+                                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                        "failed to process request ioq entry "
+                                        "to peer(%s)",
+                                        peer->trans->peerinfo.identifier);
+                        }
                 } else {
                         ret = __gf_rdma_ioq_churn_reply (peer, entry, post);
+                        if (ret < 0) {
+                                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                        "failed to process reply ioq entry "
+                                        "to peer (%s)",
+                                        peer->trans->peerinfo.identifier);
+                        }
                 }
 
                 if (ret != 0) {
@@ -1750,9 +1798,9 @@ gf_rdma_writev (rpc_transport_t *this, gf_rdma_ioq_t *entry)
         pthread_mutex_lock (&priv->write_mutex);
         {
                 if (!priv->connected) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "rdma is not connected to post a "
-                                "send request");
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "rdma is not connected to peer (%s)",
+                                this->peerinfo.identifier);
                         ret = -1;
                         goto unlock;
                 }
@@ -1762,6 +1810,13 @@ gf_rdma_writev (rpc_transport_t *this, gf_rdma_ioq_t *entry)
                         ret = __gf_rdma_ioq_churn_entry (peer, entry);
                         if (ret != 0) {
                                 need_append = 0;
+
+                                if (ret < 0) {
+                                        gf_log (this->name, GF_LOG_WARNING,
+                                                "processing ioq entry destined "
+                                                "to (%s) failed",
+                                                this->peerinfo.identifier);
+                                }
                         }
                 }
 
@@ -1788,7 +1843,7 @@ gf_rdma_ioq_new (rpc_transport_t *this, rpc_transport_data_t *data)
         }
 
         priv = this->private;
-        /* TODO: use mem-pool */
+
         entry = mem_get (priv->device->ioq_pool);
         if (entry == NULL) {
                 goto out;
@@ -1881,6 +1936,9 @@ gf_rdma_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
 
         entry = gf_rdma_ioq_new (this, &data);
         if (entry == NULL) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "getting a new ioq entry failed (peer:%s)",
+                        this->peerinfo.identifier);
                 goto out;
         }
 
@@ -1889,6 +1947,9 @@ gf_rdma_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
         if (ret > 0) {
                 ret = 0;
         } else if (ret < 0) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "sending request to peer (%s) failed",
+                        this->peerinfo.identifier);
                 rpc_transport_disconnect (this);
         }
 
@@ -1911,6 +1972,9 @@ gf_rdma_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
 
         entry = gf_rdma_ioq_new (this, &data);
         if (entry == NULL) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "getting a new ioq entry failed (peer:%s)",
+                        this->peerinfo.identifier);
                 goto out;
         }
 
@@ -1918,6 +1982,9 @@ gf_rdma_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
         if (ret > 0) {
                 ret = 0;
         } else if (ret < 0) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "sending request to peer (%s) failed",
+                        this->peerinfo.identifier);
                 rpc_transport_disconnect (this);
         }
 
@@ -1993,7 +2060,7 @@ gf_rdma_receive (rpc_transport_t *this, char **hdr_p, size_t *hdrlen_p,
         *hdrlen_p = size1;
 
         if (size2) {
-                iobuf = iobuf_get (this->ctx->iobuf_pool);
+                iobuf = iobuf_get2 (this->ctx->iobuf_pool, size2);
                 if (!iobuf) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "unable to allocate IO buffer for peer %s",
@@ -2426,11 +2493,10 @@ gf_rdma_connect_qp (rpc_transport_t *this)
                 return -1;
         }
 
-        /* TODO: make timeout and retry_cnt configurable from options */
         attr.qp_state       = IBV_QPS_RTS;
-        attr.timeout        = 14;
-        attr.retry_cnt      = 7;
-        attr.rnr_retry      = 7;
+        attr.timeout        = options->attr_timeout;
+        attr.retry_cnt      = options->attr_retry_cnt;
+        attr.rnr_retry      = options->attr_rnr_retry;
         attr.sq_psn         = priv->peer.local_psn;
         attr.max_rd_atomic  = 1;
         if (ibv_modify_qp (priv->peer.qp, &attr,
@@ -2703,10 +2769,11 @@ inline int32_t
 gf_rdma_decode_error_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
                           size_t bytes_in_post)
 {
-        gf_rdma_header_t *header = NULL;
-        struct iobuf     *iobuf  = NULL;
-        struct iobref    *iobref = NULL;
-        int32_t           ret    = -1;
+        gf_rdma_header_t *header  = NULL;
+        struct iobuf     *iobuf   = NULL;
+        struct iobref    *iobref  = NULL;
+        int32_t           ret     = -1;
+        struct rpc_msg    rpc_msg = {0, };
 
         header = (gf_rdma_header_t *)post->buf;
         header->rm_body.rm_error.rm_type
@@ -2718,7 +2785,11 @@ gf_rdma_decode_error_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
                         ntoh32 (header->rm_body.rm_error.rm_version.gf_rdma_vers_high);
         }
 
-        iobuf = iobuf_get (peer->trans->ctx->iobuf_pool);
+        rpc_msg.rm_xid = header->rm_xid;
+        rpc_msg.rm_direction = REPLY;
+        rpc_msg.rm_reply.rp_stat = MSG_DENIED;
+
+        iobuf = iobuf_get2 (peer->trans->ctx->iobuf_pool, bytes_in_post);
         if (iobuf == NULL) {
                 ret = -1;
                 goto out;
@@ -2732,15 +2803,15 @@ gf_rdma_decode_error_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
 
         iobref_add (iobref, iobuf);
         iobuf_unref (iobuf);
-        /*
-         * FIXME: construct an appropriate rpc-msg here, what is being sent
-         * to rpc is not correct.
-         */
-        post->ctx.vector[0].iov_base = iobuf_ptr (iobuf);
-        post->ctx.vector[0].iov_len = bytes_in_post;
 
-        memcpy (post->ctx.vector[0].iov_base, (char *)post->buf,
-                post->ctx.vector[0].iov_len);
+        ret = rpc_reply_to_xdr (&rpc_msg, iobuf_ptr (iobuf),
+                                iobuf_pagesize (iobuf), &post->ctx.vector[0]);
+        if (ret == -1) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "Failed to create RPC reply");
+                goto out;
+        }
+
         post->ctx.count = 1;
 
         iobuf = NULL;
@@ -2778,6 +2849,8 @@ gf_rdma_decode_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
 
         ret = gf_rdma_get_read_chunklist (&ptr, readch);
         if (ret == -1) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "cannot get read chunklist from msg");
                 goto out;
         }
 
@@ -2786,6 +2859,8 @@ gf_rdma_decode_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
 
         ret = gf_rdma_get_write_chunklist (&ptr, &write_ary);
         if (ret == -1) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "cannot get write chunklist from msg");
                 goto out;
         }
 
@@ -2795,6 +2870,8 @@ gf_rdma_decode_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
         if (write_ary != NULL) {
                 reply_info = gf_rdma_reply_info_alloc (peer);
                 if (reply_info == NULL) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "reply_info_alloc failed");
                         ret = -1;
                         goto out;
                 }
@@ -2805,12 +2882,16 @@ gf_rdma_decode_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
         } else {
                 ret = gf_rdma_get_write_chunklist (&ptr, &write_ary);
                 if (ret == -1) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "cannot get reply chunklist from msg");
                         goto out;
                 }
 
                 if (write_ary != NULL) {
                         reply_info = gf_rdma_reply_info_alloc (peer);
                         if (reply_info == NULL) {
+                                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                        "reply_info_alloc_failed");
                                 ret = -1;
                                 goto out;
                         }
@@ -2824,15 +2905,17 @@ gf_rdma_decode_msg (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
         /* skip terminator of reply chunk */
         ptr = ptr + sizeof (uint32_t);
         if (header->rm_type != GF_RDMA_NOMSG) {
-                post->ctx.hdr_iobuf = iobuf_get (peer->trans->ctx->iobuf_pool);
+                header_len = (long)ptr - (long)post->buf;
+                post->ctx.vector[0].iov_len = (bytes_in_post - header_len);
+
+                post->ctx.hdr_iobuf = iobuf_get2 (peer->trans->ctx->iobuf_pool,
+                                                  (bytes_in_post - header_len));
                 if (post->ctx.hdr_iobuf == NULL) {
                         ret = -1;
                         goto out;
                 }
 
-                header_len = (long)ptr - (long)post->buf;
                 post->ctx.vector[0].iov_base = iobuf_ptr (post->ctx.hdr_iobuf);
-                post->ctx.vector[0].iov_len = bytes_in_post - header_len;
                 memcpy (post->ctx.vector[0].iov_base, ptr,
                         post->ctx.vector[0].iov_len);
                 post->ctx.count = 1;
@@ -2846,9 +2929,7 @@ out:
                         *readch = NULL;
                 }
 
-                if (write_ary != NULL) {
-                        GF_FREE (write_ary);
-                }
+                GF_FREE (write_ary);
         }
 
         return ret;
@@ -2874,28 +2955,36 @@ gf_rdma_decode_header (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
         case GF_RDMA_MSG:
         case GF_RDMA_NOMSG:
                 ret = gf_rdma_decode_msg (peer, post, readch, bytes_in_post);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "cannot decode msg of type (%d)",
+                                header->rm_type);
+                }
+
                 break;
 
         case GF_RDMA_MSGP:
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "rdma msg of msg-type GF_RDMA_MSGP should not have "
                         "been received");
                 ret = -1;
                 break;
 
         case GF_RDMA_DONE:
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "rdma msg of msg-type GF_RDMA_DONE should not have "
                         "been received");
                 ret = -1;
                 break;
 
         case GF_RDMA_ERROR:
-                /* ret = gf_rdma_decode_error_msg (peer, post, bytes_in_post); */
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "received a msg of type RDMA_ERROR");
+                ret = gf_rdma_decode_error_msg (peer, post, bytes_in_post);
                 break;
 
         default:
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "unknown rdma msg-type (%d)", header->rm_type);
         }
 
@@ -2913,6 +3002,8 @@ __gf_rdma_read (gf_rdma_peer_t *peer, gf_rdma_post_t *post, struct iovec *to,
 
         ret = __gf_rdma_register_local_mr_for_rdma (peer, to, 1, &post->ctx);
         if (ret == -1) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "registering local memory for rdma read failed");
                 goto out;
         }
 
@@ -2930,7 +3021,8 @@ __gf_rdma_read (gf_rdma_peer_t *peer, gf_rdma_post_t *post, struct iovec *to,
 
         ret = ibv_post_send (peer->qp, &wr, &bad_wr);
         if (ret) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG, "rdma read from client "
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "rdma read from client "
                         "(%s) failed with ret = %d (%s)",
                         peer->trans->peerinfo.identifier,
                         ret, (ret > 0) ? strerror (ret) : "");
@@ -2959,7 +3051,7 @@ gf_rdma_do_reads (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
         }
 
         if (i == 0) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "message type specified as rdma-read but there are no "
                         "rdma read-chunks present");
                 goto out;
@@ -2967,16 +3059,7 @@ gf_rdma_do_reads (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
 
         post->ctx.gf_rdma_reads = i;
 
-        if (size > peer->trans->ctx->page_size) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
-                        "total size of rdma-read (%lu) is greater than "
-                        "page-size (%lu). This is not supported till variable "
-                        "sized iobufs are implemented", (unsigned long)size,
-                        (unsigned long)peer->trans->ctx->page_size);
-                goto out;
-        }
-
-        iobuf = iobuf_get (peer->trans->ctx->iobuf_pool);
+        iobuf = iobuf_get2 (peer->trans->ctx->iobuf_pool, size);
         if (iobuf == NULL) {
                 goto out;
         }
@@ -2998,6 +3081,10 @@ gf_rdma_do_reads (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
         pthread_mutex_lock (&priv->write_mutex);
         {
                 if (!priv->connected) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "transport not connected to peer (%s), "
+                                "not doing rdma reads",
+                                peer->trans->peerinfo.identifier);
                         goto unlock;
                 }
 
@@ -3011,6 +3098,9 @@ gf_rdma_do_reads (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
                                               &post->ctx.vector[count],
                                               &readch[i]);
                         if (ret == -1) {
+                                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                        "rdma read from peer (%s) failed",
+                                        peer->trans->peerinfo.identifier);
                                 goto unlock;
                         }
 
@@ -3117,6 +3207,10 @@ gf_rdma_pollin_notify (gf_rdma_peer_t *peer, gf_rdma_post_t *post)
 
         ret = rpc_transport_notify (peer->trans, RPC_TRANSPORT_MSG_RECEIVED,
                                     pollin);
+        if (ret < 0) {
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "transport_notify failed");
+        }
 
 out:
         if (pollin != NULL) {
@@ -3177,15 +3271,15 @@ gf_rdma_recv_reply (gf_rdma_peer_t *peer, gf_rdma_post_t *post)
                                     RPC_TRANSPORT_MAP_XID_REQUEST,
                                     &request_info);
         if (ret == -1) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
-                        "cannot get request information from rpc "
-                        "layer");
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                        "cannot get request information (peer:%s) from rpc "
+                        "layer", peer->trans->peerinfo.identifier);
                 goto out;
         }
 
         rpc_req = request_info.rpc_req;
         if (rpc_req == NULL) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "rpc request structure not found");
                 ret = -1;
                 goto out;
@@ -3203,6 +3297,10 @@ gf_rdma_recv_reply (gf_rdma_peer_t *peer, gf_rdma_post_t *post)
 out:
         if (ret == 0) {
                 ret = gf_rdma_pollin_notify (peer, post);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "pollin notify failed");
+                }
         }
 
         return ret;
@@ -3217,10 +3315,15 @@ gf_rdma_recv_request (gf_rdma_peer_t *peer, gf_rdma_post_t *post,
 
         if (readch != NULL) {
                 ret = gf_rdma_do_reads (peer, post, readch);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "rdma read from peer (%s) failed",
+                                peer->trans->peerinfo.identifier);
+                }
         } else {
                 ret = gf_rdma_pollin_notify (peer, post);
                 if (ret == -1) {
-                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                                 "pollin notification failed");
                 }
         }
@@ -3240,14 +3343,14 @@ gf_rdma_process_recv (gf_rdma_peer_t *peer, struct ibv_wc *wc)
 
         post = (gf_rdma_post_t *) (long) wc->wr_id;
         if (post == NULL) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "no post found in successful work completion element");
                 goto out;
         }
 
         ret = gf_rdma_decode_header (peer, post, &readch, wc->byte_len);
         if (ret == -1) {
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "decoding of header failed");
                 goto out;
         }
@@ -3269,30 +3372,48 @@ gf_rdma_process_recv (gf_rdma_peer_t *peer, struct ibv_wc *wc)
                 break;
 
         case GF_RDMA_ERROR:
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
-                        "an error has happened while transmission of msg, "
-                        "disconnecting the transport");
-                rpc_transport_disconnect (peer->trans);
-                goto out;
-
-/*                ret = gf_rdma_pollin_notify (peer, post);
-                  if (ret == -1) {
-                  gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
-                  "pollin notification failed");
-                  }
-                  goto out;
-*/
+                if (header->rm_body.rm_error.rm_type == ERR_CHUNK) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "peer (%s), couldn't encode or decode the msg "
+                                "properly or write chunks were not provided "
+                                "for replies that were bigger than "
+                                "RDMA_INLINE_THRESHOLD (%d)",
+                                peer->trans->peerinfo.identifier,
+                                GLUSTERFS_RDMA_INLINE_THRESHOLD);
+                        ret = gf_rdma_pollin_notify (peer, post);
+                        if (ret == -1) {
+                                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                                        "pollin notification failed");
+                        }
+                        goto out;
+                } else {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
+                                "an error has happened while transmission of "
+                                "msg, disconnecting the transport");
+                        ret = -1;
+                        goto out;
+                }
 
         default:
-                gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
+                gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                         "invalid rdma msg-type (%d)", header->rm_type);
-                break;
+                goto out;
         }
 
         if (msg_type == CALL) {
                 ret = gf_rdma_recv_request (peer, post, readch);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "receiving a request from peer (%s) failed",
+                                peer->trans->peerinfo.identifier);
+                }
         } else {
                 ret = gf_rdma_recv_reply (peer, post);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "receiving a reply from peer (%s) failed",
+                                peer->trans->peerinfo.identifier);
+                }
         }
 
 out:
@@ -3421,7 +3542,7 @@ gf_rdma_handle_failed_send_completion (gf_rdma_peer_t *peer, struct ibv_wc *wc)
 
         post = (gf_rdma_post_t *) (long) wc->wr_id;
 
-        gf_log (GF_RDMA_LOG_NAME, GF_LOG_ERROR,
+        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
                 "send work request on `%s' returned error "
                 "wc.status = %d, wc.vendor_err = %d, post->buf = %p, "
                 "wc.byte_len = %d, post->reused = %d",
@@ -3615,6 +3736,9 @@ gf_rdma_options_init (rpc_transport_t *this)
         options->recv_size = GLUSTERFS_RDMA_INLINE_THRESHOLD;/*this->ctx->page_size * 4;  512 KB*/
         options->send_count = 4096;
         options->recv_count = 4096;
+	options->attr_timeout = GF_RDMA_TIMEOUT;
+	options->attr_retry_cnt = GF_RDMA_RETRY_CNT;
+	options->attr_rnr_retry = GF_RDMA_RNR_RETRY;
 
         temp = dict_get (this->options,
                          "transport.rdma.work-request-send-count");
@@ -3624,7 +3748,22 @@ gf_rdma_options_init (rpc_transport_t *this)
         temp = dict_get (this->options,
                          "transport.rdma.work-request-recv-count");
         if (temp)
-                options->recv_count = data_to_int32 (temp);
+		options->recv_count = data_to_int32 (temp);
+
+	temp = dict_get (this->options, "transport.rdma.attr-timeout");
+
+	if (temp)
+		options->attr_timeout = data_to_uint8 (temp);
+
+	temp = dict_get (this->options, "transport.rdma.attr-retry-cnt");
+
+	if (temp)
+		options->attr_retry_cnt = data_to_uint8 (temp);
+
+	temp = dict_get (this->options, "transport.rdma.attr-rnr-retry");
+
+	if (temp)
+		options->attr_rnr_retry = data_to_uint8 (temp);
 
         options->port = 1;
         temp = dict_get (this->options,
@@ -4040,6 +4179,10 @@ gf_rdma_disconnect (rpc_transport_t *this)
         int32_t            ret  = 0;
 
         priv = this->private;
+        gf_log_callingfn (this->name, GF_LOG_WARNING,
+                          "disconnect called (peer:%s)",
+                          this->peerinfo.identifier);
+
         pthread_mutex_lock (&priv->write_mutex);
         {
                 ret = __gf_rdma_disconnect (this);
@@ -4367,12 +4510,12 @@ unlock:
 static int
 gf_rdma_handshake_pollerr (rpc_transport_t *this)
 {
-        gf_rdma_private_t *priv = this->private;
-        char need_unref = 0, connected = 0;
+        gf_rdma_private_t *priv       = this->private;
+        char               need_unref = 0, connected = 0;
 
-        gf_log (GF_RDMA_LOG_NAME, GF_LOG_DEBUG,
-                "%s: peer disconnected, cleaning up",
-                this->name);
+        gf_log_callingfn (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                          "%s: peer (%s) disconnected, cleaning up",
+                          this->name, this->peerinfo.identifier);
 
         pthread_mutex_lock (&priv->write_mutex);
         {
@@ -4513,7 +4656,12 @@ gf_rdma_event_handler (int fd, int idx, void *data,
                         gf_rdma_handshake_pollerr (this);
                         return 0;
                 }
+
                 ret = gf_rdma_handshake_pollin (this);
+                if (ret < 0) {
+                        gf_log (GF_RDMA_LOG_NAME, GF_LOG_WARNING,
+                                "handshake pollin failed");
+                }
         }
 
         if (ret < 0 || poll_err) {
@@ -4903,6 +5051,18 @@ struct volume_options options[] = {
         { .key   = {"remote-port",
                     "transport.remote-port",
                     "transport.rdma.remote-port"},
+          .type  = GF_OPTION_TYPE_INT
+        },
+	{ .key   = {"transport.rdma.attr-timeout",
+		    "rdma-attr-timeout"},
+          .type  = GF_OPTION_TYPE_INT
+        },
+	{ .key   = {"transport.rdma.attr-retry-cnt",
+		    "rdma-attr-retry-cnt"},
+          .type  = GF_OPTION_TYPE_INT
+        },
+	{ .key   = {"transport.rdma.attr-rnr-retry",
+		    "rdma-attr-rnr-retry"},
           .type  = GF_OPTION_TYPE_INT
         },
         { .key   = {"transport.rdma.listen-port", "listen-port"},

@@ -39,7 +39,7 @@ if test x$LIBTOOLIZE = x; then
     LIBTOOLIZE=libtoolize-1.5
   elif test \! x`which libtoolize 2> /dev/null` = x; then
     LIBTOOLIZE=libtoolize
-  else 
+  else
     echo "libtoolize 1.5.x wasn't found, exiting"; exit 1
   fi
 fi
@@ -52,7 +52,7 @@ if test x$ACLOCAL = x; then
     ACLOCAL=aclocal19
   elif test \! x`which aclocal 2> /dev/null` = x; then
     ACLOCAL=aclocal
-  else 
+  else
     echo "automake 1.9.x (aclocal) wasn't found, exiting"; exit 1
   fi
 fi
@@ -64,7 +64,7 @@ if test x$AUTOMAKE = x; then
     AUTOMAKE=automake19
   elif test \! x`which automake 2> /dev/null` = x; then
     AUTOMAKE=automake
-  else 
+  else
     echo "automake 1.9.x wasn't found, exiting"; exit 1
   fi
 fi
@@ -77,7 +77,7 @@ if test x$AUTOCONF = x; then
     AUTOCONF=autoconf259
   elif test \! x`which autoconf 2> /dev/null` = x; then
     AUTOCONF=autoconf
-  else 
+  else
     echo "autoconf 2.59+ wasn't found, exiting"; exit 1
   fi
 fi
@@ -89,7 +89,7 @@ if test x$AUTOHEADER = x; then
     AUTOHEADER=autoheader259
   elif test \! x`which autoheader 2> /dev/null` = x; then
     AUTOHEADER=autoheader
-  else 
+  else
     echo "autoconf 2.59+ (autoheader) wasn't found, exiting"; exit 1
   fi
 fi

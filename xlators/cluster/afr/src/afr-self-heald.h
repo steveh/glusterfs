@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef __AFR_SELF_HEALD_H__
@@ -27,17 +18,35 @@
 #define AFR_ALL_CHILDREN -1
 
 typedef struct afr_crawl_data_ {
-        int     child;
-        pid_t   pid;
+        int                 child;
+        pid_t               pid;
+        afr_crawl_type_t    crawl;
+        xlator_t            *readdir_xl;
+        void                *op_data;
+        int                 crawl_flags;
+        int (*process_entry) (xlator_t *this, struct afr_crawl_data_ *crawl_data,
+                              gf_dirent_t *entry, loc_t *child, loc_t *parent,
+                              struct iatt *iattr);
 } afr_crawl_data_t;
 
-void afr_proactive_self_heal (xlator_t *this, int idx);
+typedef int (*process_entry_cbk_t) (xlator_t *this, afr_crawl_data_t *crawl_data,
+                              gf_dirent_t *entry, loc_t *child, loc_t *parent,
+                              struct iatt *iattr);
 
-void afr_build_root_loc (inode_t *inode, loc_t *loc);
+void afr_build_root_loc (xlator_t *this, loc_t *loc);
 
 int afr_set_root_gfid (dict_t *dict);
 
-inline void
-afr_fill_loc_info (loc_t *loc, struct iatt *iatt, struct iatt *parent);
+void
+afr_proactive_self_heal (void *data);
 
+int
+afr_xl_op (xlator_t *this, dict_t *input, dict_t *output);
+
+/*
+ * In addition to its self-heal use, this is used to find a local default
+ * read_child.
+ */
+int
+afr_local_pathinfo (char *pathinfo, gf_boolean_t *local);
 #endif /* __AFR_SELF_HEALD_H__ */

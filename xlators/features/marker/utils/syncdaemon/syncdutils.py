@@ -6,8 +6,8 @@ import fcntl
 import shutil
 import logging
 from threading import Lock, Thread as baseThread
-from errno import EACCES, EAGAIN, EPIPE, ENOTCONN, EINTR
-from signal import SIGTERM, SIGKILL
+from errno import EACCES, EAGAIN, EPIPE, ENOTCONN, ECONNABORTED, EINTR, errorcode
+from signal import signal, SIGTERM, SIGKILL
 from time import sleep
 import select as oselect
 from os import waitpid as owaitpid
@@ -138,6 +138,12 @@ def finalize(*a, **kw):
                     raise
     if gconf.ssh_ctl_dir and not gconf.cpid:
         shutil.rmtree(gconf.ssh_ctl_dir)
+    if getattr(gconf, 'state_socket', None):
+        try:
+            os.unlink(gconf.state_socket)
+        except:
+            if sys.exc_info()[0] == OSError:
+                pass
     if gconf.log_exit:
         logging.info("exiting.")
     sys.stdout.flush()
@@ -174,8 +180,8 @@ def log_raise_exception(excont):
             if hasattr(gconf, 'transport'):
                 gconf.transport.wait()
                 gconf.transport.terminate_geterr()
-        elif isinstance(exc, OSError) and exc.errno == ENOTCONN:
-            logging.error('glusterfs session went down')
+        elif isinstance(exc, OSError) and exc.errno in (ENOTCONN, ECONNABORTED):
+            logging.error('glusterfs session went down [%s]', errorcode[exc.errno])
         else:
             logtag = "FAIL"
         if not logtag and logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -225,6 +231,9 @@ def getusername(uid = None):
         uid = os.geteuid()
     return pwd.getpwuid(uid).pw_name
 
+def privileged():
+    return os.geteuid() == 0
+
 def boolify(s):
     """
     Generic string to boolean converter
@@ -258,12 +267,16 @@ def eintr_wrap(func, exc, *a):
     while True:
         try:
             return func(*a)
-        except exc, ex:
-            if not ex[0] == EINTR:
-                raise GsyncdError(ex[1])
+        except exc:
+            ex = sys.exc_info()[1]
+            if not ex.args[0] == EINTR:
+                raise
 
 def select(*a):
     return eintr_wrap(oselect.select, oselect.error, *a)
 
 def waitpid (*a):
     return eintr_wrap(owaitpid, OSError, *a)
+
+def set_term_handler(hook=lambda *a: finalize(*a, **{'exval': 1})):
+    signal(SIGTERM, hook)

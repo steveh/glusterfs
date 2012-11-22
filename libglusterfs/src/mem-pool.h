@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _MEM_POOL_H_
@@ -116,7 +107,26 @@ void* __gf_default_realloc (void *oldptr, size_t size)
 
 #define GF_REALLOC(ptr, size)  __gf_realloc (ptr, size)
 
-#define GF_FREE(free_ptr) __gf_free (free_ptr);
+#define GF_FREE(free_ptr) __gf_free (free_ptr)
+
+static inline
+char *gf_strndup (const char *src, size_t len)
+{
+        char *dup_str = NULL;
+
+        if (!src) {
+                goto out;
+        }
+
+        dup_str = GF_CALLOC (1, len + 1, gf_common_mt_strdup);
+        if (!dup_str) {
+                goto out;
+        }
+
+        memcpy (dup_str, src, len);
+out:
+        return dup_str;
+}
 
 static inline
 char * gf_strdup (const char *src)
@@ -147,7 +157,10 @@ struct mem_pool {
         void             *pool_end;
         int               real_sizeof_type;
         uint64_t          alloc_count;
+        uint64_t          pool_misses;
         int               max_alloc;
+        int               curr_stdalloc;
+        int               max_stdalloc;
         char             *name;
         struct list_head  global_list;
 };
@@ -163,7 +176,6 @@ void *mem_get0 (struct mem_pool *pool);
 
 void mem_pool_destroy (struct mem_pool *pool);
 
-int gf_mem_acct_is_enabled ();
-void gf_mem_acct_enable_set ();
+void gf_mem_acct_enable_set (void *ctx);
 
 #endif /* _MEM_POOL_H */

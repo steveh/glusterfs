@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef __RPC_CLNT_H
@@ -31,8 +22,6 @@ typedef enum {
         RPC_CLNT_MSG
 } rpc_clnt_event_t;
 
-#define AUTH_GLUSTERFS  5
-#define RPC_CLNT_MAX_AUTH_BYTES 1024
 
 #define SFRAME_GET_PROGNUM(sframe) (sframe->rpcreq->prog->prognum)
 #define SFRAME_GET_PROGVER(sframe) (sframe->rpcreq->prog->progver)
@@ -89,7 +78,7 @@ typedef struct rpc_clnt_program {
         int                   numproc;
 } rpc_clnt_prog_t;
 
-typedef int (*rpcclnt_cb_fn) (void *data);
+typedef int (*rpcclnt_cb_fn) (struct rpc_clnt *rpc, void *mydata, void *data);
 
 /* The descriptor for each procedure/actor that runs
  * over the RPC service.
@@ -117,15 +106,17 @@ typedef struct rpcclnt_cb_program {
 
         /* list member to link to list of registered services with rpc_clnt */
         struct list_head        program;
+
+        /* Needed for passing back in cb_actor */
+        void                   *mydata;
 } rpcclnt_cb_program_t;
 
 
 
-#define RPC_MAX_AUTH_BYTES   400
 typedef struct rpc_auth_data {
-        int             flavour;
-        int             datalen;
-        char            authdata[RPC_MAX_AUTH_BYTES];
+        int  flavour;
+        int  datalen;
+        char authdata[GF_MAX_AUTH_BYTES];
 } rpc_auth_data_t;
 
 
@@ -172,7 +163,7 @@ struct rpc_req {
         void                  *conn_private;
 };
 
-struct rpc_clnt {
+typedef struct rpc_clnt {
         pthread_mutex_t        lock;
         rpc_clnt_notify_t      notifyfn;
         rpc_clnt_connection_t  conn;
@@ -189,11 +180,13 @@ struct rpc_clnt {
 
         glusterfs_ctx_t       *ctx;
         int                   refcount;
-};
+        int                   auth_null;
+        char                  disabled;
+} rpc_clnt_t;
 
 
 struct rpc_clnt *rpc_clnt_new (dict_t *options, glusterfs_ctx_t *ctx,
-                               char *name);
+                               char *name, uint32_t reqpool_size);
 
 int rpc_clnt_start (struct rpc_clnt *rpc);
 
@@ -229,10 +222,11 @@ rpc_clnt_ref (struct rpc_clnt *rpc);
 struct rpc_clnt *
 rpc_clnt_unref (struct rpc_clnt *rpc);
 
+int rpc_clnt_connection_cleanup (rpc_clnt_connection_t *conn);
+
 void rpc_clnt_set_connected (rpc_clnt_connection_t *conn);
 
 void rpc_clnt_unset_connected (rpc_clnt_connection_t *conn);
-
 void rpc_clnt_reconnect (void *trans_ptr);
 
 void rpc_clnt_reconfig (struct rpc_clnt *rpc, struct rpc_clnt_config *config);
@@ -241,8 +235,13 @@ void rpc_clnt_reconfig (struct rpc_clnt *rpc, struct rpc_clnt_config *config);
  * procedure handlers.
  */
 int rpcclnt_cbk_program_register (struct rpc_clnt *svc,
-                                  rpcclnt_cb_program_t *program);
+                                  rpcclnt_cb_program_t *program, void *mydata);
 
 int
-rpc_clnt_transport_unix_options_build (dict_t **options, char *filepath);
+rpc_clnt_transport_unix_options_build (dict_t **options, char *filepath,
+                                       int frame_timeout);
+
+void
+rpc_clnt_disable (struct rpc_clnt *rpc);
+
 #endif /* !_RPC_CLNT_H */

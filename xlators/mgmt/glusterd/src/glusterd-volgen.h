@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _GLUSTERD_VOLGEN_H_
 #define _GLUSTERD_VOLGEN_H_
 
@@ -34,7 +24,11 @@
 #define VKEY_FEATURES_LIMIT_USAGE "features.limit-usage"
 #define VKEY_MARKER_XTIME         GEOREP".indexing"
 #define VKEY_FEATURES_QUOTA       "features.quota"
-#define VKEY_PERF_STAT_PREFETCH   "performance.stat-prefetch"
+
+typedef enum {
+        GF_CLIENT_TRUSTED,
+        GF_CLIENT_OTHER
+} glusterd_client_type_t;
 
 #define COMPLETE_OPTION(key, completion, ret)                           \
         do {                                                            \
@@ -61,6 +55,17 @@ typedef enum gd_volopt_flags_ {
         OPT_FLAG_FORCE = 1,
 } gd_volopt_flags_t;
 
+typedef enum  { DOC, NO_DOC, GLOBAL_DOC, GLOBAL_NO_DOC } option_type_t;
+
+struct volopt_map_entry {
+        char *key;
+        char *voltype;
+        char *option;
+        char *value;
+        option_type_t type;
+        uint32_t flags;
+        uint32_t op_version;
+};
 int glusterd_create_rb_volfiles (glusterd_volinfo_t *volinfo,
                                  glusterd_brickinfo_t *brickinfo);
 
@@ -88,7 +93,12 @@ glusterd_check_voloption_flags (char *key, int32_t flags);
 gf_boolean_t
 glusterd_is_valid_volfpath (char *volname, char *brick);
 int generate_brick_volfiles (glusterd_volinfo_t *volinfo);
-int glusterd_get_volopt_content (gf_boolean_t xml_out);
+int glusterd_get_volopt_content (dict_t *dict, gf_boolean_t xml_out);
 char*
 glusterd_get_trans_type_rb (gf_transport_type ttype);
+int
+glusterd_check_nfs_volfile_identical (gf_boolean_t *identical);
+
+uint32_t
+glusterd_get_op_version_for_key (char *key);
 #endif

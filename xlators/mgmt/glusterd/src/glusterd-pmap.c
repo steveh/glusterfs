@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2010-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 
 #ifndef _CONFIG_H
 #define _CONFIG_H
@@ -79,8 +69,8 @@ pmap_registry_new (void)
                         pmap->ports[i].type = GF_PMAP_PORT_FOREIGN;
         }
 
-        pmap->base_port = GF_DEFAULT_BASE_PORT + 2;
-        pmap->last_alloc = GF_DEFAULT_BASE_PORT + 2;
+        pmap->base_port = GF_IANA_PRIV_PORTS_START;
+        pmap->last_alloc = GF_IANA_PRIV_PORTS_START;
 
         return pmap;
 }
@@ -228,8 +218,7 @@ pmap_registry_bind (xlator_t *this, int port, const char *brickname,
 
         p = port;
         pmap->ports[p].type = type;
-        if (pmap->ports[p].brickname)
-                free (pmap->ports[p].brickname);
+        free (pmap->ports[p].brickname);
         pmap->ports[p].brickname = strdup (brickname);
         pmap->ports[p].type = type;
         pmap->ports[p].xprt = xprt;
@@ -281,8 +270,7 @@ remove:
         gf_log ("pmap", GF_LOG_INFO, "removing brick %s on port %d",
                 pmap->ports[p].brickname, p);
 
-        if (pmap->ports[p].brickname)
-                free (pmap->ports[p].brickname);
+        free (pmap->ports[p].brickname);
 
         pmap->ports[p].brickname = NULL;
         pmap->ports[p].xprt = NULL;
@@ -317,8 +305,7 @@ gluster_pmap_portbybrick (rpcsvc_request_t *req)
 fail:
         glusterd_submit_reply (req, &rsp, NULL, 0, NULL,
                                (xdrproc_t)xdr_pmap_port_by_brick_rsp);
-        if (args.brick)
-                free (args.brick);//malloced by xdr
+        free (args.brick);//malloced by xdr
 
         return 0;
 }
@@ -377,8 +364,7 @@ gluster_pmap_signup (rpcsvc_request_t *req)
 fail:
         glusterd_submit_reply (req, &rsp, NULL, 0, NULL,
                                (xdrproc_t)xdr_pmap_signup_rsp);
-        if (args.brick)
-                free (args.brick);//malloced by xdr
+        free (args.brick);//malloced by xdr
 
         return 0;
 }
@@ -405,8 +391,7 @@ gluster_pmap_signin (rpcsvc_request_t *req)
 fail:
         glusterd_submit_reply (req, &rsp, NULL, 0, NULL,
                                (xdrproc_t)xdr_pmap_signin_rsp);
-        if (args.brick)
-                free (args.brick);//malloced by xdr
+        free (args.brick);//malloced by xdr
 
         if (!ret)
                 glusterd_brick_update_signin (brickinfo, _gf_true);
@@ -439,8 +424,7 @@ gluster_pmap_signout (rpcsvc_request_t *req)
 fail:
         glusterd_submit_reply (req, &rsp, NULL, 0, NULL,
                                (xdrproc_t)xdr_pmap_signout_rsp);
-        if (args.brick)
-                free (args.brick);//malloced by xdr
+        free (args.brick);//malloced by xdr
 
         if (!ret)
                 glusterd_brick_update_signin (brickinfo, _gf_false);
@@ -449,17 +433,17 @@ fail:
 }
 
 rpcsvc_actor_t gluster_pmap_actors[] = {
-        [GF_PMAP_NULL] = {"NULL", GF_HNDSK_NULL, NULL, NULL, NULL },
+        [GF_PMAP_NULL] = {"NULL", GF_PMAP_NULL, NULL, NULL, 0},
         [GF_PMAP_PORTBYBRICK] = {"PORTBYBRICK", GF_PMAP_PORTBYBRICK,
-                                 gluster_pmap_portbybrick, NULL, NULL },
+                                 gluster_pmap_portbybrick, NULL, 0},
         [GF_PMAP_BRICKBYPORT] = {"BRICKBYPORT", GF_PMAP_BRICKBYPORT,
-                                 gluster_pmap_brickbyport, NULL, NULL },
+                                 gluster_pmap_brickbyport, NULL, 0},
         [GF_PMAP_SIGNIN] = {"SIGNIN", GF_PMAP_SIGNIN,
-                              gluster_pmap_signin, NULL, NULL },
+                              gluster_pmap_signin, NULL, 0},
         [GF_PMAP_SIGNOUT] = {"SIGNOUT", GF_PMAP_SIGNOUT,
-                              gluster_pmap_signout, NULL, NULL },
+                              gluster_pmap_signout, NULL, 0},
         [GF_PMAP_SIGNUP] = {"SIGNUP", GF_PMAP_SIGNUP,
-                              gluster_pmap_signup, NULL, NULL },
+                              gluster_pmap_signup, NULL, 0},
 };
 
 

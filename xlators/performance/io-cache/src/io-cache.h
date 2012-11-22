@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef __IO_CACHE_H
@@ -84,7 +75,6 @@ struct ioc_fill {
 struct ioc_local {
         mode_t           mode;
         int32_t          flags;
-        int32_t          wbflags;
         loc_t            file_loc;
         off_t            offset;
         size_t           size;
@@ -126,6 +116,8 @@ struct ioc_page {
         struct ioc_waitq    *waitq;
         struct iobref       *iobref;
         pthread_mutex_t     page_lock;
+        int32_t             op_errno;
+        char                stale;
 };
 
 struct ioc_cache {
@@ -196,7 +188,7 @@ int32_t
 ioc_readv_disabled_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         int32_t op_ret, int32_t op_errno, struct iovec *vector,
                         int32_t count, struct iatt *stbuf,
-                        struct iobref *iobref);
+                        struct iobref *iobref, dict_t *xdata);
 
 ioc_page_t *
 __ioc_page_get (ioc_inode_t *ioc_inode, off_t offset);
@@ -212,7 +204,7 @@ __ioc_wait_on_page (ioc_page_t *page, call_frame_t *frame, off_t offset,
                   size_t size);
 
 ioc_waitq_t *
-__ioc_page_wakeup (ioc_page_t *page);
+__ioc_page_wakeup (ioc_page_t *page, int32_t op_errno);
 
 void
 ioc_page_flush (ioc_page_t *page);
@@ -228,7 +220,7 @@ ioc_waitq_return (ioc_waitq_t *waitq);
 
 int32_t
 ioc_frame_fill (ioc_page_t *page, call_frame_t *frame, off_t offset,
-                size_t size);
+                size_t size, int32_t op_errno);
 
 #define ioc_inode_lock(ioc_inode)                                       \
         do {                                                            \

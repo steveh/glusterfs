@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include <libgen.h>
@@ -30,6 +21,11 @@
 #endif
 #include "afr-common.c"
 
+#define SHD_INODE_LRU_LIMIT          2048
+#define AFR_EH_HEALED_LIMIT          1024
+#define AFR_EH_HEAL_FAIL_LIMIT       1024
+#define AFR_EH_SPLIT_BRAIN_LIMIT     1024
+
 struct volume_options options[];
 
 int32_t
@@ -37,8 +33,13 @@ notify (xlator_t *this, int32_t event,
         void *data, ...)
 {
         int ret = -1;
+        va_list         ap;
+        void *data2 = NULL;
 
-        ret = afr_notify (this, event, data);
+        va_start (ap, data);
+        data2 = va_arg (ap, dict_t*);
+        va_end (ap);
+        ret = afr_notify (this, event, data, data2);
 
         return ret;
 }
@@ -85,26 +86,31 @@ xlator_subvolume_index (xlator_t *this, xlator_t *subvol)
         return index;
 }
 
-
-int
-xlator_subvolume_count (xlator_t *this)
+void
+fix_quorum_options (xlator_t *this, afr_private_t *priv, char *qtype)
 {
-        int i = 0;
-        xlator_list_t *list = NULL;
-
-        for (list = this->children; list; list = list->next)
-                i++;
-        return i;
+        if (priv->quorum_count && strcmp(qtype,"fixed")) {
+                gf_log(this->name,GF_LOG_WARNING,
+                       "quorum-type %s overriding quorum-count %u",
+                       qtype, priv->quorum_count);
+        }
+        if (!strcmp(qtype,"none")) {
+                priv->quorum_count = 0;
+        }
+        else if (!strcmp(qtype,"auto")) {
+                priv->quorum_count = AFR_QUORUM_AUTO;
+        }
 }
-
 
 int
 reconfigure (xlator_t *this, dict_t *options)
 {
-        afr_private_t * priv        = NULL;
-        xlator_t      * read_subvol     = NULL;
-        int             ret = -1;
-        int             index = -1;
+        afr_private_t *priv        = NULL;
+        xlator_t      *read_subvol = NULL;
+        int            read_subvol_index = -1;
+        int            ret         = -1;
+        int            index       = -1;
+        char          *qtype       = NULL;
 
         priv = this->private;
 
@@ -144,6 +150,9 @@ reconfigure (xlator_t *this, dict_t *options)
 
         GF_OPTION_RECONF ("read-subvolume", read_subvol, options, xlator, out);
 
+        GF_OPTION_RECONF ("read-hash-mode", priv->hash_mode,
+                          options, uint32, out);
+
         if (read_subvol) {
                 index = xlator_subvolume_index (this, read_subvol);
                 if (index == -1) {
@@ -153,6 +162,34 @@ reconfigure (xlator_t *this, dict_t *options)
                 }
                 priv->read_child = index;
         }
+
+        GF_OPTION_RECONF ("read-subvolume-index",read_subvol_index, options,int32,out);
+
+        if (read_subvol_index >-1) {
+                index=read_subvol_index;
+                if (index >= priv->child_count) {
+                        gf_log (this->name, GF_LOG_ERROR, "%d not a subvolume-index",
+                                index);
+                        goto out;
+                }
+                priv->read_child = index;
+        }
+
+        GF_OPTION_RECONF ("eager-lock", priv->eager_lock, options, bool, out);
+        GF_OPTION_RECONF ("quorum-type", qtype, options, str, out);
+        GF_OPTION_RECONF ("quorum-count", priv->quorum_count, options,
+                          uint32, out);
+        fix_quorum_options(this,priv,qtype);
+        GF_OPTION_RECONF ("heal-timeout", priv->shd.timeout, options,
+                          int32, out);
+
+	GF_OPTION_RECONF ("post-op-delay-secs", priv->post_op_delay_secs, options,
+			  uint32, out);
+
+        GF_OPTION_RECONF (AFR_SH_READDIR_SIZE_KEY, priv->sh_readdir_size,
+                          options, size, out);
+        /* Reset this so we re-discover in case the topology changed.  */
+        priv->did_discovery = _gf_false;
 
         ret = 0;
 out:
@@ -173,15 +210,16 @@ static const char *favorite_child_warning_str = "You have specified subvolume '%
 int32_t
 init (xlator_t *this)
 {
-        afr_private_t * priv        = NULL;
-        int             child_count = 0;
-        xlator_list_t * trav        = NULL;
-        int             i           = 0;
-        int             ret         = -1;
-        GF_UNUSED int   op_errno    = 0;
-        xlator_t * read_subvol     = NULL;
-        xlator_t * fav_child       = NULL;
-
+        afr_private_t *priv        = NULL;
+        int            child_count = 0;
+        xlator_list_t *trav        = NULL;
+        int            i           = 0;
+        int            ret         = -1;
+        GF_UNUSED int  op_errno    = 0;
+        xlator_t      *read_subvol = NULL;
+        int            read_subvol_index = -1;
+        xlator_t      *fav_child   = NULL;
+        char          *qtype       = NULL;
 
         if (!this->children) {
                 gf_log (this->name, GF_LOG_ERROR,
@@ -195,9 +233,21 @@ init (xlator_t *this)
                         "Volume is dangling.");
         }
 
-        ALLOC_OR_GOTO (this->private, afr_private_t, out);
+	this->private = GF_CALLOC (1, sizeof (afr_private_t),
+                                   gf_afr_mt_afr_private_t);
+        if (!this->private)
+                goto out;
 
         priv = this->private;
+        LOCK_INIT (&priv->lock);
+        LOCK_INIT (&priv->read_child_lock);
+        //lock recovery is not done in afr
+        pthread_mutex_init (&priv->mutex, NULL);
+        INIT_LIST_HEAD (&priv->saved_fds);
+
+        child_count = xlator_subvolume_count (this);
+
+        priv->child_count = child_count;
 
         priv->read_child = -1;
 
@@ -210,6 +260,18 @@ init (xlator_t *this)
                         goto out;
                 }
         }
+        GF_OPTION_INIT ("read-subvolume-index",read_subvol_index,int32,out);
+        if (read_subvol_index > -1) {
+                if (read_subvol_index >= priv->child_count) {
+                        gf_log (this->name, GF_LOG_ERROR, "%d not a subvolume-index",
+                                read_subvol_index);
+                        goto out;
+                }
+                priv->read_child = read_subvol_index;
+        }
+        GF_OPTION_INIT ("choose-local", priv->choose_local, bool, out);
+
+        GF_OPTION_INIT ("read-hash-mode", priv->hash_mode, uint32, out);
 
         priv->favorite_child = -1;
         GF_OPTION_INIT ("favorite-child", fav_child, xlator, out);
@@ -244,6 +306,8 @@ init (xlator_t *this)
 
         GF_OPTION_INIT ("self-heal-daemon", priv->shd.enabled, bool, out);
 
+        GF_OPTION_INIT ("iam-self-heal-daemon", priv->shd.iamshd, bool, out);
+
         GF_OPTION_INIT ("data-change-log", priv->data_change_log, bool, out);
 
         GF_OPTION_INIT ("metadata-change-log", priv->metadata_change_log, bool,
@@ -260,16 +324,16 @@ init (xlator_t *this)
 
         GF_OPTION_INIT ("strict-readdir", priv->strict_readdir, bool, out);
 
-        GF_OPTION_INIT ("enforce-quorum", priv->enforce_quorum, bool, out);
+        GF_OPTION_INIT ("eager-lock", priv->eager_lock, bool, out);
+        GF_OPTION_INIT ("quorum-type", qtype, str, out);
+        GF_OPTION_INIT ("quorum-count", priv->quorum_count, uint32, out);
+        GF_OPTION_INIT (AFR_SH_READDIR_SIZE_KEY, priv->sh_readdir_size, size,
+                        out);
+        fix_quorum_options(this,priv,qtype);
+
+	GF_OPTION_INIT ("post-op-delay-secs", priv->post_op_delay_secs, uint32, out);
 
         priv->wait_count = 1;
-
-        child_count = xlator_subvolume_count (this);
-
-        priv->child_count = child_count;
-
-        LOCK_INIT (&priv->lock);
-        LOCK_INIT (&priv->read_child_lock);
 
         priv->child_up = GF_CALLOC (sizeof (unsigned char), child_count,
                                     gf_afr_mt_char);
@@ -326,19 +390,61 @@ init (xlator_t *this)
                 goto out;
         }
 
-        priv->shd.pos = GF_CALLOC (sizeof (*priv->shd.pos), child_count,
-                                   gf_afr_mt_afr_brick_pos_t);
-        if (!priv->shd.pos) {
-                ret = -ENOMEM;
+        /* keep more local here as we may need them for self-heal etc */
+        this->local_pool = mem_pool_new (afr_local_t, 512);
+        if (!this->local_pool) {
+                ret = -1;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to create local_t's memory pool");
                 goto out;
         }
 
-        LOCK_INIT (&priv->root_inode_lk);
         priv->first_lookup = 1;
         priv->root_inode = NULL;
 
-        pthread_mutex_init (&priv->mutex, NULL);
-        INIT_LIST_HEAD (&priv->saved_fds);
+        if (!priv->shd.iamshd) {
+                ret = 0;
+                goto out;
+        }
+
+        ret = -ENOMEM;
+        priv->shd.pos = GF_CALLOC (sizeof (*priv->shd.pos), child_count,
+                                   gf_afr_mt_brick_pos_t);
+        if (!priv->shd.pos)
+                goto out;
+
+        priv->shd.pending = GF_CALLOC (sizeof (*priv->shd.pending), child_count,
+                                       gf_afr_mt_int32_t);
+        if (!priv->shd.pending)
+                goto out;
+
+        priv->shd.inprogress = GF_CALLOC (sizeof (*priv->shd.inprogress),
+                                          child_count, gf_afr_mt_shd_bool_t);
+        if (!priv->shd.inprogress)
+                goto out;
+        priv->shd.timer = GF_CALLOC (sizeof (*priv->shd.timer), child_count,
+                                     gf_afr_mt_shd_timer_t);
+        if (!priv->shd.timer)
+                goto out;
+
+        priv->shd.healed = eh_new (AFR_EH_HEALED_LIMIT, _gf_false);
+        if (!priv->shd.healed)
+                goto out;
+
+        priv->shd.heal_failed = eh_new (AFR_EH_HEAL_FAIL_LIMIT, _gf_false);
+        if (!priv->shd.heal_failed)
+                goto out;
+
+        priv->shd.split_brain = eh_new (AFR_EH_SPLIT_BRAIN_LIMIT, _gf_false);
+        if (!priv->shd.split_brain)
+                goto out;
+
+        this->itable = inode_table_new (SHD_INODE_LRU_LIMIT, this);
+        if (!this->itable)
+                goto out;
+        priv->root_inode = inode_ref (this->itable->root);
+        GF_OPTION_INIT ("node-uuid", priv->shd.node_uuid, str, out);
+        GF_OPTION_INIT ("heal-timeout", priv->shd.timeout, int32, out);
 
         ret = 0;
 out:
@@ -349,6 +455,13 @@ out:
 int
 fini (xlator_t *this)
 {
+        afr_private_t *priv = NULL;
+
+        priv = this->private;
+        this->private = NULL;
+        afr_priv_destroy (priv);
+        if (this->itable);//I dont see any destroy func
+
         return 0;
 }
 
@@ -374,6 +487,7 @@ struct xlator_fops fops = {
         .fstat       = afr_fstat,
         .readlink    = afr_readlink,
         .getxattr    = afr_getxattr,
+        .fgetxattr   = afr_fgetxattr,
         .readv       = afr_readv,
 
         /* inode write */
@@ -381,9 +495,11 @@ struct xlator_fops fops = {
         .truncate    = afr_truncate,
         .ftruncate   = afr_ftruncate,
         .setxattr    = afr_setxattr,
+        .fsetxattr   = afr_fsetxattr,
         .setattr     = afr_setattr,
         .fsetattr    = afr_fsetattr,
         .removexattr = afr_removexattr,
+        .fremovexattr = afr_fremovexattr,
 
         /* dir read */
         .opendir     = afr_opendir,
@@ -418,6 +534,25 @@ struct volume_options options[] = {
         { .key  = {"read-subvolume" },
           .type = GF_OPTION_TYPE_XLATOR
         },
+        { .key  = {"read-subvolume-index" },
+          .type = GF_OPTION_TYPE_INT,
+          .default_value = "-1",
+        },
+        { .key = {"read-hash-mode" },
+          .type = GF_OPTION_TYPE_INT,
+          .min = 0,
+          .max = 2,
+          .default_value = "0",
+          .description = "0 = first responder, "
+                         "1 = hash by GFID (all clients use same subvolume), "
+                         "2 = hash by GFID and client PID",
+        },
+        { .key  = {"choose-local" },
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "true",
+          .description = "Choose a local subvolume to read from if "
+                         "read-subvolume is not explicitly set.",
+        },
         { .key  = {"favorite-child"},
           .type = GF_OPTION_TYPE_XLATOR
         },
@@ -425,14 +560,16 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_INT,
           .min  = 0,
           .default_value = "16",
+          .validate = GF_OPT_VALIDATE_MIN,
         },
         { .key  = {"data-self-heal"},
           .type = GF_OPTION_TYPE_STR,
-          .default_value = "",
           .value = {"1", "on", "yes", "true", "enable",
                     "0", "off", "no", "false", "disable",
                     "open"},
           .default_value = "on",
+          .description   = "\"open\" means data self-heal action will"
+                           "only be triggered by file open operations."
         },
         { .key  = {"data-self-heal-algorithm"},
           .type = GF_OPTION_TYPE_STR,
@@ -488,13 +625,63 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
         },
+        { .key = {"eager-lock"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "on",
+        },
         { .key = {"self-heal-daemon"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
         },
-        { .key = {"enforce-quorum"},
+        { .key = {"iam-self-heal-daemon"},
           .type = GF_OPTION_TYPE_BOOL,
           .default_value = "off",
+        },
+        { .key = {"quorum-type"},
+          .type = GF_OPTION_TYPE_STR,
+          .value = { "none", "auto", "fixed", "" },
+          .default_value = "none",
+          .description = "If value is \"fixed\" only allow writes if "
+                         "quorum-count bricks are present.  If value is "
+                         "\"auto\" only allow writes if more than half of "
+                         "bricks, or exactly half including the first, are "
+                         "present.",
+        },
+        { .key = {"quorum-count"},
+          .type = GF_OPTION_TYPE_INT,
+          .min = 1,
+          .max = INT_MAX,
+          .default_value = 0,
+          .description = "If quorum-type is \"fixed\" only allow writes if "
+                         "this many bricks or present.  Other quorum types "
+                         "will OVERWRITE this value.",
+        },
+        { .key  = {"node-uuid"},
+          .type = GF_OPTION_TYPE_STR,
+          .description = "Local glusterd uuid string",
+        },
+        { .key  = {"heal-timeout"},
+          .type = GF_OPTION_TYPE_INT,
+          .min  = 60,
+          .max  = INT_MAX,
+          .default_value = "600",
+          .description = "Poll timeout for checking the need to self-heal"
+        },
+        { .key  = {"post-op-delay-secs"},
+          .type = GF_OPTION_TYPE_INT,
+          .min  = 0,
+          .max  = INT_MAX,
+          .default_value = "1",
+          .description = "Time interval induced artificially before "
+	                 "post-operation phase of the transaction to "
+                         "enhance overlap of adjacent write operations.",
+        },
+        { .key = {AFR_SH_READDIR_SIZE_KEY},
+          .type = GF_OPTION_TYPE_SIZET,
+          .description = "readdirp size for performing entry self-heal",
+          .min = 1024,
+          .max = 131072,
+          .default_value = "1KB",
         },
         { .key  = {NULL} },
 };

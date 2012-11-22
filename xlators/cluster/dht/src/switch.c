@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -76,29 +67,37 @@ get_switch_matching_subvol (const char *path, dht_conf_t *conf,
         struct switch_struct *cond      = NULL;
         struct switch_struct *trav      = NULL;
         char                 *pathname  = NULL;
-        int                   idx     = 0;
+        int                   idx       = 0;
+        xlator_t             *subvol    = NULL;
 
         cond = conf->private;
+        subvol = hashed_subvol;
         if (!cond)
-                return hashed_subvol;
+                goto out;
+
+        pathname = gf_strdup (path);
+        if (!pathname)
+                goto out;
 
         trav = cond;
-        pathname = gf_strdup (path);
         while (trav) {
                 if (fnmatch (trav->path_pattern,
                              pathname, FNM_NOESCAPE) == 0) {
                         for (idx = 0; idx < trav->num_child; idx++) {
                                 if (trav->array[idx].xl == hashed_subvol)
-                                        return hashed_subvol;
+                                        goto out;
                         }
                         idx = trav->node_index++;
                         trav->node_index %= trav->num_child;
-                        return trav->array[idx].xl;
+                        subvol = trav->array[idx].xl;
+                        goto out;
                 }
                 trav = trav->next;
         }
+out:
         GF_FREE (pathname);
-        return hashed_subvol;
+
+        return subvol;
 }
 
 
@@ -366,7 +365,8 @@ switch_lookup (call_frame_t *frame, xlator_t *this,
 
 err:
         op_errno = (op_errno == -1) ? errno : op_errno;
-        DHT_STACK_UNWIND (lookup, frame, -1, op_errno, NULL, NULL, NULL, NULL);
+        DHT_STACK_UNWIND (lookup, frame, -1, op_errno,
+                          NULL, NULL, NULL, NULL);
         return 0;
 }
 
@@ -375,7 +375,7 @@ switch_create_linkfile_create_cbk (call_frame_t *frame, void *cookie,
                                    xlator_t *this, int op_ret, int op_errno,
                                    inode_t *inode, struct iatt *stbuf,
                                    struct iatt *preparent,
-                                   struct iatt *postparent)
+                                   struct iatt *postparent, dict_t *xdata)
 {
         dht_local_t  *local = NULL;
 
@@ -386,21 +386,21 @@ switch_create_linkfile_create_cbk (call_frame_t *frame, void *cookie,
 
         STACK_WIND (frame, dht_create_cbk,
                     local->cached_subvol, local->cached_subvol->fops->create,
-                    &local->loc, local->flags, local->mode, local->fd,
-                    local->params);
+                    &local->loc, local->flags, local->mode, local->umask,
+                    local->fd, local->params);
 
         return 0;
 
 err:
         DHT_STACK_UNWIND (create, frame, -1, op_errno,
-                          NULL, NULL, NULL, NULL, NULL);
+                          NULL, NULL, NULL, NULL, NULL, NULL);
         return 0;
 }
 
 int
 switch_create (call_frame_t *frame, xlator_t *this,
                loc_t *loc, int32_t flags, mode_t mode,
-               fd_t *fd, dict_t *params)
+               mode_t umask, fd_t *fd, dict_t *params)
 {
         dht_local_t *local = NULL;
         dht_conf_t  *conf  = NULL;
@@ -441,7 +441,7 @@ switch_create (call_frame_t *frame, xlator_t *this,
                 /* create a link file instead of actual file */
                 local->mode = mode;
                 local->flags = flags;
-
+                local->umask = umask;
                 local->cached_subvol = avail_subvol;
                 dht_linkfile_create (frame,
                                      switch_create_linkfile_create_cbk,
@@ -454,14 +454,14 @@ switch_create (call_frame_t *frame, xlator_t *this,
 
         STACK_WIND (frame, dht_create_cbk,
                     subvol, subvol->fops->create,
-                    loc, flags, mode, fd, params);
+                    loc, flags, mode, umask, fd, params);
 
         return 0;
 
 err:
         op_errno = (op_errno == -1) ? errno : op_errno;
         DHT_STACK_UNWIND (create, frame, -1, op_errno,
-                          NULL, NULL, NULL, NULL, NULL);
+                          NULL, NULL, NULL, NULL, NULL, NULL);
 
         return 0;
 }
@@ -470,7 +470,7 @@ int
 switch_mknod_linkfile_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                            int op_ret, int op_errno, inode_t *inode,
                            struct iatt *stbuf, struct iatt *preparent,
-                           struct iatt *postparent)
+                           struct iatt *postparent, dict_t *xdata)
 {
         dht_local_t  *local = NULL;
 
@@ -481,20 +481,20 @@ switch_mknod_linkfile_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                             local->cached_subvol,
                             local->cached_subvol->fops->mknod,
                             &local->loc, local->mode, local->rdev,
-                            local->params);
+                            local->umask, local->params);
 
                 return 0;
         }
 
         DHT_STACK_UNWIND (link, frame, op_ret, op_errno,
-                          inode, stbuf, preparent, postparent);
+                          inode, stbuf, preparent, postparent, xdata);
         return 0;
 }
 
 
 int
-switch_mknod (call_frame_t *frame, xlator_t *this,
-              loc_t *loc, mode_t mode, dev_t rdev, dict_t *params)
+switch_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
+              dev_t rdev, mode_t umask, dict_t *params)
 {
         dht_local_t *local = NULL;
         dht_conf_t  *conf  = NULL;
@@ -537,6 +537,7 @@ switch_mknod (call_frame_t *frame, xlator_t *this,
 
                 local->params = dict_ref (params);
                 local->mode = mode;
+                local->umask = umask;
                 local->rdev = rdev;
                 local->cached_subvol = avail_subvol;
 
@@ -550,14 +551,14 @@ switch_mknod (call_frame_t *frame, xlator_t *this,
 
         STACK_WIND (frame, dht_newfile_cbk,
                     subvol, subvol->fops->mknod,
-                    loc, mode, rdev, params);
+                    loc, mode, rdev, umask, params);
 
         return 0;
 
 err:
         op_errno = (op_errno == -1) ? errno : op_errno;
         DHT_STACK_UNWIND (mknod, frame, -1, op_errno,
-                          NULL, NULL, NULL, NULL);
+                          NULL, NULL, NULL, NULL, NULL);
 
         return 0;
 }
@@ -587,8 +588,7 @@ fini (xlator_t *this)
                 trav = (struct switch_struct *)conf->private;
                 conf->private = NULL;
                 while (trav) {
-                        if (trav->array)
-                                GF_FREE (trav->array);
+                        GF_FREE (trav->array);
                         prev = trav;
                         trav = trav->next;
                         GF_FREE (prev);
@@ -601,11 +601,9 @@ fini (xlator_t *this)
                         GF_FREE (conf->file_layouts);
                 }
 
-                if (conf->subvolumes)
-                        GF_FREE (conf->subvolumes);
+                GF_FREE (conf->subvolumes);
 
-                if (conf->subvolume_status)
-                        GF_FREE (conf->subvolume_status);
+                GF_FREE (conf->subvolume_status);
 
                 GF_FREE (conf);
         }
@@ -670,8 +668,10 @@ set_switch_pattern (xlator_t *this, dht_conf_t *conf,
                 dup_str = gf_strdup (switch_str);
                 switch_opt = GF_CALLOC (1, sizeof (struct switch_struct),
                                         gf_switch_mt_switch_struct);
-                if (!switch_opt)
+                if (!switch_opt) {
+                        GF_FREE (dup_str);
                         goto err;
+                }
 
                 pattern = strtok_r (dup_str, ":", &tmp_str1);
                 childs = strtok_r (NULL, ":", &tmp_str1);
@@ -681,6 +681,7 @@ set_switch_pattern (xlator_t *this, dht_conf_t *conf,
                                 "for all the unconfigured child nodes,"
                                 " hence neglecting current option");
                         switch_str = strtok_r (NULL, ";", &tmp_str);
+                        GF_FREE (switch_opt);
                         GF_FREE (dup_str);
                         continue;
                 }
@@ -753,6 +754,7 @@ set_switch_pattern (xlator_t *this, dht_conf_t *conf,
                         /* First entry */
                         switch_buf = switch_opt;
                 }
+                switch_opt = NULL;
                 switch_str = strtok_r (NULL, ";", &tmp_str);
         }
 
@@ -809,19 +811,20 @@ set_switch_pattern (xlator_t *this, dht_conf_t *conf,
                         /* First entry */
                         switch_buf = switch_opt;
                 }
+                switch_opt = NULL;
         }
         /* */
         conf->private = switch_buf;
 
         return 0;
 err:
+        GF_FREE (switch_buf_array);
+        GF_FREE (switch_opt);
+
         if (switch_buf) {
-                if (switch_buf_array)
-                        GF_FREE (switch_buf_array);
                 trav = switch_buf;
                 while (trav) {
-                        if (trav->array)
-                                GF_FREE (trav->array);
+                        GF_FREE (trav->array);
                         switch_opt = trav;
                         trav = trav->next;
                         GF_FREE (switch_opt);
@@ -924,12 +927,10 @@ init (xlator_t *this)
                 goto err;
         }
 
-        /* Create 'syncop' environment */
-	conf->env = syncenv_new (0);
-        if (!conf->env) {
+        this->local_pool = mem_pool_new (dht_local_t, 128);
+        if (!this->local_pool) {
                 gf_log (this->name, GF_LOG_ERROR,
-                        "failed to create sync environment %s",
-                        strerror (errno));
+                        "failed to create local_t's memory pool");
                 goto err;
         }
 
@@ -946,14 +947,11 @@ err:
                         GF_FREE (conf->file_layouts);
                 }
 
-                if (conf->subvolumes)
-                        GF_FREE (conf->subvolumes);
+                GF_FREE (conf->subvolumes);
 
-                if (conf->subvolume_status)
-                        GF_FREE (conf->subvolume_status);
+                GF_FREE (conf->subvolume_status);
 
-                if (conf->du_stats)
-                        GF_FREE (conf->du_stats);
+                GF_FREE (conf->du_stats);
 
                 GF_FREE (conf);
         }

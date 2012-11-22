@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #include <ctype.h>
 #include <sys/uio.h>
 
@@ -68,14 +58,15 @@ rot13_readv_cbk (call_frame_t *frame,
                  struct iovec *vector,
                  int32_t count,
 		 struct iatt *stbuf,
-                 struct iobref *iobref)
+                 struct iobref *iobref, dict_t *xdata)
 {
 	rot_13_private_t *priv = (rot_13_private_t *)this->private;
   
 	if (priv->decrypt_read)
 		rot13_iovec (vector, count);
 
-	STACK_UNWIND_STRICT (readv, frame, op_ret, op_errno, vector, count, stbuf, iobref);
+	STACK_UNWIND_STRICT (readv, frame, op_ret, op_errno, vector, count,
+                             stbuf, iobref, xdata);
 	return 0;
 }
 
@@ -84,13 +75,13 @@ rot13_readv (call_frame_t *frame,
              xlator_t *this,
              fd_t *fd,
              size_t size,
-             off_t offset)
+             off_t offset, uint32_t flags, dict_t *xdata)
 {
 	STACK_WIND (frame,
 		    rot13_readv_cbk,
 		    FIRST_CHILD (this),
 		    FIRST_CHILD (this)->fops->readv,
-		    fd, size, offset);
+		    fd, size, offset, flags, xdata);
 	return 0;
 }
 
@@ -101,9 +92,10 @@ rot13_writev_cbk (call_frame_t *frame,
                   int32_t op_ret,
                   int32_t op_errno,
                   struct iatt *prebuf,
-		  struct iatt *postbuf)
+		  struct iatt *postbuf, dict_t *xdata)
 {
-	STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf);
+	STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf,
+                             xdata);
 	return 0;
 }
 
@@ -112,20 +104,20 @@ rot13_writev (call_frame_t *frame,
               xlator_t *this,
               fd_t *fd,
               struct iovec *vector,
-              int32_t count, 
-              off_t offset,
-              struct iobref *iobref)
+              int32_t count,
+              off_t offset, uint32_t flags,
+              struct iobref *iobref, dict_t *xdata)
 {
 	rot_13_private_t *priv = (rot_13_private_t *)this->private;
 	if (priv->encrypt_write)
 		rot13_iovec (vector, count);
 
-	STACK_WIND (frame, 
+	STACK_WIND (frame,
 		    rot13_writev_cbk,
 		    FIRST_CHILD (this),
 		    FIRST_CHILD (this)->fops->writev,
-		    fd, vector, count, offset,
-                    iobref);
+		    fd, vector, count, offset, flags,
+                    iobref, xdata);
 	return 0;
 }
 

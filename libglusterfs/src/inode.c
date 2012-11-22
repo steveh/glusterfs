@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -143,8 +134,7 @@ __dentry_unset (dentry_t *dentry)
 
         list_del_init (&dentry->inode_list);
 
-        if (dentry->name)
-                GF_FREE (dentry->name);
+        GF_FREE (dentry->name);
 
         if (dentry->parent) {
                 __inode_unref (dentry->parent);
@@ -660,6 +650,83 @@ inode_grep (inode_table_t *table, inode_t *parent, const char *name)
         return inode;
 }
 
+
+inode_t *
+inode_resolve (inode_table_t *table, char *path)
+{
+        char    *tmp   = NULL, *bname = NULL, *str = NULL, *saveptr = NULL;
+        inode_t *inode = NULL, *parent = NULL;
+
+        if ((path == NULL) || (table == NULL)) {
+                goto out;
+        }
+
+        parent = inode_ref (table->root);
+        str = tmp = gf_strdup (path);
+
+        while (1) {
+                bname = strtok_r (str, "/", &saveptr);
+                if (bname == NULL) {
+                        break;
+                }
+
+                if (inode != NULL) {
+                        inode_unref (inode);
+                }
+
+                inode = inode_grep (table, parent, bname);
+                if (inode == NULL) {
+                        break;
+                }
+
+                if (parent != NULL) {
+                        inode_unref (parent);
+                }
+
+                parent = inode_ref (inode);
+                str = NULL;
+        }
+
+        inode_unref (parent);
+        GF_FREE (tmp);
+out:
+        return inode;
+}
+
+
+int
+inode_grep_for_gfid (inode_table_t *table, inode_t *parent, const char *name,
+                     uuid_t gfid, ia_type_t *type)
+{
+        inode_t   *inode = NULL;
+        dentry_t  *dentry = NULL;
+        int        ret = -1;
+
+        if (!table || !parent || !name) {
+                gf_log_callingfn (THIS->name, GF_LOG_WARNING,
+                                  "table || parent || name not found");
+                return ret;
+        }
+
+        pthread_mutex_lock (&table->lock);
+        {
+                dentry = __dentry_grep (table, parent, name);
+
+                if (dentry)
+                        inode = dentry->inode;
+
+                if (inode) {
+                        uuid_copy (gfid, inode->gfid);
+                        *type = inode->ia_type;
+                        ret = 0;
+                }
+        }
+        pthread_mutex_unlock (&table->lock);
+
+        return ret;
+}
+
+
 /* return 1 if gfid is of root, 0 if not */
 gf_boolean_t
 __is_root_gfid (uuid_t gfid)
@@ -762,16 +829,20 @@ __inode_link (inode_t *inode, inode_t *parent, const char *name,
                 if (uuid_is_null (iatt->ia_gfid))
                         return NULL;
 
-                uuid_copy (inode->gfid, iatt->ia_gfid);
-                inode->ia_type    = iatt->ia_type;
-
-                old_inode = __inode_find (table, inode->gfid);
+                old_inode = __inode_find (table, iatt->ia_gfid);
 
                 if (old_inode) {
                         link_inode = old_inode;
                 } else {
+                        uuid_copy (inode->gfid, iatt->ia_gfid);
+                        inode->ia_type    = iatt->ia_type;
                         __inode_hash (inode);
                 }
+        }
+
+        if (name) {
+                if (!strcmp(name, ".") || !strcmp(name, ".."))
+                        return link_inode;
         }
 
         /* use only link_inode beyond this point */
@@ -780,6 +851,14 @@ __inode_link (inode_t *inode, inode_t *parent, const char *name,
 
                 if (!old_dentry || old_dentry->inode != link_inode) {
                         dentry = __dentry_create (link_inode, parent, name);
+                        if (!dentry) {
+                                gf_log_callingfn (THIS->name, GF_LOG_ERROR,
+                                                  "dentry create failed on "
+                                                  "inode %s with parent %s",
+                                                  uuid_utoa (link_inode->gfid),
+                                                  uuid_utoa (parent->gfid));
+                                return NULL;
+                        }
                         if (old_inode && __is_dentry_cyclic (dentry)) {
                                 __dentry_unset (dentry);
                                 return NULL;
@@ -867,6 +946,54 @@ inode_forget (inode_t *inode, uint64_t nlookup)
         inode_table_prune (table);
 
         return 0;
+}
+
+/*
+ * Invalidate an inode. This is invoked when a translator decides that an inode's
+ * cache is no longer valid. Any translator interested in taking action in this
+ * situation can define the invalidate callback.
+ */
+int
+inode_invalidate(inode_t *inode)
+{
+	int ret = 0;
+	xlator_t *xl = NULL;
+	xlator_t *old_THIS = NULL;
+
+	if (!inode) {
+		gf_log_callingfn(THIS->name, GF_LOG_WARNING, "inode not found");
+		return -1;
+	}
+
+	/*
+	 * The master xlator is not in the graph but it can define an invalidate
+	 * handler.
+	 */
+	xl = inode->table->xl->ctx->master;
+	if (xl && xl->cbks->invalidate) {
+		old_THIS = THIS;
+		THIS = xl;
+		ret = xl->cbks->invalidate(xl, inode);
+		THIS = old_THIS;
+		if (ret)
+			return ret;
+	}
+
+	xl = inode->table->xl->graph->first;
+	while (xl) {
+		old_THIS = THIS;
+		THIS = xl;
+		if (xl->cbks->invalidate)
+			ret = xl->cbks->invalidate(xl, inode);
+		THIS = old_THIS;
+
+		if (ret)
+			break;
+
+		xl = xl->next;
+	}
+
+	return ret;
 }
 
 
@@ -998,21 +1125,25 @@ int
 __inode_path (inode_t *inode, const char *name, char **bufp)
 {
         inode_table_t *table = NULL;
+        inode_t       *itrav = NULL;
         dentry_t      *trav  = NULL;
         size_t         i     = 0, size = 0;
         int64_t        ret   = 0;
         int            len   = 0;
         char          *buf   = NULL;
 
-        if (!inode) {
-                gf_log_callingfn (THIS->name, GF_LOG_WARNING, "inode not found");
+        if (!inode || uuid_is_null (inode->gfid)) {
+                GF_ASSERT (0);
+                gf_log_callingfn (THIS->name, GF_LOG_WARNING, "invalid inode");
                 return -1;
         }
 
         table = inode->table;
 
-        for (trav = __dentry_search_arbit (inode); trav;
-             trav = __dentry_search_arbit (trav->parent)) {
+        itrav = inode;
+        for (trav = __dentry_search_arbit (itrav); trav;
+             trav = __dentry_search_arbit (itrav)) {
+                itrav = trav->parent;
                 i ++; /* "/" */
                 i += strlen (trav->name);
                 if (i > PATH_MAX) {
@@ -1024,13 +1155,9 @@ __inode_path (inode_t *inode, const char *name, char **bufp)
                 }
         }
 
-        if (!__is_root_gfid (inode->gfid) &&
-            (i == 0)) {
-                gf_log (table->name, GF_LOG_WARNING,
-                        "no dentry for non-root inode : %s",
-                        uuid_utoa (inode->gfid));
-                ret = -ENOENT;
-                goto out;
+        if (!__is_root_gfid (itrav->gfid)) {
+                /* "<gfid:00000000-0000-0000-0000-000000000000>"/path */
+                i += GFID_STR_PFX_LEN;
         }
 
         if (name) {
@@ -1052,13 +1179,22 @@ __inode_path (inode_t *inode, const char *name, char **bufp)
                         i -= (len + 1);
                 }
 
-                for (trav = __dentry_search_arbit (inode); trav;
-                     trav = __dentry_search_arbit (trav->parent)) {
+                itrav = inode;
+                for (trav = __dentry_search_arbit (itrav); trav;
+                     trav = __dentry_search_arbit (itrav)) {
+                        itrav = trav->parent;
                         len = strlen (trav->name);
                         strncpy (buf + (i - len), trav->name, len);
                         buf[i-len-1] = '/';
                         i -= (len + 1);
                 }
+
+                if (!__is_root_gfid (itrav->gfid)) {
+                        snprintf (&buf[i-GFID_STR_PFX_LEN], GFID_STR_PFX_LEN,
+                                  INODE_PATH_FMT, uuid_utoa (itrav->gfid));
+                        buf[i-1] = '>';
+                }
+
                 *bufp = buf;
         } else {
                 ret = -ENOMEM;
@@ -1067,9 +1203,7 @@ __inode_path (inode_t *inode, const char *name, char **bufp)
 out:
         if (__is_root_gfid (inode->gfid) && !name) {
                 ret = 1;
-                if (buf) {
-                        GF_FREE (buf);
-                }
+                GF_FREE (buf);
                 buf = GF_CALLOC (ret + 1, sizeof (char), gf_common_mt_char);
                 if (buf) {
                         strcpy (buf, "/");
@@ -1079,6 +1213,8 @@ out:
                 }
         }
 
+        if (ret < 0)
+                *bufp = NULL;
         return ret;
 }
 
@@ -1163,8 +1299,8 @@ __inode_table_init_root (inode_table_t *table)
         iatt.ia_ino = 1;
         iatt.ia_type = IA_IFDIR;
 
-        table->root = root;
         __inode_link (root, NULL, NULL, &iatt);
+        table->root = root;
 }
 
 
@@ -1211,7 +1347,9 @@ inode_table_new (size_t lru_limit, xlator_t *xl)
         if (!new->name_hash)
                 goto out;
 
-        new->fd_mem_pool = mem_pool_new (fd_t, 16384);
+        /* if number of fd open in one process is more than this,
+           we may hit perf issues */
+        new->fd_mem_pool = mem_pool_new (fd_t, 1024);
 
         if (!new->fd_mem_pool)
                 goto out;
@@ -1243,10 +1381,8 @@ inode_table_new (size_t lru_limit, xlator_t *xl)
 out:
         if (ret) {
                 if (new) {
-                        if (new->inode_hash)
-                                GF_FREE (new->inode_hash);
-                        if (new->name_hash)
-                                GF_FREE (new->name_hash);
+                        GF_FREE (new->inode_hash);
+                        GF_FREE (new->name_hash);
                         if (new->dentry_pool)
                                 mem_pool_destroy (new->dentry_pool);
                         if (new->inode_pool)
@@ -1312,8 +1448,7 @@ inode_from_path (inode_table_t *itable, const char *path)
         if (parent)
                 inode_unref (parent);
 
-        if (pathname)
-                GF_FREE (pathname);
+        GF_FREE (pathname);
 
 out:
         return inode;
@@ -1321,45 +1456,47 @@ out:
 
 
 int
-__inode_ctx_put2 (inode_t *inode, xlator_t *xlator, uint64_t value1,
-                  uint64_t value2)
+__inode_ctx_set2 (inode_t *inode, xlator_t *xlator, uint64_t *value1_p,
+                  uint64_t *value2_p)
 {
         int ret = 0;
         int index = 0;
-        int put_idx = -1;
+        int set_idx = -1;
 
         if (!inode || !xlator)
                 return -1;
 
         for (index = 0; index < xlator->graph->xl_count; index++) {
                 if (!inode->_ctx[index].xl_key) {
-                        if (put_idx == -1)
-                                put_idx = index;
+                        if (set_idx == -1)
+                                set_idx = index;
                         /* dont break, to check if key already exists
                            further on */
                 }
                 if (inode->_ctx[index].xl_key == xlator) {
-                        put_idx = index;
+                        set_idx = index;
                         break;
                 }
         }
 
-        if (put_idx == -1) {
+        if (set_idx == -1) {
                 ret = -1;
                 goto out;;
         }
 
-        inode->_ctx[put_idx].xl_key = xlator;
-        inode->_ctx[put_idx].value1 = value1;
-        inode->_ctx[put_idx].value2 = value2;
+        inode->_ctx[set_idx].xl_key = xlator;
+        if (value1_p)
+                inode->_ctx[set_idx].value1 = *value1_p;
+        if (value2_p)
+                inode->_ctx[set_idx].value2 = *value2_p;
 out:
         return ret;
 }
 
 
 int
-inode_ctx_put2 (inode_t *inode, xlator_t *xlator, uint64_t value1,
-                uint64_t value2)
+inode_ctx_set2 (inode_t *inode, xlator_t *xlator, uint64_t *value1_p,
+                uint64_t *value2_p)
 {
         int ret = 0;
 
@@ -1368,7 +1505,7 @@ inode_ctx_put2 (inode_t *inode, xlator_t *xlator, uint64_t value1,
 
         LOCK (&inode->lock);
         {
-                ret = __inode_ctx_put2 (inode, xlator, value1, value2);
+                ret = __inode_ctx_set2 (inode, xlator, value1_p, value2_p);
         }
         UNLOCK (&inode->lock);
 
@@ -1464,41 +1601,6 @@ unlock:
 }
 
 
-int
-__inode_ctx_put (inode_t *inode, xlator_t *key, uint64_t value)
-{
-        return __inode_ctx_put2 (inode, key, value, 0);
-}
-
-
-int
-inode_ctx_put (inode_t *inode, xlator_t *key, uint64_t value)
-{
-        return inode_ctx_put2 (inode, key, value, 0);
-}
-
-
-int
-__inode_ctx_get (inode_t *inode, xlator_t *key, uint64_t *value)
-{
-        return __inode_ctx_get2 (inode, key, value, 0);
-}
-
-
-int
-inode_ctx_get (inode_t *inode, xlator_t *key, uint64_t *value)
-{
-        return inode_ctx_get2 (inode, key, value, 0);
-}
-
-
-int
-inode_ctx_del (inode_t *inode, xlator_t *key, uint64_t *value)
-{
-        return inode_ctx_del2 (inode, key, value, 0);
-}
-
-
 void
 inode_dump (inode_t *inode, char *prefix)
 {
@@ -1507,10 +1609,6 @@ inode_dump (inode_t *inode, char *prefix)
         int                i         = 0;
         fd_t              *fd        = NULL;
         struct _inode_ctx *inode_ctx = NULL;
-        struct  fd_wrapper {
-                fd_t *fd;
-                struct list_head next;
-        } *fd_wrapper, *tmp;
         struct list_head fd_list;
 
         if (!inode)
@@ -1541,21 +1639,12 @@ inode_dump (inode_t *inode, char *prefix)
                         }
                 }
 
-                if (list_empty (&inode->fd_list)) {
-                        goto unlock;
-                }
+		if (dump_options.xl_options.dump_fdctx != _gf_true)
+			goto unlock;
+
 
                 list_for_each_entry (fd, &inode->fd_list, inode_list) {
-                        fd_wrapper = GF_CALLOC (1, sizeof (*fd_wrapper),
-                                                gf_common_mt_char);
-                        if (fd_wrapper == NULL) {
-                                goto unlock;
-                        }
-
-                        INIT_LIST_HEAD (&fd_wrapper->next);
-                        list_add_tail (&fd_wrapper->next, &fd_list);
-
-                        fd_wrapper->fd = _fd_ref (fd);
+                        fd_ctx_dump (fd, prefix);
                 }
         }
 unlock:
@@ -1571,21 +1660,7 @@ unlock:
                 }
         }
 
-        if (!list_empty (&fd_list)
-            && (dump_options.xl_options.dump_fdctx == _gf_true)) {
-                list_for_each_entry_safe (fd_wrapper, tmp, &fd_list,
-                                          next) {
-                        list_del (&fd_wrapper->next);
-                        fd_ctx_dump (fd_wrapper->fd, prefix);
-
-                        fd_unref (fd_wrapper->fd);
-                        GF_FREE (fd_wrapper);
-                }
-        }
-
-        if (inode_ctx != NULL) {
-                GF_FREE (inode_ctx);
-        }
+        GF_FREE (inode_ctx);
 
         return;
 }
@@ -1626,4 +1701,100 @@ inode_table_dump (inode_table_t *itable, char *prefix)
         INODE_DUMP_LIST(&itable->purge, key, prefix, "purge");
 
         pthread_mutex_unlock(&itable->lock);
+}
+
+void
+inode_dump_to_dict (inode_t *inode, char *prefix, dict_t *dict)
+{
+        int             ret = -1;
+        char            key[GF_DUMP_MAX_BUF_LEN] = {0,};
+
+        ret = TRY_LOCK (&inode->lock);
+        if (ret)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.gfid", prefix);
+        ret = dict_set_dynstr (dict, key, gf_strdup (uuid_utoa (inode->gfid)));
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.nlookup", prefix);
+        ret = dict_set_uint64 (dict, key, inode->nlookup);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.ref", prefix);
+        ret = dict_set_uint32 (dict, key, inode->ref);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.ia_type", prefix);
+        ret = dict_set_int32 (dict, key, inode->ia_type);
+
+out:
+        UNLOCK (&inode->lock);
+        return;
+}
+
+void
+inode_table_dump_to_dict (inode_table_t *itable, char *prefix, dict_t *dict)
+{
+        char            key[GF_DUMP_MAX_BUF_LEN] = {0,};
+        int             ret = 0;
+        inode_t         *inode = NULL;
+        int             count = 0;
+
+        ret = pthread_mutex_trylock (&itable->lock);
+        if (ret)
+                return;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.itable.active_size", prefix);
+        ret = dict_set_uint32 (dict, key, itable->active_size);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.itable.lru_size", prefix);
+        ret = dict_set_uint32 (dict, key, itable->lru_size);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.itable.purge_size", prefix);
+        ret = dict_set_uint32 (dict, key, itable->purge_size);
+        if (ret)
+                goto out;
+
+        list_for_each_entry (inode, &itable->active, list) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.itable.active%d", prefix,
+                          count++);
+                inode_dump_to_dict (inode, key, dict);
+        }
+        count = 0;
+
+        list_for_each_entry (inode, &itable->lru, list) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.itable.lru%d", prefix,
+                          count++);
+                inode_dump_to_dict (inode, key, dict);
+        }
+        count = 0;
+
+        list_for_each_entry (inode, &itable->purge, list) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.itable.purge%d", prefix,
+                          count++);
+                inode_dump_to_dict (inode, key, dict);
+        }
+
+out:
+        pthread_mutex_unlock (&itable->lock);
+
+        return;
 }

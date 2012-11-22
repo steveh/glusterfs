@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef __RPC_TRANSPORT_H__
@@ -214,6 +205,7 @@ struct rpc_transport {
 
         struct list_head           list;
         int                        bind_insecure;
+	void                      *dl_handle; /* handle of dlopen() */
 };
 
 struct rpc_transport_ops {
@@ -275,6 +267,9 @@ rpc_transport_unref (rpc_transport_t *trans);
 int
 rpc_transport_register_notify (rpc_transport_t *trans, rpc_transport_notify_t,
                                void *mydata);
+
+int
+rpc_transport_unregister_notify (rpc_transport_t *trans);
 
 int32_t
 rpc_transport_get_peername (rpc_transport_t *this, char *hostname, int hostlen);

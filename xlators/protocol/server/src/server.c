@@ -36,6 +36,36 @@
 #include "authenticate.h"
 #include "rpcsvc.h"
 
+void
+grace_time_handler (void *data)
+{
+        server_connection_t     *conn = NULL;
+        xlator_t                *this = NULL;
+        gf_boolean_t            cancelled = _gf_false;
+        gf_boolean_t            detached = _gf_false;
+
+        conn = data;
+        this = conn->this;
+
+        GF_VALIDATE_OR_GOTO (THIS->name, conn, out);
+        GF_VALIDATE_OR_GOTO (THIS->name, this, out);
+
+        gf_log (this->name, GF_LOG_INFO, "grace timer expired for %s", conn->id);
+
+        cancelled = server_cancel_conn_timer (this, conn);
+        if (cancelled) {
+                //conn should not be destroyed in conn_put, so take a ref.
+                server_conn_ref (conn);
+                server_connection_put (this, conn, &detached);
+                if (detached)//reconnection did not happen :-(
+                        server_connection_cleanup (this, conn,
+                                                  INTERNAL_LOCKS | POSIX_LOCKS);
+                server_conn_unref (conn);
+        }
+out:
+        return;
+}
+
 struct iobuf *
 gfs_serialize_reply (rpcsvc_request_t *req, void *arg, struct iovec *outmsg,
                      xdrproc_t xdrproc)
@@ -98,13 +128,19 @@ server_submit_reply (call_frame_t *frame, rpcsvc_request_t *req, void *arg,
         struct iovec            rsp        = {0,};
         server_state_t         *state      = NULL;
         char                    new_iobref = 0;
+        server_connection_t    *conn       = NULL;
+        gf_boolean_t            lk_heal    = _gf_false;
 
         GF_VALIDATE_OR_GOTO ("server", req, ret);
 
         if (frame) {
                 state = CALL_STATE (frame);
                 frame->local = NULL;
+                conn  = SERVER_CONNECTION(frame);
         }
+
+        if (conn)
+                lk_heal = ((server_conf_t *) conn->this->private)->lk_heal;
 
         if (!iobref) {
                 iobref = iobref_new ();
@@ -138,6 +174,14 @@ server_submit_reply (call_frame_t *frame, rpcsvc_request_t *req, void *arg,
         iobuf_unref (iob);
         if (ret == -1) {
                 gf_log_callingfn ("", GF_LOG_ERROR, "Reply submission failed");
+                if (frame && conn && !lk_heal) {
+                        server_connection_cleanup (frame->this, conn,
+                                                  INTERNAL_LOCKS | POSIX_LOCKS);
+                } else {
+                        /* TODO: Failure of open(dir), create, inodelk, entrylk
+                           or lk fops send failure must be handled specially. */
+                        ;
+                }
                 goto ret;
         }
 
@@ -148,6 +192,8 @@ ret:
         }
 
         if (frame) {
+                if (frame->root->trans)
+                        server_conn_unref (frame->root->trans);
                 STACK_DESTROY (frame->root);
         }
 
@@ -160,6 +206,38 @@ ret:
 
 /* */
 int
+server_fd_to_dict (xlator_t *this, dict_t *dict)
+{
+        server_conf_t           *conf = NULL;
+        server_connection_t     *trav = NULL;
+        char                    key[GF_DUMP_MAX_BUF_LEN] = {0,};
+        int                     count = 0;
+        int                     ret = -1;
+
+        GF_VALIDATE_OR_GOTO (THIS->name, this, out);
+        GF_VALIDATE_OR_GOTO (this->name, dict, out);
+
+        conf = this->private;
+        if (!conf)
+                return -1;
+
+        ret = pthread_mutex_trylock (&conf->mutex);
+        if (ret)
+                return -1;
+
+        list_for_each_entry (trav, &conf->conns, list) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "conn%d", count++);
+                fdtable_dump_to_dict (trav->fdtable, key, dict);
+        }
+        pthread_mutex_unlock (&conf->mutex);
+
+        ret = dict_set_int32 (dict, "conncount", count);
+out:
+        return ret;
+}
+
+int
 server_fd (xlator_t *this)
 {
         server_conf_t        *conf = NULL;
@@ -167,6 +245,7 @@ server_fd (xlator_t *this)
         char                 key[GF_DUMP_MAX_BUF_LEN];
         int                  i = 1;
         int                  ret = -1;
+        gf_boolean_t         section_added = _gf_false;
 
         GF_VALIDATE_OR_GOTO ("server", this, out);
 
@@ -178,13 +257,11 @@ server_fd (xlator_t *this)
         }
 
         gf_proc_dump_add_section("xlator.protocol.server.conn");
+        section_added = _gf_true;
 
         ret = pthread_mutex_trylock (&conf->mutex);
-        if (ret) {
-                gf_log("", GF_LOG_WARNING, "Unable to dump fdtable"
-                       " errno: %d", errno);
-                return -1;
-        }
+        if (ret)
+                goto out;
 
         list_for_each_entry (trav, &conf->conns, list) {
                 if (trav->id) {
@@ -210,6 +287,147 @@ server_fd (xlator_t *this)
 
         ret = 0;
 out:
+        if (ret) {
+                if (section_added == _gf_false)
+                        gf_proc_dump_add_section("xlator.protocol.server.conn");
+                gf_proc_dump_write ("Unable to dump the list of connections",
+                                    "(Lock acquisition failed) %s",
+                                    this?this->name:"server");
+        }
+        return ret;
+}
+
+void
+ltable_dump (server_connection_t *trav)
+{
+        char key[GF_DUMP_MAX_BUF_LEN] = {0,};
+        struct _locker *locker = NULL;
+        char    locker_data[GF_MAX_LOCK_OWNER_LEN] = {0,};
+        int     count = 0;
+
+        gf_proc_dump_build_key(key,
+                               "conn","bound_xl.ltable.inodelk.%s",
+                               trav->bound_xl?trav->bound_xl->name:"");
+        gf_proc_dump_add_section(key);
+
+        list_for_each_entry (locker, &trav->ltable->inodelk_lockers, lockers) {
+                count++;
+                gf_proc_dump_write("volume", "%s", locker->volume);
+                if (locker->fd) {
+                        gf_proc_dump_write("fd", "%p", locker->fd);
+                        gf_proc_dump_write("gfid", "%s",
+                                           uuid_utoa (locker->fd->inode->gfid));
+                } else {
+                        gf_proc_dump_write("fd", "%s", locker->loc.path);
+                        gf_proc_dump_write("gfid", "%s",
+                                           uuid_utoa (locker->loc.inode->gfid));
+                }
+                gf_proc_dump_write("pid", "%d", locker->pid);
+                gf_proc_dump_write("lock length", "%d", locker->owner.len);
+                lkowner_unparse (&locker->owner, locker_data,
+                                 locker->owner.len);
+                gf_proc_dump_write("lock owner", "%s", locker_data);
+                memset (locker_data, 0, sizeof (locker_data));
+
+                gf_proc_dump_build_key (key, "inode", "%d", count);
+                gf_proc_dump_add_section (key);
+                if (locker->fd)
+                        inode_dump (locker->fd->inode, key);
+                else
+                        inode_dump (locker->loc.inode, key);
+        }
+
+        count = 0;
+        locker = NULL;
+        gf_proc_dump_build_key(key,
+                               "conn","bound_xl.ltable.entrylk.%s",
+                               trav->bound_xl?trav->bound_xl->name:"");
+        gf_proc_dump_add_section(key);
+
+        list_for_each_entry (locker, &trav->ltable->entrylk_lockers,
+                             lockers) {
+                count++;
+                gf_proc_dump_write("volume", "%s", locker->volume);
+                if (locker->fd) {
+                        gf_proc_dump_write("fd", "%p", locker->fd);
+                        gf_proc_dump_write("gfid", "%s",
+                                           uuid_utoa (locker->fd->inode->gfid));
+                } else {
+                        gf_proc_dump_write("fd", "%s", locker->loc.path);
+                        gf_proc_dump_write("gfid", "%s",
+                                           uuid_utoa (locker->loc.inode->gfid));
+                }
+                gf_proc_dump_write("pid", "%d", locker->pid);
+                gf_proc_dump_write("lock length", "%d", locker->owner.len);
+                lkowner_unparse (&locker->owner, locker_data, locker->owner.len);
+                gf_proc_dump_write("lock data", "%s", locker_data);
+                memset (locker_data, 0, sizeof (locker_data));
+
+                gf_proc_dump_build_key (key, "inode", "%d", count);
+                gf_proc_dump_add_section (key);
+                if (locker->fd)
+                        inode_dump (locker->fd->inode, key);
+                else
+                        inode_dump (locker->loc.inode, key);
+        }
+}
+
+int
+server_priv_to_dict (xlator_t *this, dict_t *dict)
+{
+        server_conf_t   *conf = NULL;
+        rpc_transport_t *xprt = NULL;
+        peer_info_t     *peerinfo = NULL;
+        char            key[32] = {0,};
+        int             count = 0;
+        int             ret = -1;
+
+        GF_VALIDATE_OR_GOTO (THIS->name, this, out);
+        GF_VALIDATE_OR_GOTO (THIS->name, dict, out);
+
+        conf = this->private;
+        if (!conf)
+                return 0;
+        //TODO: Dump only specific info to dict
+
+        pthread_mutex_lock (&conf->mutex);
+        {
+                list_for_each_entry (xprt, &conf->xprt_list, list) {
+                        peerinfo = &xprt->peerinfo;
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "client%d.hostname",
+                                  count);
+                        ret = dict_set_str (dict, key, peerinfo->identifier);
+                        if (ret)
+                                goto unlock;
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "client%d.bytesread",
+                                  count);
+                        ret = dict_set_uint64 (dict, key,
+                                               xprt->total_bytes_read);
+                        if (ret)
+                                goto unlock;
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "client%d.byteswrite",
+                                  count);
+                        ret = dict_set_uint64 (dict, key,
+                                               xprt->total_bytes_write);
+                        if (ret)
+                                goto unlock;
+
+                        count++;
+                }
+        }
+unlock:
+        pthread_mutex_unlock (&conf->mutex);
+        if (ret)
+                goto out;
+
+        ret = dict_set_int32 (dict, "clientcount", count);
+
+out:
         return ret;
 }
 
@@ -229,10 +447,19 @@ server_priv (xlator_t *this)
         if (!conf)
                 return 0;
 
-        list_for_each_entry (xprt, &conf->xprt_list, list) {
-                total_read  += xprt->total_bytes_read;
-                total_write += xprt->total_bytes_write;
+        gf_proc_dump_build_key (key, "xlator.protocol.server", "priv");
+        gf_proc_dump_add_section (key);
+
+        ret = pthread_mutex_trylock (&conf->mutex);
+        if (ret != 0)
+                goto out;
+        {
+                list_for_each_entry (xprt, &conf->xprt_list, list) {
+                        total_read  += xprt->total_bytes_read;
+                        total_write += xprt->total_bytes_write;
+                }
         }
+        pthread_mutex_unlock (&conf->mutex);
 
         gf_proc_dump_build_key(key, "server", "total-bytes-read");
         gf_proc_dump_write(key, "%"PRIu64, total_read);
@@ -242,6 +469,62 @@ server_priv (xlator_t *this)
 
         ret = 0;
 out:
+        if (ret)
+                gf_proc_dump_write ("Unable to print priv",
+                                    "(Lock acquisition failed) %s",
+                                    this?this->name:"server");
+
+        return ret;
+}
+
+int
+server_inode_to_dict (xlator_t *this, dict_t *dict)
+{
+        server_conf_t           *conf = NULL;
+        server_connection_t     *trav = NULL;
+        char                    key[32] = {0,};
+        int                     count = 0;
+        int                     ret = -1;
+        xlator_t                *prev_bound_xl = NULL;
+
+        GF_VALIDATE_OR_GOTO (THIS->name, this, out);
+        GF_VALIDATE_OR_GOTO (this->name, dict, out);
+
+        conf = this->private;
+        if (!conf)
+                return -1;
+
+        ret = pthread_mutex_trylock (&conf->mutex);
+        if (ret)
+                return -1;
+
+        list_for_each_entry (trav, &conf->conns, list) {
+                if (trav->bound_xl && trav->bound_xl->itable) {
+                        /* Presently every brick contains only one
+                         * bound_xl for all connections. This will lead
+                         * to duplicating of the inode lists, if listing
+                         * is done for every connection. This simple check
+                         * prevents duplication in the present case. If
+                         * need arises the check can be improved.
+                         */
+                        if (trav->bound_xl == prev_bound_xl)
+                                continue;
+                        prev_bound_xl = trav->bound_xl;
+
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "conn%d", count);
+                        inode_table_dump_to_dict (trav->bound_xl->itable,
+                                                  key, dict);
+                        count++;
+                }
+        }
+        pthread_mutex_unlock (&conf->mutex);
+
+        ret = dict_set_int32 (dict, "conncount", count);
+
+out:
+        if (prev_bound_xl)
+                prev_bound_xl = NULL;
         return ret;
 }
 
@@ -264,30 +547,36 @@ server_inode (xlator_t *this)
         }
 
         ret = pthread_mutex_trylock (&conf->mutex);
-        if (ret) {
-                gf_log("", GF_LOG_WARNING, "Unable to dump itable"
-                       " errno: %d", errno);
-                return -1;
-        }
+        if (ret)
+                goto out;
 
         list_for_each_entry (trav, &conf->conns, list) {
-                if (trav->bound_xl && trav->bound_xl->itable) {
+                ret = pthread_mutex_trylock (&trav->lock);
+                if (!ret)
+                {
                         gf_proc_dump_build_key(key,
-                                               "conn","%d.bound_xl.%s",
-                                               i, trav->bound_xl->name);
-                        inode_table_dump(trav->bound_xl->itable,key);
+                                               "conn","%d.ltable", i);
+                        gf_proc_dump_add_section(key);
+                        ltable_dump (trav);
                         i++;
-                }
+                        pthread_mutex_unlock (&trav->lock);
+                }else
+                        continue;
         }
         pthread_mutex_unlock (&conf->mutex);
 
         ret = 0;
 out:
+        if (ret)
+                gf_proc_dump_write ("Unable to dump the lock table",
+                                    "(Lock acquisition failed) %s",
+                                    this?this->name:"server");
+
         return ret;
 }
 
 
-static void
+static int
 get_auth_types (dict_t *this, char *key, data_t *value, void *data)
 {
         dict_t   *auth_dict = NULL;
@@ -324,7 +613,7 @@ get_auth_types (dict_t *this, char *key, data_t *value, void *data)
 
         GF_FREE (key_cpy);
 out:
-        return;
+        return 0;
 }
 
 
@@ -333,34 +622,79 @@ validate_auth_options (xlator_t *this, dict_t *dict)
 {
         int            error = -1;
         xlator_list_t *trav = NULL;
-        data_pair_t   *pair = NULL;
         char          *tail = NULL;
+        char          *tmp_addr_list = NULL;
+        char          *addr = NULL;
+        char          *tmp_str = NULL;
 
         GF_VALIDATE_OR_GOTO ("server", this, out);
         GF_VALIDATE_OR_GOTO ("server", dict, out);
 
         trav = this->children;
         while (trav) {
-                error = -1;
-                for (pair = dict->members_list; pair; pair = pair->next) {
-                        tail = strtail (pair->key, "auth.");
+                int _check_for_auth_option (dict_t *d, char *k, data_t *v,
+                                            void *tmp)
+                {
+                        int ret = 0;
+                        tail = strtail (k, "auth.");
                         if (!tail)
-                                continue;
+                                goto internal_out;
+
                         /* fast fwd thru module type */
                         tail = strchr (tail, '.');
                         if (!tail)
-                                continue;
+                                goto internal_out;
                         tail++;
 
                         tail = strtail (tail, trav->xlator->name);
                         if (!tail)
-                                continue;
+                                goto internal_out;
 
                         if (*tail == '.') {
-                                error = 0;
-                                break;
+
+                                /* when we are here, the key is checked for
+                                 * valid auth.allow.<xlator>
+                                 * Now we verify the ip address
+                                 */
+                                if (!strcmp (v->data, "*")) {
+                                        ret = 0;
+                                        goto internal_out;
+                                }
+
+                                tmp_addr_list = gf_strdup (v->data);
+                                addr = strtok_r (tmp_addr_list, ",", &tmp_str);
+                                if (!addr)
+                                        addr = v->data;
+
+                                while (addr) {
+
+                                        if (valid_internet_address (addr,
+                                                                    _gf_true)) {
+                                                ret = 0;
+                                        } else {
+                                                ret = -1;
+                                                gf_log (this->name, GF_LOG_ERROR,
+                                                        "internet address '%s'"
+                                                        " does not conform to"
+                                                        " standards.", addr);
+                                                goto internal_out;
+
+                                        }
+                                        if (tmp_str)
+                                                addr = strtok_r (NULL, ",",
+                                                                 &tmp_str);
+                                        else
+                                                addr = NULL;
+                                }
+
+                                GF_FREE (tmp_addr_list);
+                                tmp_addr_list = NULL;
                         }
+                internal_out:
+                        return ret;
                 }
+                error = dict_foreach (dict, _check_for_auth_option, NULL);
+
                 if (-1 == error) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "volume '%s' defined as subvolume, but no "
@@ -370,7 +704,9 @@ validate_auth_options (xlator_t *this, dict_t *dict)
                 }
                 trav = trav->next;
         }
+
 out:
+        GF_FREE (tmp_addr_list);
         return error;
 }
 
@@ -379,11 +715,11 @@ int
 server_rpc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
                    void *data)
 {
-        xlator_t            *this = NULL;
-        rpc_transport_t     *xprt = NULL;
-        server_connection_t *conn = NULL;
-        server_conf_t       *conf = NULL;
-
+        gf_boolean_t         detached   = _gf_false;
+        xlator_t            *this       = NULL;
+        rpc_transport_t     *xprt       = NULL;
+        server_connection_t *conn       = NULL;
+        server_conf_t       *conf       = NULL;
 
         if (!xl || !data) {
                 gf_log_callingfn ("server", GF_LOG_WARNING,
@@ -408,26 +744,69 @@ server_rpc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
                 */
                 INIT_LIST_HEAD (&xprt->list);
 
-                list_add_tail (&xprt->list, &conf->xprt_list);
+                pthread_mutex_lock (&conf->mutex);
+                {
+                        list_add_tail (&xprt->list, &conf->xprt_list);
+                }
+                pthread_mutex_unlock (&conf->mutex);
 
                 break;
         }
         case RPCSVC_EVENT_DISCONNECT:
+                /* transport has to be removed from the list upon disconnect
+                 * irrespective of whether lock self heal is off or on, since
+                 * new transport will be created upon reconnect.
+                 */
+                pthread_mutex_lock (&conf->mutex);
+                {
+                        list_del_init (&xprt->list);
+                }
+                pthread_mutex_unlock (&conf->mutex);
+
                 conn = get_server_conn_state (this, xprt);
-                if (conn)
-                        server_connection_cleanup (this, conn);
+                if (!conn)
+                        break;
 
-                gf_log (this->name, GF_LOG_INFO,
-                        "disconnected connection from %s",
-                        xprt->peerinfo.identifier);
+                gf_log (this->name, GF_LOG_INFO, "disconnecting connection"
+                        "from %s", conn->id);
 
-                list_del (&xprt->list);
+                /* If lock self heal is off, then destroy the
+                   conn object, else register a grace timer event */
+                if (!conf->lk_heal) {
+                        server_conn_ref (conn);
+                        server_connection_put (this, conn, &detached);
+                        if (detached)
+                                server_connection_cleanup (this, conn,
+                                                           INTERNAL_LOCKS |
+                                                           POSIX_LOCKS);
+                        server_conn_unref (conn);
+                } else {
+                        put_server_conn_state (this, xprt);
+                        server_connection_cleanup (this, conn, INTERNAL_LOCKS);
 
+                        pthread_mutex_lock (&conn->lock);
+                        {
+                                if (conn->timer)
+                                        goto unlock;
+
+                                gf_log (this->name, GF_LOG_INFO, "starting a grace "
+                                        "timer for %s", conn->id);
+
+                                conn->timer = gf_timer_call_after (this->ctx,
+                                                                   conf->grace_tv,
+                                                                   grace_time_handler,
+                                                                   conn);
+                        }
+                unlock:
+                        pthread_mutex_unlock (&conn->lock);
+                }
                 break;
         case RPCSVC_EVENT_TRANSPORT_DESTROY:
-                conn = get_server_conn_state (this, xprt);
-                if (conn)
-                        server_connection_put (this, conn);
+                /*- conn obj has been disassociated from xprt on first
+                 *  disconnect.
+                 *  conn cleanup and destruction is handed over to
+                 *  grace_time_handler or the subsequent handler that 'owns'
+                 *  the conn. Nothing left to be done here. */
                 break;
         default:
                 break;
@@ -456,31 +835,24 @@ out:
 }
 
 
-static void
-_delete_auth_opt (dict_t *this,
-                char *key,
-                data_t *value,
-                void *data)
+static int
+_delete_auth_opt (dict_t *this, char *key, data_t *value, void *data)
 {
         char *auth_option_pattern[] = { "auth.addr.*.allow",
                                         "auth.addr.*.reject"};
-        if (fnmatch ( auth_option_pattern[0], key, 0) != 0) {
-                dict_del (this, key);
-                return;
-        }
 
-        if (fnmatch ( auth_option_pattern[1], key, 0) != 0) {
+        if (fnmatch ( auth_option_pattern[0], key, 0) != 0)
                 dict_del (this, key);
-                return;
-        }
+
+        if (fnmatch ( auth_option_pattern[1], key, 0) != 0)
+                dict_del (this, key);
+
+        return 0;
 }
 
 
-static void
-_copy_auth_opt (dict_t *unused,
-                char *key,
-                data_t *value,
-                void *xl_dict)
+static int
+_copy_auth_opt (dict_t *unused, char *key, data_t *value, void *xl_dict)
 {
         char *auth_option_pattern[] = { "auth.addr.*.allow",
                                         "auth.addr.*.reject"};
@@ -489,8 +861,47 @@ _copy_auth_opt (dict_t *unused,
 
         if (fnmatch ( auth_option_pattern[1], key, 0) != 0)
                 dict_set ((dict_t *)xl_dict, key, (value));
+
+        return 0;
 }
 
+
+int
+server_init_grace_timer (xlator_t *this, dict_t *options,
+                         server_conf_t *conf)
+{
+        int32_t   ret            = -1;
+        int32_t   grace_timeout  = -1;
+        char     *lk_heal        = NULL;
+
+        GF_VALIDATE_OR_GOTO ("server", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, options, out);
+        GF_VALIDATE_OR_GOTO (this->name, conf, out);
+
+        conf->lk_heal = _gf_false;
+
+        ret = dict_get_str (options, "lk-heal", &lk_heal);
+        if (!ret)
+                gf_string2boolean (lk_heal, &conf->lk_heal);
+
+        gf_log (this->name, GF_LOG_DEBUG, "lk-heal = %s",
+                (conf->lk_heal) ? "on" : "off");
+
+        ret = dict_get_int32 (options, "grace-timeout", &grace_timeout);
+        if (!ret)
+                conf->grace_tv.tv_sec = grace_timeout;
+        else
+                conf->grace_tv.tv_sec = 10;
+
+        gf_log (this->name, GF_LOG_DEBUG, "Server grace timeout "
+                "value = %"PRIu64, conf->grace_tv.tv_sec);
+
+        conf->grace_tv.tv_usec  = 0;
+
+        ret = 0;
+out:
+        return ret;
+}
 
 int
 reconfigure (xlator_t *this, dict_t *options)
@@ -535,8 +946,7 @@ reconfigure (xlator_t *this, dict_t *options)
         /*ret = dict_get_str (options, "statedump-path", &statedump_path);
         if (!ret) {
                 gf_path_strip_trailing_slashes (statedump_path);
-                if (this->ctx->statedump_path)
-                        GF_FREE (this->ctx->statedump_path);
+                GF_FREE (this->ctx->statedump_path);
                 this->ctx->statedump_path = gf_strdup (statedump_path);
         }*/
         GF_OPTION_RECONF ("statedump-path", statedump_path,
@@ -548,8 +958,7 @@ reconfigure (xlator_t *this, dict_t *options)
                 goto out;
         }
         gf_path_strip_trailing_slashes (statedump_path);
-        if (this->ctx->statedump_path)
-                GF_FREE (this->ctx->statedump_path);
+        GF_FREE (this->ctx->statedump_path);
         this->ctx->statedump_path = gf_strdup (statedump_path);
 
         if (!conf->auth_modules)
@@ -586,6 +995,7 @@ reconfigure (xlator_t *this, dict_t *options)
                                         "Reconfigure not found for transport" );
                 }
         }
+        ret = server_init_grace_timer (this, options, conf);
 
 out:
         gf_log ("", GF_LOG_DEBUG, "returning %d", ret);
@@ -621,6 +1031,10 @@ init (xlator_t *this)
         INIT_LIST_HEAD (&conf->conns);
         INIT_LIST_HEAD (&conf->xprt_list);
         pthread_mutex_init (&conf->mutex, NULL);
+
+        ret = server_init_grace_timer (this, this->options, conf);
+        if (ret)
+                goto out;
 
         ret = server_build_config (this, conf);
         if (ret)
@@ -664,8 +1078,7 @@ init (xlator_t *this)
         }
 
         /* RPC related */
-        //conf->rpc = rpc_svc_init (&conf->rpc_conf);
-        conf->rpc = rpcsvc_init (this, this->ctx, this->options);
+        conf->rpc = rpcsvc_init (this, this->ctx, this->options, 0);
         if (conf->rpc == NULL) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "creation of rpcsvc failed");
@@ -689,14 +1102,14 @@ init (xlator_t *this)
                 goto out;
         }
 
-        glusterfs3_1_fop_prog.options = this->options;
-        ret = rpcsvc_program_register (conf->rpc, &glusterfs3_1_fop_prog);
+        glusterfs3_3_fop_prog.options = this->options;
+        ret = rpcsvc_program_register (conf->rpc, &glusterfs3_3_fop_prog);
         if (ret) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "registration of program (name:%s, prognum:%d, "
-                        "progver:%d) failed", glusterfs3_1_fop_prog.progname,
-                        glusterfs3_1_fop_prog.prognum,
-                        glusterfs3_1_fop_prog.progver);
+                        "progver:%d) failed", glusterfs3_3_fop_prog.progname,
+                        glusterfs3_3_fop_prog.prognum,
+                        glusterfs3_3_fop_prog.progver);
                 goto out;
         }
 
@@ -708,7 +1121,7 @@ init (xlator_t *this)
                         "progver:%d) failed", gluster_handshake_prog.progname,
                         gluster_handshake_prog.prognum,
                         gluster_handshake_prog.progver);
-                rpcsvc_program_unregister (conf->rpc, &glusterfs3_1_fop_prog);
+                rpcsvc_program_unregister (conf->rpc, &glusterfs3_3_fop_prog);
                 goto out;
         }
 
@@ -807,9 +1220,12 @@ struct xlator_cbks cbks = {
 };
 
 struct xlator_dumpops dumpops = {
-        .priv  = server_priv,
-        .fd    = server_fd,
-        .inode = server_inode,
+        .priv           = server_priv,
+        .fd             = server_fd,
+        .inode          = server_inode,
+        .priv_to_dict   = server_priv_to_dict,
+        .fd_to_dict     = server_fd_to_dict,
+        .inode_to_dict  = server_inode_to_dict,
 };
 
 
@@ -835,7 +1251,8 @@ struct volume_options options[] = {
         { .key   = {"inode-lru-limit"},
           .type  = GF_OPTION_TYPE_INT,
           .min   = 0,
-          .max   = (1 * GF_UNIT_MB)
+          .max   = (1 * GF_UNIT_MB),
+          .default_value = "16384",
         },
         { .key   = {"verify-volfile-checksum"},
           .type  = GF_OPTION_TYPE_BOOL
@@ -852,7 +1269,40 @@ struct volume_options options[] = {
         },
         { .key           = {"statedump-path"},
           .type          = GF_OPTION_TYPE_PATH,
-          .default_value = "/tmp"
+          .default_value = "/tmp",
+          .description = "Specifies directory in which gluster should save its"
+                         " statedumps. By default it is the /tmp directory"
         },
+        { .key   = {"lk-heal"},
+          .type  = GF_OPTION_TYPE_BOOL,
+          .default_value = "off",
+        },
+        {.key  = {"grace-timeout"},
+         .type = GF_OPTION_TYPE_INT,
+         .min  = 10,
+         .max  = 1800,
+        },
+        {.key  = {"tcp-window-size"},
+         .type = GF_OPTION_TYPE_SIZET,
+         .min  = GF_MIN_SOCKET_WINDOW_SIZE,
+         .max  = GF_MAX_SOCKET_WINDOW_SIZE
+        },
+
+        /*  The following two options are defined in addr.c, redifined here *
+         * for the sake of validation during volume set from cli            */
+
+        { .key   = {"auth.addr.*.allow"},
+          .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
+          .description = "Allow a comma separated list of addresses and/or "
+                         "hostnames to connect to the server. By default, all"
+                         " connections are allowed."
+        },
+        { .key   = {"auth.addr.*.reject"},
+          .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
+          .description = "Reject a comma separated list of addresses and/or "
+                         "hostnames to connect to the server. By default, all"
+                         " connections are allowed."
+        },
+
         { .key   = {NULL} },
 };

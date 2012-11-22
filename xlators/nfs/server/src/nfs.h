@@ -28,6 +28,8 @@
 #include "rpcsvc.h"
 #include "dict.h"
 #include "xlator.h"
+#include "lkowner.h"
+#include "gidcache.h"
 
 #define GF_NFS                  "nfs"
 
@@ -45,6 +47,12 @@
 #define GF_NFS_DVM_ON                   1
 #define GF_NFS_DVM_OFF                  2
 
+/* This corresponds to the max 16 number of group IDs that are sent through an
+ * RPC request. Since NFS is the only one going to set this, we can be safe
+ * in keeping this size hardcoded.
+ */
+#define GF_REQUEST_MAXGROUPS    16
+
 /* Callback into a version-specific NFS protocol.
  * The return type is used by the nfs.c code to register the protocol.
  * with the RPC service.
@@ -58,11 +66,12 @@ struct nfs_initer_list {
         rpcsvc_program_t        *program;
 };
 
-
 struct nfs_state {
         rpcsvc_t                *rpcsvc;
         struct list_head        versions;
         struct mount3_state     *mstate;
+        struct nfs3_state       *nfs3state;
+        struct nlm4_state       *nlm4state;
         struct mem_pool         *foppool;
         unsigned int            memfactor;
         xlator_list_t           *subvols;
@@ -76,6 +85,18 @@ struct nfs_state {
         int                     enable_ino32;
         unsigned int            override_portnum;
         int                     allow_insecure;
+        int                     enable_nlm;
+        int                     mount_udp;
+        struct rpc_clnt         *rpc_clnt;
+        gf_boolean_t            server_aux_gids;
+	uint32_t		server_aux_gids_max_age;
+	gid_cache_t		gid_cache;
+        uint32_t                generation;
+};
+
+struct nfs_inode_ctx {
+        struct list_head        shares;
+        uint32_t                generation;
 };
 
 #define gf_nfs_dvm_on(nfsstt)   (((struct nfs_state *)nfsstt)->dynamicvolumes == GF_NFS_DVM_ON)
@@ -96,6 +117,7 @@ typedef struct nfs_user_info {
         uid_t   uid;
         gid_t   gids[NFS_NGROUPS];
         int     ngrps;
+        gf_lkowner_t lk_owner;
 } nfs_user_t;
 
 extern int
@@ -108,6 +130,12 @@ nfs_user_create (nfs_user_t *newnfu, uid_t uid, gid_t gid, gid_t *auxgids,
 extern void
 nfs_request_user_init (nfs_user_t *nfu, rpcsvc_request_t *req);
 
+extern void
+nfs_request_primary_user_init (nfs_user_t *nfu, rpcsvc_request_t *req,
+                               uid_t uid, gid_t gid);
 extern int
 nfs_subvolume_started (struct nfs_state *nfs, xlator_t *xl);
+
+extern void
+nfs_fix_groups (xlator_t *this, call_stack_t *root);
 #endif

@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -142,7 +133,8 @@ ra_waitq_return (ra_waitq_t *waitq)
 int
 ra_fault_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
               int32_t op_ret, int32_t op_errno, struct iovec *vector,
-              int32_t count, struct iatt *stbuf, struct iobref *iobref)
+              int32_t count, struct iatt *stbuf, struct iobref *iobref,
+              dict_t *xdata)
 {
         ra_local_t   *local          = NULL;
         off_t         pending_offset = 0;
@@ -175,18 +167,35 @@ ra_fault_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 if (op_ret >= 0)
                         file->stbuf = *stbuf;
 
-                if (op_ret < 0) {
-                        page = ra_page_get (file, pending_offset);
-                        if (page)
-                                waitq = ra_page_error (page, op_ret, op_errno);
-                        goto unlock;
-                }
-
                 page = ra_page_get (file, pending_offset);
+
                 if (!page) {
                         gf_log (this->name, GF_LOG_TRACE,
                                 "wasted copy: %"PRId64"[+%"PRId64"] file=%p",
                                 pending_offset, file->page_size, file);
+                        goto unlock;
+                }
+
+                /*
+                 * "Dirty" means that the request was a pure read-ahead; it's
+                 * set for requests we issue ourselves, and cleared when user
+                 * requests are issued or put on the waitq.  "Poisoned" means
+                 * that we got a write while a read was still in flight, and we
+                 * couldn't stop it so we marked it instead.  If it's both
+                 * dirty and poisoned by the time we get here, we cancel its
+                 * effect so that a subsequent user read doesn't get data that
+                 * we know is stale (because we made it stale ourselves).  We
+                 * can't use ESTALE because that has special significance.
+                 * ECANCELED has no such special meaning, and is close to what
+                 * we're trying to indicate.
+                 */
+                if (page->dirty && page->poisoned) {
+                        op_ret = -1;
+                        op_errno = ECANCELED;
+                }
+
+                if (op_ret < 0) {
+                        waitq = ra_page_error (page, op_ret, op_errno);
                         goto unlock;
                 }
 
@@ -216,7 +225,7 @@ unlock:
 
         fd_unref (local->fd);
 
-        GF_FREE (frame->local);
+        mem_put (frame->local);
         frame->local = NULL;
 
 out:
@@ -244,7 +253,7 @@ ra_page_fault (ra_file_t *file, call_frame_t *frame, off_t offset)
                 goto err;
         }
 
-        fault_local = GF_CALLOC (1, sizeof (ra_local_t), gf_ra_mt_ra_local_t);
+        fault_local = mem_get0 (THIS->local_pool);
         if (fault_local == NULL) {
                 STACK_DESTROY (fault_frame->root);
                 op_ret = -1;
@@ -261,7 +270,7 @@ ra_page_fault (ra_file_t *file, call_frame_t *frame, off_t offset)
         STACK_WIND (fault_frame, ra_fault_cbk,
                     FIRST_CHILD (fault_frame->this),
                     FIRST_CHILD (fault_frame->this)->fops->readv,
-                    file->fd, file->page_size, offset);
+                    file->fd, file->page_size, offset, 0, NULL);
 
         return;
 
@@ -430,11 +439,11 @@ ra_frame_unwind (call_frame_t *frame)
         file = (ra_file_t *)(long)tmp_file;
 
         STACK_UNWIND_STRICT (readv, frame, local->op_ret, local->op_errno,
-                             vector, count, &file->stbuf, iobref);
+                             vector, count, &file->stbuf, iobref, NULL);
 
         iobref_unref (iobref);
         pthread_mutex_destroy (&local->local_lock);
-        GF_FREE (local);
+        mem_put (local);
         GF_FREE (vector);
 
 out:
@@ -491,6 +500,9 @@ ra_page_wakeup (ra_page_t *page)
                 ra_frame_fill (page, frame);
         }
 
+        if (page->stale) {
+                ra_page_purge (page);
+        }
 out:
         return waitq;
 }

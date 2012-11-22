@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 /* TODO: link(oldpath, newpath) fails if newpath already exists. DHT should
@@ -35,7 +26,8 @@ int
 dht_rename_dir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, struct iatt *stbuf,
                     struct iatt *preoldparent, struct iatt *postoldparent,
-                    struct iatt *prenewparent, struct iatt *postnewparent)
+                    struct iatt *prenewparent, struct iatt *postnewparent,
+                    dict_t *xdata)
 {
         dht_local_t  *local = NULL;
         int           this_call_cnt = 0;
@@ -84,7 +76,7 @@ unwind:
                 DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
                                   &local->stbuf, &local->preoldparent,
                                   &local->postoldparent,
-                                  &local->preparent, &local->postparent);
+                                  &local->preparent, &local->postparent, xdata);
         }
 
         return 0;
@@ -97,7 +89,7 @@ dht_rename_hashed_dir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                            struct iatt *preoldparent,
                            struct iatt *postoldparent,
                            struct iatt *prenewparent,
-                           struct iatt *postnewparent)
+                           struct iatt *postnewparent, dict_t *xdata)
 {
         dht_conf_t   *conf = NULL;
         dht_local_t  *local = NULL;
@@ -147,7 +139,7 @@ dht_rename_hashed_dir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 STACK_WIND (frame, dht_rename_dir_cbk,
                             conf->subvolumes[i],
                             conf->subvolumes[i]->fops->rename,
-                            &local->loc, &local->loc2);
+                            &local->loc, &local->loc2, NULL);
                 if (!--call_cnt)
                         break;
         }
@@ -164,7 +156,7 @@ unwind:
         DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
                           &local->stbuf, &local->preoldparent,
                           &local->postoldparent,
-                          &local->preparent, &local->postparent);
+                          &local->preparent, &local->postparent, NULL);
 
         return 0;
 }
@@ -185,19 +177,20 @@ dht_rename_dir_do (call_frame_t *frame, xlator_t *this)
         STACK_WIND (frame, dht_rename_hashed_dir_cbk,
                     local->dst_hashed,
                     local->dst_hashed->fops->rename,
-                    &local->loc, &local->loc2);
+                    &local->loc, &local->loc2, NULL);
         return 0;
 
 err:
         DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno, NULL, NULL,
-                          NULL, NULL, NULL);
+                          NULL, NULL, NULL, NULL);
         return 0;
 }
 
 
 int
 dht_rename_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, gf_dirent_t *entries)
+                        int op_ret, int op_errno, gf_dirent_t *entries,
+                        dict_t *xdata)
 {
         dht_local_t  *local = NULL;
         int           this_call_cnt = -1;
@@ -226,7 +219,7 @@ dht_rename_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 dht_rename_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, fd_t *fd)
+                        int op_ret, int op_errno, fd_t *fd, dict_t *xdata)
 {
         dht_local_t  *local = NULL;
         int           this_call_cnt = -1;
@@ -246,7 +239,7 @@ dht_rename_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         STACK_WIND (frame, dht_rename_readdir_cbk,
                     prev->this, prev->this->fops->readdir,
-                    local->fd, 4096, 0);
+                    local->fd, 4096, 0, NULL);
 
         return 0;
 
@@ -302,14 +295,15 @@ dht_rename_dir (call_frame_t *frame, xlator_t *this)
                 STACK_WIND (frame, dht_rename_opendir_cbk,
                             conf->subvolumes[i],
                             conf->subvolumes[i]->fops->opendir,
-                            &local->loc2, local->fd);
+                            &local->loc2, local->fd, NULL);
         }
 
         return 0;
 
 err:
         op_errno = (op_errno == -1) ? errno : op_errno;
-        DHT_STACK_UNWIND (rename, frame, -1, op_errno, NULL, NULL, NULL, NULL, NULL);
+        DHT_STACK_UNWIND (rename, frame, -1, op_errno, NULL, NULL, NULL, NULL,
+                          NULL, NULL);
         return 0;
 }
 
@@ -317,7 +311,7 @@ err:
 int
 dht_rename_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                        int32_t op_ret, int32_t op_errno, struct iatt *preparent,
-                       struct iatt *postparent)
+                       struct iatt *postparent, dict_t *xdata)
 {
         dht_local_t  *local = NULL;
         call_frame_t *prev = NULL;
@@ -350,7 +344,7 @@ dht_rename_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
                                   &local->stbuf, &local->preoldparent,
                                   &local->postoldparent, &local->preparent,
-                                  &local->postparent);
+                                  &local->postparent, NULL);
         }
 
 out:
@@ -398,7 +392,7 @@ dht_rename_cleanup (call_frame_t *frame)
                         local->loc.path, dst_hashed->name, src_cached->name);
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             dst_hashed, dst_hashed->fops->unlink,
-                            &local->loc);
+                            &local->loc, 0, NULL);
         }
 
         if (src_cached != dst_hashed) {
@@ -407,7 +401,7 @@ dht_rename_cleanup (call_frame_t *frame)
                         local->loc2.path, src_cached->name);
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             src_cached, src_cached->fops->unlink,
-                            &local->loc2);
+                            &local->loc2, 0, NULL);
         }
 
         return 0;
@@ -422,7 +416,7 @@ nolinks:
         DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
                           &local->stbuf, &local->preoldparent,
                           &local->postoldparent, &local->preparent,
-                          &local->postparent);
+                          &local->postparent, NULL);
 
         return 0;
 }
@@ -430,9 +424,10 @@ nolinks:
 
 int
 dht_rename_links_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int32_t op_ret, int32_t op_errno,
-                      inode_t *inode, struct iatt *stbuf,
-                      struct iatt *preparent, struct iatt *postparent)
+                             int32_t op_ret, int32_t op_errno,
+                             inode_t *inode, struct iatt *stbuf,
+                             struct iatt *preparent, struct iatt *postparent,
+                             dict_t *xdata)
 {
         call_frame_t *prev = NULL;
         dht_local_t  *local = NULL;
@@ -456,7 +451,8 @@ int
 dht_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 int32_t op_ret, int32_t op_errno, struct iatt *stbuf,
                 struct iatt *preoldparent, struct iatt *postoldparent,
-                struct iatt *prenewparent, struct iatt *postnewparent)
+                struct iatt *prenewparent, struct iatt *postnewparent,
+                dict_t *xdata)
 {
         dht_local_t  *local = NULL;
         call_frame_t *prev = NULL;
@@ -545,7 +541,7 @@ err:
 
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             src_cached, src_cached->fops->unlink,
-                            &local->loc);
+                            &local->loc, 0, NULL);
         }
 
         if (src_hashed != rename_subvol && src_hashed != src_cached) {
@@ -555,7 +551,7 @@ err:
 
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             src_hashed, src_hashed->fops->unlink,
-                            &local->loc);
+                            &local->loc, 0, NULL);
         }
 
         if (dst_cached
@@ -567,7 +563,7 @@ err:
 
                 STACK_WIND (frame, dht_rename_unlink_cbk,
                             dst_cached, dst_cached->fops->unlink,
-                            &local->loc2);
+                            &local->loc2, 0, NULL);
         }
         return 0;
 
@@ -581,7 +577,7 @@ unwind:
         DHT_STACK_UNWIND (rename, frame, local->op_ret, local->op_errno,
                           &local->stbuf, &local->preoldparent,
                           &local->postoldparent, &local->preparent,
-                          &local->postparent);
+                          &local->postparent, NULL);
 
         return 0;
 
@@ -621,7 +617,7 @@ dht_do_rename (call_frame_t *frame)
 
         STACK_WIND (frame, dht_rename_cbk,
                     rename_subvol, rename_subvol->fops->rename,
-                    &local->loc, &local->loc2);
+                    &local->loc, &local->loc2, NULL);
 
         return 0;
 }
@@ -631,7 +627,8 @@ int
 dht_rename_links_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno,
                       inode_t *inode, struct iatt *stbuf,
-                      struct iatt *preparent, struct iatt *postparent)
+                      struct iatt *preparent, struct iatt *postparent,
+                      dict_t *xdata)
 {
         dht_local_t  *local = NULL;
         call_frame_t *prev = NULL;
@@ -646,7 +643,8 @@ dht_rename_links_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         "link/file on %s failed (%s)",
                         prev->this->name, strerror (op_errno));
                 local->op_ret   = -1;
-                local->op_errno = op_errno;
+                if (op_errno != ENOENT)
+                        local->op_errno = op_errno;
         }
 
         this_call_cnt = dht_frame_return (frame);
@@ -669,7 +667,8 @@ cleanup:
 int
 dht_rename_unlink_links_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                              int32_t op_ret, int32_t op_errno,
-                             struct iatt *preparent, struct iatt *postparent)
+                             struct iatt *preparent, struct iatt *postparent,
+                             dict_t *xdata)
 {
 	dht_local_t  *local = NULL;
 	call_frame_t *prev = NULL;
@@ -732,7 +731,7 @@ dht_rename_create_links (call_frame_t *frame)
 
 		STACK_WIND (frame, dht_rename_unlink_links_cbk,
 			    dst_hashed, dst_hashed->fops->unlink,
-			    &local->loc2);
+			    &local->loc2, 0, NULL);
                 return 0;
         }
 
@@ -759,7 +758,7 @@ dht_rename_create_links (call_frame_t *frame)
 			local->loc2.path, src_cached->name);
 		STACK_WIND (frame, dht_rename_links_cbk,
 			    src_cached, src_cached->fops->link,
-			    &local->loc, &local->loc2);
+			    &local->loc, &local->loc2, NULL);
 	}
 
 nolinks:
@@ -774,7 +773,7 @@ nolinks:
 
 int
 dht_rename (call_frame_t *frame, xlator_t *this,
-            loc_t *oldloc, loc_t *newloc)
+            loc_t *oldloc, loc_t *newloc, dict_t *xdata)
 {
         xlator_t    *src_cached = NULL;
         xlator_t    *src_hashed = NULL;
@@ -856,7 +855,8 @@ dht_rename (call_frame_t *frame, xlator_t *this,
 
 err:
         op_errno = (op_errno == -1) ? errno : op_errno;
-        DHT_STACK_UNWIND (rename, frame, -1, op_errno, NULL, NULL, NULL, NULL, NULL);
+        DHT_STACK_UNWIND (rename, frame, -1, op_errno, NULL, NULL, NULL, NULL,
+                          NULL, NULL);
 
         return 0;
 }

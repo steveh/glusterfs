@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -111,6 +102,7 @@ __ioc_page_destroy (ioc_page_t *page)
         if (page->waitq) {
                 /* frames waiting on this page, do not destroy this page */
                 page_size = -1;
+                page->stale = 1;
         } else {
                 rbthash_remove (page->inode->cache.page_table, &page->offset,
                                 sizeof (page->offset));
@@ -416,7 +408,8 @@ ioc_waitq_return (ioc_waitq_t *waitq)
 int
 ioc_fault_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                int32_t op_ret, int32_t op_errno, struct iovec *vector,
-               int32_t count, struct iatt *stbuf, struct iobref *iobref)
+               int32_t count, struct iatt *stbuf, struct iobref *iobref,
+               dict_t *xdata)
 {
         ioc_local_t *local            = NULL;
         off_t        offset           = 0;
@@ -517,6 +510,7 @@ ioc_fault_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                  * byte replies */
                                 page_size = iov_length(vector, count);
                                 page->size = page_size;
+                                page->op_errno = op_errno;
 
                                 iobref_page_size = iobref_size (page->iobref);
 
@@ -524,7 +518,8 @@ ioc_fault_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                         /* wake up all the frames waiting on
                                          * this page, including
                                          * the frame which triggered fault */
-                                        waitq = __ioc_page_wakeup (page);
+                                        waitq = __ioc_page_wakeup (page,
+                                                                   op_errno);
                                 } /* if(page->waitq) */
                         } /* if(!page)...else */
                 } /* if(op_ret < 0)...else */
@@ -602,8 +597,7 @@ ioc_page_fault (ioc_inode_t *ioc_inode, call_frame_t *frame, fd_t *fd,
                 goto err;
         }
 
-        fault_local = GF_CALLOC (1, sizeof (ioc_local_t),
-                                 gf_ioc_mt_ioc_local_t);
+        fault_local = mem_get0 (THIS->local_pool);
         if (fault_local == NULL) {
                 op_ret = -1;
                 op_errno = ENOMEM;
@@ -630,7 +624,7 @@ ioc_page_fault (ioc_inode_t *ioc_inode, call_frame_t *frame, fd_t *fd,
 
         STACK_WIND (fault_frame, ioc_fault_cbk, FIRST_CHILD(fault_frame->this),
                     FIRST_CHILD(fault_frame->this)->fops->readv, fd,
-                    table->page_size, offset);
+                    table->page_size, offset, 0, NULL);
         return;
 
 err:
@@ -651,7 +645,7 @@ err:
 
 int32_t
 __ioc_frame_fill (ioc_page_t *page, call_frame_t *frame, off_t offset,
-                  size_t size)
+                  size_t size, int32_t op_errno)
 {
         ioc_local_t *local      = NULL;
         ioc_fill_t  *fill       = NULL;
@@ -686,7 +680,13 @@ __ioc_frame_fill (ioc_page_t *page, call_frame_t *frame, off_t offset,
         /* immediately move this page to the end of the page_lru list */
         list_move_tail (&page->page_lru, &ioc_inode->cache.page_lru);
         /* fill local->pending_size bytes from local->pending_offset */
-        if (local->op_ret != -1 && page->size) {
+        if (local->op_ret != -1) {
+                local->op_errno = op_errno;
+
+                if (page->size == 0) {
+                        goto done;
+                }
+
                 if (offset > page->offset)
                         /* offset is offset in file, convert it to offset in
                          * page */
@@ -779,6 +779,7 @@ __ioc_frame_fill (ioc_page_t *page, call_frame_t *frame, off_t offset,
                 local->op_ret += copy_size;
         }
 
+done:
         ret = 0;
 out:
         return ret;
@@ -869,7 +870,7 @@ unwind:
         //  ioc_local_unlock (local);
 
         STACK_UNWIND_STRICT (readv, frame, op_ret, local->op_errno, vector,
-                             count, &stbuf, iobref);
+                             count, &stbuf, iobref, NULL);
 
         if (iobref != NULL) {
                 iobref_unref (iobref);
@@ -881,7 +882,7 @@ unwind:
         }
 
         pthread_mutex_destroy (&local->local_lock);
-        GF_FREE (local);
+        mem_put (local);
 
         return;
 }
@@ -923,7 +924,7 @@ ioc_frame_return (call_frame_t *frame)
  * to be called only when a frame is waiting on an in-transit page
  */
 ioc_waitq_t *
-__ioc_page_wakeup (ioc_page_t *page)
+__ioc_page_wakeup (ioc_page_t *page, int32_t op_errno)
 {
         ioc_waitq_t  *waitq = NULL, *trav = NULL;
         call_frame_t *frame = NULL;
@@ -942,10 +943,14 @@ __ioc_page_wakeup (ioc_page_t *page)
         for (trav = waitq; trav; trav = trav->next) {
                 frame = trav->data;
                 ret = __ioc_frame_fill (page, frame, trav->pending_offset,
-                                        trav->pending_size);
+                                        trav->pending_size, op_errno);
                 if (ret == -1) {
                         break;
                 }
+        }
+
+        if (page->stale) {
+                __ioc_page_destroy (page);
         }
 
 out:

@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -57,7 +47,8 @@ static int32_t apple_xattr_len[] = {
 
 int32_t
 maccomp_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int32_t op_ret, int32_t op_errno, dict_t *dict)
+                      int32_t op_ret, int32_t op_errno, dict_t *dict,
+                      dict_t *xdata)
 {
         intptr_t ax = (intptr_t)this->private;
         int i = 0;
@@ -80,7 +71,7 @@ maccomp_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 }
          }
 
-        STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict);
+        STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict, xdata);
 
         return 0;
 }
@@ -88,7 +79,7 @@ maccomp_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int32_t
 maccomp_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                  const char *name)
+                  const char *name, dict_t *xdata)
 {
         intptr_t ax = GF_XATTR_NONE;
         int i = 0;
@@ -109,14 +100,14 @@ maccomp_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
         STACK_WIND (frame, maccomp_getxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->getxattr,
-                    loc, name);
+                    loc, name, xdata);
         return 0;
 }
 
 
 int32_t
 maccomp_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                   const char *name)
+                   const char *name, dict_t *xdata)
 {
         intptr_t ax = GF_XATTR_NONE;
         int i = 0;
@@ -137,21 +128,21 @@ maccomp_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
         STACK_WIND (frame, maccomp_getxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fgetxattr,
-                    fd, name);
+                    fd, name, xdata);
         return 0;
 }
 
 
 int32_t
 maccomp_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int32_t op_ret, int32_t op_errno)
+                      int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         intptr_t ax = (intptr_t)this->private;
 
         if (op_ret == -1 && ax != GF_XATTR_NONE)
                 op_ret = op_errno = 0;
 
-        STACK_UNWIND_STRICT (setxattr, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (setxattr, frame, op_ret, op_errno, xdata);
 
         return 0;
 }
@@ -159,7 +150,7 @@ maccomp_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int32_t
 maccomp_setxattr (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *dict,
-                  int32_t flags)
+                  int32_t flags, dict_t *xdata)
 {
         intptr_t ax = GF_XATTR_NONE;
         int i = 0;
@@ -177,14 +168,14 @@ maccomp_setxattr (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *dict,
         STACK_WIND (frame, maccomp_setxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setxattr,
-                    loc, dict, flags);
+                    loc, dict, flags, xdata);
         return 0;
 }
 
 
 int32_t
 maccomp_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *dict,
-                   int32_t flags)
+                   int32_t flags, dict_t *xdata)
 {
         intptr_t ax = GF_XATTR_NONE;
         int i = 0;
@@ -202,7 +193,7 @@ maccomp_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *dict,
         STACK_WIND (frame, maccomp_setxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fsetxattr,
-                    fd, dict, flags);
+                    fd, dict, flags, xdata);
         return 0;
 }
 

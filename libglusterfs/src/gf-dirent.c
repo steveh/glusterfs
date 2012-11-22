@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -29,26 +20,6 @@
 #include <stdint.h>
 #include "compat.h"
 #include "xlator.h"
-
-gf_dirent_t *
-gf_dirent_for_namelen (int len)
-{
-        gf_dirent_t *gf_dirent = NULL;
-
-        /* TODO: use mem-pool */
-        gf_dirent = CALLOC (len, sizeof(char));
-        if (!gf_dirent)
-                return NULL;
-
-        INIT_LIST_HEAD (&gf_dirent->list);
-
-        gf_dirent->d_off = 0;
-        gf_dirent->d_ino = -1;
-        gf_dirent->d_type = 0;
-
-        return gf_dirent;
-}
-
 
 gf_dirent_t *
 gf_dirent_for_name (const char *name)
@@ -86,7 +57,36 @@ gf_dirent_free (gf_dirent_t *entries)
                 return;
 
         list_for_each_entry_safe (entry, tmp, &entries->list, list) {
+                if (entry->dict)
+                        dict_unref (entry->dict);
+                if (entry->inode)
+                        inode_unref (entry->inode);
+
                 list_del (&entry->list);
                 GF_FREE (entry);
         }
+}
+
+/* TODO: Currently, with this function, we will be breaking the
+   policy of 1-1 mapping of kernel nlookup refs with our inode_t's
+   nlookup count.
+   Need more thoughts before finalizing this function
+*/
+int
+gf_link_inodes_from_dirent (xlator_t *this, inode_t *parent,
+                            gf_dirent_t *entries)
+{
+        gf_dirent_t *entry      = NULL;
+        inode_t     *link_inode = NULL;
+
+        list_for_each_entry (entry, &entries->list, list) {
+                if (entry->inode) {
+                        link_inode = inode_link (entry->inode, parent,
+                                                 entry->d_name, &entry->d_stat);
+                        inode_lookup (link_inode);
+                        inode_unref (link_inode);
+                }
+        }
+
+        return 0;
 }

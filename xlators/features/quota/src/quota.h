@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -36,16 +26,6 @@
 #define VAL_LENGTH              8
 #define READDIR_BUF             4096
 
-#define QUOTA_STACK_DESTROY(_frame, _this)              \
-        do {                                            \
-                quota_local_t *_local = NULL;           \
-                _local = _frame->local;                 \
-                _frame->local = NULL;                   \
-                STACK_DESTROY (_frame->root);           \
-                quota_local_cleanup (_this, _local);    \
-                GF_FREE (_local);                       \
-        } while (0)
-
 #define QUOTA_SAFE_INCREMENT(lock, var)         \
         do {                                    \
                 LOCK (lock);                    \
@@ -58,12 +38,6 @@
                 LOCK (lock);                    \
                 var --;                         \
                 UNLOCK (lock);                  \
-        } while (0)
-
-#define QUOTA_LOCAL_ALLOC_OR_GOTO(local, type, label)           \
-        do {                                                    \
-                QUOTA_ALLOC_OR_GOTO (local, type, label);       \
-                LOCK_INIT (&local->lock);                       \
         } while (0)
 
 #define QUOTA_ALLOC_OR_GOTO(var, type, label)           \
@@ -89,7 +63,6 @@
                 }                                                       \
                 STACK_UNWIND_STRICT (fop, frame, params);               \
                 quota_local_cleanup (_this, _local);                    \
-                GF_FREE (_local);                                       \
         } while (0)
 
 #define QUOTA_FREE_CONTRIBUTION_NODE(_contribution)     \
@@ -160,16 +133,18 @@ struct quota_local {
 typedef struct quota_local quota_local_t;
 
 struct quota_priv {
-        int64_t  timeout;
-        struct list_head limit_head;
+        int64_t           timeout;
+        struct list_head  limit_head;
+        gf_lock_t         lock;
 };
 typedef struct quota_priv quota_priv_t;
 
 struct limits {
         struct list_head  limit_list;
         char             *path;
-        int64_t          value;
+        int64_t           value;
+        uuid_t            gfid;
 };
-typedef struct limits limits_t;
+typedef struct limits     limits_t;
 
 uint64_t cn = 1;

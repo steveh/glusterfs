@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # (C) 2006, 2007, 2008 Gluster Inc. <http://www.gluster.com>
 #
 # This program is free software; you can redistribute it and/or
@@ -31,13 +31,36 @@ _init ()
     exec_prefix=@exec_prefix@;
     cmd_line=$(echo "@sbindir@/glusterfs");
 
+    case `uname -s` in
+    NetBSD)
+        getinode="stat -f %i"
+        getdev="stat -f %d"
+        lgetinode="${getinode} -L"
+        lgetdev="${getdev} -L"
+
+        mounttab=/proc/mounts
+        ;;
+    Linux)
+        getinode="stat -c %i $i"
+        getdev="stat -c %d $d"
+        lgetinode="${getinode} -L"
+        lgetdev="${getdev} -L"
+
+        mounttab=/etc/mtab
+        ;;
+    esac
+
     UPDATEDBCONF=/etc/updatedb.conf
+    LD_LIBRARY_PATH=@libdir@:${LD_LIBRARY_PATH}
+    export LD_LIBRARY_PATH
 }
 
 start_glusterfs ()
 {
+    # lets the comparsion be case insensitive for all strings
+
     if [ -n "$log_level_str" ]; then
-	case "$log_level_str" in
+	case "$( echo $log_level_str | tr '[a-z]' '[A-Z]')" in
 	    "ERROR")
 		log_level=$LOG_ERROR;
 		;;
@@ -77,6 +100,14 @@ start_glusterfs ()
 	cmd_line=$(echo "$cmd_line --acl");
     fi
 
+    if [ -n "$selinux" ]; then
+	cmd_line=$(echo "$cmd_line --selinux");
+    fi
+
+    if [ -n "$enable_ino32" ]; then
+        cmd_line=$(echo "$cmd_line --enable-ino32");
+    fi
+
     if [ -n "$worm" ]; then
         cmd_line=$(echo "$cmd_line --worm");
     fi
@@ -97,13 +128,41 @@ start_glusterfs ()
         cmd_line=$(echo "$cmd_line --volume-name=$volume_name");
     fi
 
-    if [ -n "$log_server" ]; then
-        if [ -n "$log_server_port" ]; then
-            cmd_line=$(echo "$cmd_line \
---log-server=$log_server \
---log-server-port=$log_server_port");
-        fi
+    if [ -n "$attribute_timeout" ]; then
+        cmd_line=$(echo "$cmd_line --attribute-timeout=$attribute_timeout");
     fi
+
+    if [ -n "$entry_timeout" ]; then
+        cmd_line=$(echo "$cmd_line --entry-timeout=$entry_timeout");
+    fi
+
+    if [ -n "$negative_timeout" ]; then
+        cmd_line=$(echo "$cmd_line --negative-timeout=$negative_timeout");
+    fi
+
+    if [ -n "$gid_timeout" ]; then
+	cmd_line=$(echo "$cmd_line --gid-timeout=$gid_timeout");
+    fi
+
+    if [ -n "$fopen_keep_cache" ]; then
+	cmd_line=$(echo "$cmd_line --fopen-keep-cache");
+    fi
+
+    if [ -n "$bg_qlen" ]; then
+	cmd_line=$(echo "$cmd_line --background-qlen=$bg_qlen");
+    fi
+
+    if [ -n "$cong_threshold" ]; then
+	cmd_line=$(echo "$cmd_line --congestion-threshold=$cong_threshold");
+    fi
+
+    if [ -n "$fuse_mountopts" ]; then
+	cmd_line=$(echo "$cmd_line --fuse-mountopts=$fuse_mountopts");
+    fi
+
+    # for rdma volume, we have to fetch volfile with '.rdma' added
+    # to volume name, so that it fetches the right client vol file
+    volume_id_rdma="";
 
     if [ -z "$volfile_loc" ]; then
         if  [ -n "$server_ip" ]; then
@@ -112,8 +171,14 @@ start_glusterfs ()
             fi
 	    if [ -n "$transport" ]; then
                 cmd_line=$(echo "$cmd_line --volfile-server-transport=$transport");
+                if [ "$transport" = "rdma" ]; then
+                    volume_id_rdma=".rdma";
+                fi
             fi
             if [ -n "$volume_id" ]; then
+                if [ -n "$volume_id_rdma" ]; then
+                    volume_id="$volume_id$volume_id_rdma";
+                fi
                 cmd_line=$(echo "$cmd_line --volfile-id=$volume_id");
             fi
 
@@ -129,12 +194,16 @@ start_glusterfs ()
         cmd_line=$(echo "$cmd_line --volfile=$volfile_loc");
     fi
 
+    if [ -n "$fuse_mountopts" ]; then
+	cmd_line=$(echo "$cmd_line --fuse-mountopts=$fuse_mountopts");
+    fi
+
     cmd_line=$(echo "$cmd_line $mount_point");
     err=0;
     $cmd_line;
 
 
-    inode=$(stat -c %i $mount_point 2>/dev/null);
+    inode=$( ${getinode} $mount_point 2>/dev/null);
 
     # this is required if the stat returns error
     if [ -z "$inode" ]; then
@@ -147,14 +216,15 @@ start_glusterfs ()
         err=1;
         if [ -n "$cmd_line1" ]; then
             cmd_line1=$(echo "$cmd_line1 $mount_point");
-            $cmd_line1
+            $cmd_line1;
+            err=0;
 
-            inode=$(stat -c %i $mount_point 2>/dev/null);
+            inode=$( ${getinode} $mount_point 2>/dev/null);
             # this is required if the stat returns error
             if [ -z "$inode" ]; then
                 inode="0";
             fi
-            if [ $inode -ne 1]; then
+            if [ $inode -ne 1 ]; then
                 err=1;
             fi
         fi
@@ -162,6 +232,7 @@ start_glusterfs ()
 
     if [ $err -eq "1" ]; then
             echo "Mount failed. Please check the log file for more details."
+            umount $mount_point > /dev/null 2>&1;
             exit 1;
     fi
 }
@@ -189,8 +260,9 @@ check_recursive_mount ()
     # remove trailing / from mount point
     mnt_dir=${2%/};
 
+    export PATH;
     # check whether getfattr exists
-    which getfattr > /dev/null;
+    which getfattr > /dev/null 2>&1;
     if [ $? -ne 0 ]; then
         return;
     fi
@@ -202,11 +274,18 @@ check_recursive_mount ()
     fi
 
     # check if the mount point is a brick's parent directory
-    brick_path=(`cat /etc/glusterd/vols/*/bricks/* | grep ^path | cut -d "=" -f 2`);
-    root_inode=`stat -Lc %i /`;
-    root_dev=`stat -Lc %d /`;
-    mnt_inode=`stat -Lc %i $mnt_dir`;
-    mnt_dev=`stat -Lc %d $mnt_dir`;
+    GLUSTERD_WORKDIR="/var/lib/glusterd";
+
+    ls -L "$GLUSTERD_WORKDIR"/vols/*/bricks/* > /dev/null 2>&1;
+    if [ $? -ne 0 ]; then
+        return;
+    fi
+
+    brick_path=`grep ^path "$GLUSTERD_WORKDIR"/vols/*/bricks/* | cut -d "=" -f 2`;
+    root_inode=`${lgetinode} /`;
+    root_dev=`${lgetdev} /`;
+    mnt_inode=`${lgetinode} $mnt_dir`;
+    mnt_dev=`${lgetdev} $mnt_dir`;
     for brick in "$brick_path";
     do
         # evaluate brick path to see if this is local, if non-local, skip iteration
@@ -223,8 +302,8 @@ check_recursive_mount ()
             do
                 tmp_brick="$brick";
                 brick="$brick"/..;
-                brick_dev=`stat -Lc %d $brick`;
-                brick_inode=`stat -Lc %i $brick`;
+                brick_dev=`${lgetdev} $brick`;
+                brick_inode=`${lgetinode} $brick`;
                 if [ "$mnt_inode" -eq "$brick_inode" -a "$mnt_dev" -eq "$brick_dev" ]; then
                     echo ERROR: $mnt_dir is a parent of the brick $tmp_brick;
                     exit 2;
@@ -239,43 +318,74 @@ main ()
 {
     helper=$(echo "$@" | sed -n 's/.*\--[ ]*\([^ ]*\).*/\1/p');
 
-    options=$(echo "$@" | sed -n 's/.*\-o[ ]*\([^ ]*\).*/\1/p');
+    in_opt="no"
+    pos_args=0
+    for opt in "$@"; do
+        if [ "$in_opt" = "yes" ]; then
+            for pair in $(echo "$opt" | tr "," " "); do
+                # Handle options without values.
+                case "$pair" in
+                    "ro")               read_only=1 ;;
+                    "acl")              acl=1 ;;
+                    "selinux")          selinux=1 ;;
+                    "worm")             worm=1 ;;
+		    "fopen-keep-cache")	fopen_keep_cache=1 ;;
+                    "enable-ino32")     enable_ino32=1 ;;
+                    # "mount -t glusterfs" sends this, but it's useless.
+                    "rw")       ;;
+                    # these ones are interpreted during system initialization
+                    "noauto")   ;;
+                    "_netdev")  ;;
+                    *)
+                        key=$(echo "$pair" | cut -f1 -d'=');
+                        value=$(echo "$pair" | cut -f2- -d'=');
 
-    new_log_level=$(echo "$options" | sed -n 's/.*log-level=\([^,]*\).*/\1/p');
-
-    [ -n "$new_log_level" ] && {
-	log_level_str="$new_log_level";
-    }
-
-    log_file=$(echo "$options" | sed -n 's/.*log-file=\([^,]*\).*/\1/p');
-
-    read_only=$(echo "$options" | sed -n 's/.*\(ro\)[^,]*.*/\1/p');
-
-    acl=$(echo "$options" | sed -n 's/.*\(acl\)[^,]*.*/\1/p');
-
-    worm=$(echo "$options" | sed -n 's/.*\(worm\)[^,]*.*/\1/p');
-
-    transport=$(echo "$options" | sed -n 's/.*transport=\([^,]*\).*/\1/p');
-
-    direct_io_mode=$(echo "$options" | sed -n 's/.*direct-io-mode=\([^,]*\).*/\1/p');
-
-    volume_name=$(echo "$options" | sed -n 's/.*volume-name=\([^,]*\).*/\1/p');
-
-    volume_id=$(echo "$options" | sed -n 's/.*volume_id=\([^,]*\).*/\1/p');
-
-    volfile_check=$(echo "$options" | sed -n 's/.*volfile-check=\([^,]*\).*/\1/p');
-
-    volfile_max_fetch_attempts=$(echo "$options" | sed -n 's/.*fetch-attempts=\([^,]*\).*/\1/p');
-
-    server_port=$(echo "$options" | sed -n 's/.*server-port=\([^,]*\).*/\1/p');
-
-    backupvolfile_server=$(echo "$options" | sed -n 's/.*backupvolfile-server=\([^,]*\).*/\1/p');
-
-    log_server=$(echo "$options" | sed -n 's/.*log-server=\([^,]*\).*/\1/p');
-
-    log_server_port=$(echo "$options" | sed -n 's/.*log-server-port=\([^,]*\).*/\1/p');
-
-    volfile_loc="$1";
+                        # Handle options with values.
+                        case "$key" in
+                            "log-level")        log_level_str=$value ;;
+                            "log-file")         log_file=$value ;;
+                            "transport")        transport=$value ;;
+                            "direct-io-mode")   direct_io_mode=$value ;;
+                            "volume-name")      volume_name=$value ;;
+                            "volume-id")        volume_id=$value ;;
+                            "volfile-check")    volfile_check=$value ;;
+                            "server-port")      server_port=$value ;;
+                            "fetch-attempts")
+                                volfile_max_fetch_attempts=$value ;;
+                            "backupvolfile-server")
+                                backupvolfile_server=$value ;;
+                            "attribute-timeout")
+                                attribute_timeout=$value ;;
+                            "entry-timeout")    entry_timeout=$value ;;
+                            "negative-timeout")    negative_timeout=$value ;;
+			    "gid-timeout")	gid_timeout=$value ;;
+			    "background-qlen")	bg_qlen=$value ;;
+			    "congestion-threshold")	cong_threshold=$value ;;
+			    "fuse-mountopts")	fuse_mountopts=$value ;;
+                            *)
+                                # Passthru
+                                [ -z "$fuse_mountopts" ] || fuse_mountopts="$fuse_mountopts,"
+                                fuse_mountopts="$fuse_mountopts$pair"
+                                ;;
+                        esac
+                esac
+            done
+            in_opt="no"
+        elif [ "$opt" = "-o" ]; then
+            in_opt="yes"
+        else
+            case $pos_args in
+                0)      volfile_loc=$opt ;;
+                1)      mount_point=$opt ;;
+                *)      echo "extra arguments at end (ignored)" ;;
+            esac
+            pos_args=$((pos_args+1))
+        fi
+    done
+    if [ $in_opt = "yes" -o $pos_args -lt 2 ]; then
+        usage
+        exit 1
+    fi
 
     [ -r "$volfile_loc" ] || {
         server_ip=$(echo "$volfile_loc" | sed -n 's/\([a-zA-Z0-9:.\-]*\):.*/\1/p');
@@ -286,22 +396,6 @@ main ()
 	volfile_loc="";
     }
 
-    new_fs_options=$(echo "$options" | sed -e 's/[,]*log-file=[^,]*//' \
-        -e 's/[,]*log-level=[^,]*//' \
-        -e 's/[,]*volume-name=[^,]*//' \
-        -e 's/[,]*direct-io-mode=[^,]*//' \
-        -e 's/[,]*volfile-check=[^,]*//' \
-        -e 's/[,]*transport=[^,]*//' \
-        -e 's/[,]*backupvolfile-server=[^,]*//' \
-        -e 's/[,]*server-port=[^,]*//' \
-        -e 's/[,]*volume-id=[^,]*//' \
-        -e 's/[,]*fetch-attempts=[^,]*//' \
-        -e 's/[,]*log-server=[^,]*//' \
-        -e 's/[,]*ro[^,]*//' \
-        -e 's/[,]*acl[^,]*//' \
-        -e 's/[,]*worm[^,]*//' \
-        -e 's/[,]*log-server-port=[^,]*//');
-
     #
     [ -n "$helper" ] && {
         cmd_line=$(echo "$cmd_line --$helper");
@@ -309,31 +403,22 @@ main ()
         exit 0;
     }
 
-    mount_point=""
-    for arg in "$@"; do
-        [ -d "$arg" ] && {
-            mount_point=$arg
-        }
-    done
-
     # No need to do a ! -d test, it is taken care while initializing the
     # variable mount_point
-    [ -z "$mount_point" ] && {
+    [ -z "$mount_point" -o ! -d "$mount_point" ] && {
         echo "ERROR: Mount point does not exist."
         usage;
         exit 0;
     }
 
     # Simple check to avoid multiple identical mounts
-    if grep -q " $mount_point fuse" /etc/mtab; then
+    if grep -q " ${mount_point}.*fuse" $mounttab; then
         echo -n "$0: according to mtab, GlusterFS is already mounted on "
         echo "$mount_point"
         exit 0;
     fi
 
     check_recursive_mount "$@";
-
-    fs_options=$(echo "$fs_options,$new_fs_options");
 
     # Append fuse.glusterfs to PRUNEFS variable in updatedb.conf(5). updatedb(8)
     # should not index files under GlusterFS, indexing will slow down GlusteFS
@@ -350,4 +435,3 @@ main ()
 }
 
 _init "$@" && main "$@";
-

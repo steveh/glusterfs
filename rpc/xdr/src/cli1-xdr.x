@@ -3,21 +3,15 @@
         GF_DEFRAG_CMD_STOP,
         GF_DEFRAG_CMD_STATUS,
         GF_DEFRAG_CMD_START_LAYOUT_FIX,
-        GF_DEFRAG_CMD_START_MIGRATE_DATA,
-        GF_DEFRAG_CMD_START_MIGRATE_DATA_FORCE,
         GF_DEFRAG_CMD_START_FORCE /* used by remove-brick data migration */
 } ;
 
  enum gf_defrag_status_t {
         GF_DEFRAG_STATUS_NOT_STARTED,
-        GF_DEFRAG_STATUS_LAYOUT_FIX_STARTED,
-        GF_DEFRAG_STATUS_MIGRATE_DATA_STARTED,
+        GF_DEFRAG_STATUS_STARTED,
         GF_DEFRAG_STATUS_STOPPED,
         GF_DEFRAG_STATUS_COMPLETE,
-        GF_DEFRAG_STATUS_FAILED,
-        GF_DEFRAG_STATUS_LAYOUT_FIX_COMPLETE,
-        GF_DEFRAG_STATUS_MIGRATE_DATA_COMPLETE,
-        GF_DEFRAG_STATUS_PAUSED
+        GF_DEFRAG_STATUS_FAILED
 } ;
 
  enum gf1_cluster_type {
@@ -41,8 +35,7 @@
         GF_OP_CMD_NONE = 0,
         GF_OP_CMD_START,
         GF_OP_CMD_COMMIT,
-        GF_OP_CMD_PAUSE,
-        GF_OP_CMD_ABORT,
+        GF_OP_CMD_STOP,
         GF_OP_CMD_STATUS,
         GF_OP_CMD_COMMIT_FORCE
 } ;
@@ -103,6 +96,24 @@ enum gf1_cli_top_op {
         GF_CLI_TOP_WRITE_PERF
 };
 
+/* The unconventional hex numbers help us perform
+   bit-wise operations which reduces complexity */
+enum gf_cli_status_type {
+        GF_CLI_STATUS_NONE         = 0x0000,
+        GF_CLI_STATUS_MEM          = 0x0001,    /*0000000000001*/
+        GF_CLI_STATUS_CLIENTS      = 0x0002,    /*0000000000010*/
+        GF_CLI_STATUS_INODE        = 0x0004,    /*0000000000100*/
+        GF_CLI_STATUS_FD           = 0x0008,    /*0000000001000*/
+        GF_CLI_STATUS_CALLPOOL     = 0x0010,    /*0000000010000*/
+        GF_CLI_STATUS_DETAIL       = 0x0020,    /*0000000100000*/
+        GF_CLI_STATUS_MASK         = 0x00FF,    /*0000011111111 Used to get the op*/
+        GF_CLI_STATUS_VOL          = 0x0100,    /*0000100000000*/
+        GF_CLI_STATUS_ALL          = 0x0200,    /*0001000000000*/
+        GF_CLI_STATUS_BRICK        = 0x0400,    /*0010000000000*/
+        GF_CLI_STATUS_NFS          = 0x0800,    /*0100000000000*/
+        GF_CLI_STATUS_SHD          = 0x1000     /*1000000000000*/
+};
+
  struct gf_cli_req {
         opaque  dict<>;
 }  ;
@@ -124,6 +135,7 @@ enum gf1_cli_top_op {
         int     op_errno;
 	int	port;
         string  hostname<>;
+        string  op_errstr<>;
 }  ;
 
  struct gf1_cli_deprobe_req {
@@ -136,6 +148,7 @@ enum gf1_cli_top_op {
         int     op_ret;
         int     op_errno;
         string  hostname<>;
+        string  op_errstr<>;
 }  ;
 
 struct gf1_cli_peer_list_req {

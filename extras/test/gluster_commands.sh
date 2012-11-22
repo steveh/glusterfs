@@ -1,21 +1,13 @@
 #!/bin/bash
 
-#   Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-#   This file is part of GlusterFS.
 
-#   GlusterFS is free software; you can redistribute it and/or modify
-#   it under the terms of the GNU General Public License as published
-#   by the Free Software Foundation; either version 3 of the License,
-#   or (at your option) any later version.
-
-#   GlusterFS is distributed in the hope that it will be useful, but
-#   WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-#   General Public License for more details.
-
-#   You should have received a copy of the GNU General Public License
-#   along with this program.  If not, see
-#   <http://www.gnu.org/licenses/>.
+#  Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+#  This file is part of GlusterFS.
+#
+#  This file is licensed to you under your choice of the GNU Lesser
+#  General Public License, version 3 or any later version (LGPLv3 or
+#  later), or the GNU General Public License, version 2 (GPLv2), in all
+#  cases as published by the Free Software Foundation.
 
 
 # This script tests the basics gluster cli commands.
@@ -54,13 +46,13 @@ gluster volume start vol
 gluster volume info
 sleep 1
 mount -t glusterfs `hostname`:vol /mnt/client
-sleep 1 
+sleep 1
 df -h
 
 echo "adding-brick......."
 gluster volume add-brick vol `hostname`:/exports/exp2
 gluster volume info
-sleep 1 
+sleep 1
 umount /mnt/client
 mount -t glusterfs `hostname`:vol /mnt/client
 df -h
@@ -102,7 +94,7 @@ sleep 1
 echo "removing brick......."
 gluster --mode=script volume remove-brick vol `hostname`:/exports/exp2
 gluster volume info
-sleep 1 
+sleep 1
 df -h
 sleep 1
 
@@ -127,7 +119,7 @@ sleep 1
 echo "starting replicate volume......"
 gluster volume start mirror
 gluster volume info
-sleep 1 
+sleep 1
 mount -t glusterfs `hostname`:mirror /mnt/client
 sleep 1
 df -h
@@ -136,7 +128,7 @@ sleep 1
 echo "adding-brick......."
 gluster volume add-brick mirror `hostname`:/exports/exp3 `hostname`:/exports/exp4
 gluster volume info
-sleep 1 
+sleep 1
 df -h
 sleep 1
 
@@ -178,14 +170,14 @@ sleep 1
 echo "removeing-brick....."
 gluster --mode=script volume remove-brick mirror `hostname`:/exports/exp3 `hostname`:/exports/exp4
 gluster volume info
-sleep 1 
+sleep 1
 df -h
 sleep 1
 
 echo "stopping replicate volume....."
 gluster --mode=script volume stop mirror
 gluster volume info
-sleep 1 
+sleep 1
 umount /mnt/client
 df -h
 
@@ -206,14 +198,14 @@ gluster volume start str
 gluster volume info
 sleep 1
 mount -t glusterfs `hostname`:str /mnt/client
-sleep 1 
+sleep 1
 df -h
 sleep 1
 
 echo "adding brick...."
 gluster volume add-brick str `hostname`:/exports/exp3 `hostname`:/exports/exp4
 gluster volume info
-sleep 1 
+sleep 1
 df -h
 sleep 1
 

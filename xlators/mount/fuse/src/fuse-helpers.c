@@ -1,97 +1,72 @@
 /*
-   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+   Copyright (c) 2010-2012 Red Hat, Inc. <http://www.redhat.com>
    This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #include "fuse-bridge.h"
+#if defined(GF_SOLARIS_HOST_OS)
+#include <sys/procfs.h>
+#else
+#include <sys/sysctl.h>
+#endif
 
-xlator_t *
-fuse_state_subvol (fuse_state_t *state)
-{
-        xlator_t *subvol = NULL;
-
-        if (!state)
-                return NULL;
-
-        if (state->loc.inode)
-                subvol = state->loc.inode->table->xl;
-
-        if (state->fd)
-                subvol = state->fd->inode->table->xl;
-
-        return subvol;
-}
-
-
-xlator_t *
-fuse_active_subvol (xlator_t *fuse)
-{
-        fuse_private_t *priv = NULL;
-
-        priv = fuse->private;
-
-        return priv->active_subvol;
-}
-
-
+#ifndef GF_REQUEST_MAXGROUPS
+#define GF_REQUEST_MAXGROUPS    16
+#endif /* GF_REQUEST_MAXGROUPS */
 
 static void
 fuse_resolve_wipe (fuse_resolve_t *resolve)
 {
-        struct fuse_resolve_comp *comp = NULL;
+        GF_FREE ((void *)resolve->path);
 
-        if (resolve->path)
-                GF_FREE ((void *)resolve->path);
+        GF_FREE ((void *)resolve->bname);
 
-        if (resolve->bname)
-                GF_FREE ((void *)resolve->bname);
+        GF_FREE ((void *)resolve->resolved);
 
-        if (resolve->resolved)
-                GF_FREE ((void *)resolve->resolved);
+        if (resolve->fd)
+                fd_unref (resolve->fd);
 
-        loc_wipe (&resolve->deep_loc);
+        loc_wipe (&resolve->resolve_loc);
 
-        comp = resolve->components;
+	if (resolve->hint) {
+		inode_unref (resolve->hint);
+		resolve->hint = 0;
+	}
 
-        if (comp) {
-                int                  i = 0;
-
-                for (i = 0; comp[i].basename; i++) {
-                        if (comp[i].inode) {
-                                inode_unref (comp[i].inode);
-                                comp[i].inode = NULL;
-                        }
-                }
-
-                GF_FREE ((void *)resolve->components);
-        }
+	if (resolve->parhint) {
+		inode_unref (resolve->parhint);
+		resolve->parhint = 0;
+	}
 }
+
 
 void
 free_fuse_state (fuse_state_t *state)
 {
+        xlator_t       *this     = NULL;
+        fuse_private_t *priv     = NULL;
+        uint64_t        winds    = 0;
+        char            switched = 0;
+
+        this = state->this;
+
+        priv = this->private;
+
         loc_wipe (&state->loc);
 
         loc_wipe (&state->loc2);
 
-        if (state->dict) {
-                dict_unref (state->dict);
-                state->dict = (void *)0xaaaaeeee;
+        if (state->xdata) {
+                dict_unref (state->xdata);
+                state->xdata = (void *)0xaaaaeeee;
         }
+        if (state->xattr)
+                dict_unref (state->xattr);
+
         if (state->name) {
                 GF_FREE (state->name);
                 state->name = NULL;
@@ -108,6 +83,18 @@ free_fuse_state (fuse_state_t *state)
         fuse_resolve_wipe (&state->resolve);
         fuse_resolve_wipe (&state->resolve2);
 
+        pthread_mutex_lock (&priv->sync_mutex);
+        {
+                winds = --state->active_subvol->winds;
+                switched = state->active_subvol->switched;
+        }
+        pthread_mutex_unlock (&priv->sync_mutex);
+
+        if ((winds == 0) && (switched)) {
+                xlator_notify (state->active_subvol, GF_EVENT_PARENT_DOWN,
+                               state->active_subvol, NULL);
+        }
+
 #ifdef DEBUG
         memset (state, 0x90, sizeof (*state));
 #endif
@@ -119,12 +106,28 @@ free_fuse_state (fuse_state_t *state)
 fuse_state_t *
 get_fuse_state (xlator_t *this, fuse_in_header_t *finh)
 {
-        fuse_state_t *state = NULL;
+        fuse_state_t   *state         = NULL;
+	xlator_t       *active_subvol = NULL;
+        fuse_private_t *priv          = NULL;
 
         state = (void *)GF_CALLOC (1, sizeof (*state),
                                    gf_fuse_mt_fuse_state_t);
         if (!state)
                 return NULL;
+
+	state->this = THIS;
+        priv = this->private;
+
+        pthread_mutex_lock (&priv->sync_mutex);
+        {
+                active_subvol = fuse_active_subvol (state->this);
+                active_subvol->winds++;
+        }
+        pthread_mutex_unlock (&priv->sync_mutex);
+
+	state->active_subvol = active_subvol;
+	state->itable = active_subvol->itable;
+
         state->pool = this->ctx->pool;
         state->finh = finh;
         state->this = this;
@@ -138,25 +141,26 @@ get_fuse_state (xlator_t *this, fuse_in_header_t *finh)
 void
 frame_fill_groups (call_frame_t *frame)
 {
-        char         filename[128];
-        char         line[128];
+#if defined(GF_LINUX_HOST_OS)
+        char         filename[32];
+        char         line[4096];
         char        *ptr = NULL;
-        int          ret = 0;
         FILE        *fp = NULL;
         int          idx = 0;
         long int     id = 0;
         char        *saveptr = NULL;
         char        *endptr = NULL;
+        int          ret = 0;
 
-        ret = snprintf (filename, 128, "/proc/%d/status", frame->root->pid);
-        if (ret == 128)
+        ret = snprintf (filename, sizeof filename, "/proc/%d/status", frame->root->pid);
+        if (ret >= sizeof filename)
                 goto out;
 
         fp = fopen (filename, "r");
         if (!fp)
                 goto out;
 
-        while ((ptr = fgets (line, 128, fp))) {
+        while ((ptr = fgets (line, sizeof line, fp))) {
                 if (strncmp (ptr, "Groups:", 7) != 0)
                         continue;
 
@@ -172,7 +176,7 @@ frame_fill_groups (call_frame_t *frame)
                         if (!endptr || *endptr)
                                 break;
                         frame->root->groups[idx++] = id;
-                        if (idx == GF_REQUEST_MAXGROUPS)
+                        if (idx == GF_MAX_AUX_GROUPS)
                                 break;
                 }
 
@@ -182,9 +186,99 @@ frame_fill_groups (call_frame_t *frame)
 out:
         if (fp)
                 fclose (fp);
-        return;
+#elif defined(GF_SOLARIS_HOST_OS)
+        char         filename[32];
+        char         scratch[128];
+        prcred_t    *prcred = (prcred_t *) scratch;
+        FILE        *fp = NULL;
+        int          ret = 0;
+
+        ret = snprintf (filename, sizeof filename,
+                        "/proc/%d/cred", frame->root->pid);
+
+        if (ret < sizeof filename) {
+                fp = fopen (filename, "r");
+                if (fp != NULL) {
+                        if (fgets (scratch, sizeof scratch, fp) != NULL) {
+                                frame->root->ngrps = MIN(prcred->pr_ngroups,
+                                                         GF_REQUEST_MAXGROUPS);
+                        }
+                        fclose (fp);
+                 }
+         }
+#elif defined(CTL_KERN) /* DARWIN and *BSD */
+        /* 
+           N.B. CTL_KERN is an enum on Linux. (Meaning, if it's not
+           obvious, that it's not subject to preprocessor directives 
+           like '#if defined'.)
+           Unlike Linux, on Mac OS and the BSDs it is a #define. We
+           could test to see that KERN_PROC is defined, but, barring any 
+           evidence to the contrary, I think that's overkill.
+           We might also test that GF_DARWIN_HOST_OS is defined, why
+           limit this to just Mac OS. It's equally valid for the BSDs
+           and we do have people building on NetBSD and FreeBSD.
+        */
+        int name[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, frame->root->pid };
+        size_t namelen = sizeof name / sizeof name[0];
+        struct kinfo_proc kp;
+        size_t kplen = sizeof(kp);
+        int i, ngroups;
+
+        if (sysctl(name, namelen, &kp, &kplen, NULL, 0) != 0)
+                return;
+        ngroups = MIN(kp.kp_eproc.e_ucred.cr_ngroups, GF_REQUEST_MAXGROUPS);
+        for (i = 0; i < ngroups; i++)
+                frame->root->groups[i] = kp.kp_eproc.e_ucred.cr_groups[i];
+        frame->root->ngrps = ngroups;
+#else
+        frame->root->ngrps = 0;
+#endif /* GF_LINUX_HOST_OS */
 }
 
+/*
+ * Get the groups for the PID associated with this frame. If enabled,
+ * use the gid cache to reduce group list collection.
+ */
+static void get_groups(fuse_private_t *priv, call_frame_t *frame)
+{
+	int i;
+	const gid_list_t *gl;
+	gid_list_t agl;
+
+        if (-1 == priv->gid_cache_timeout) {
+                frame->root->ngrps = 0;
+                return;
+        }
+
+	if (!priv->gid_cache_timeout) {
+		frame_fill_groups(frame);
+		return;
+	}
+
+	gl = gid_cache_lookup(&priv->gid_cache, frame->root->pid);
+	if (gl) {
+		frame->root->ngrps = gl->gl_count;
+		for (i = 0; i < gl->gl_count; i++)
+			frame->root->groups[i] = gl->gl_list[i];
+		gid_cache_release(&priv->gid_cache, gl);
+		return;
+	}
+
+	frame_fill_groups (frame);
+
+	agl.gl_id = frame->root->pid;
+	agl.gl_count = frame->root->ngrps;
+	agl.gl_list = GF_CALLOC(frame->root->ngrps, sizeof(gid_t),
+			gf_fuse_mt_gids_t);
+	if (!agl.gl_list)
+		return;
+
+	for (i = 0; i < frame->root->ngrps; i++)
+		agl.gl_list[i] = frame->root->groups[i];
+
+	if (gid_cache_add(&priv->gid_cache, &agl) != 1)
+		GF_FREE(agl.gl_list);
+}
 
 call_frame_t *
 get_call_frame_for_req (fuse_state_t *state)
@@ -208,11 +302,12 @@ get_call_frame_for_req (fuse_state_t *state)
                 frame->root->uid      = finh->uid;
                 frame->root->gid      = finh->gid;
                 frame->root->pid      = finh->pid;
-                frame->root->lk_owner = state->lk_owner;
                 frame->root->unique   = finh->unique;
+                set_lk_owner_from_uint64 (&frame->root->lk_owner,
+                                          state->lk_owner);
         }
 
-        frame_fill_groups (frame);
+	get_groups(priv, frame);
 
         if (priv && priv->client_pid_set)
                 frame->root->pid = priv->client_pid;
@@ -269,6 +364,8 @@ fuse_loc_fill (loc_t *loc, fuse_state_t *state, ino_t ino,
                 if (!parent) {
                         parent = fuse_ino_to_inode (par, state->this);
                         loc->parent = parent;
+                        if (parent)
+                                uuid_copy (loc->pargfid, parent->gfid);
                 }
 
                 inode = loc->inode;
@@ -290,16 +387,17 @@ fuse_loc_fill (loc_t *loc, fuse_state_t *state, ino_t ino,
                 if (!inode) {
                         inode = fuse_ino_to_inode (ino, state->this);
                         loc->inode = inode;
+                        if (inode)
+                                uuid_copy (loc->gfid, inode->gfid);
                 }
 
                 parent = loc->parent;
                 if (!parent) {
-                        parent = fuse_ino_to_inode (par, state->this);
-                        if (!parent) {
-                                parent = inode_parent (inode, null_gfid, NULL);
-                        }
-
+                        parent = inode_parent (inode, null_gfid, NULL);
                         loc->parent = parent;
+                        if (parent)
+                                uuid_copy (loc->pargfid, parent->gfid);
+
                 }
 
                 ret = inode_path (inode, NULL, &path);
@@ -329,54 +427,81 @@ fuse_loc_fill (loc_t *loc, fuse_state_t *state, ino_t ino,
         }
         ret = 0;
 fail:
+        /* this should not happen as inode_path returns -1 when buf is NULL
+           for sure */
+        if (path && !loc->path)
+                GF_FREE (path);
         return ret;
 }
 
+/* Use the same logic as the Linux NFS-client */
+#define GF_FUSE_SQUASH_INO(ino) ((uint32_t) ino) ^ (ino >> 32)
 
 /* courtesy of folly */
 void
-gf_fuse_stat2attr (struct iatt *st, struct fuse_attr *fa)
+gf_fuse_stat2attr (struct iatt *st, struct fuse_attr *fa, gf_boolean_t enable_ino32)
 {
-        fa->ino        = st->ia_ino;
-        fa->size       = st->ia_size;
-        fa->blocks     = st->ia_blocks;
-        fa->atime      = st->ia_atime;
-        fa->mtime      = st->ia_mtime;
-        fa->ctime      = st->ia_ctime;
-        fa->atimensec  = st->ia_atime_nsec;
-        fa->mtimensec  = st->ia_mtime_nsec;
-        fa->ctimensec  = st->ia_ctime_nsec;
-        fa->mode       = st_mode_from_ia (st->ia_prot, st->ia_type);
-        fa->nlink      = st->ia_nlink;
-        fa->uid        = st->ia_uid;
-        fa->gid        = st->ia_gid;
-        fa->rdev       = makedev (ia_major (st->ia_rdev),
-                                  ia_minor (st->ia_rdev));
+        if (enable_ino32)
+                fa->ino = GF_FUSE_SQUASH_INO(st->ia_ino);
+        else
+                fa->ino = st->ia_ino;
+
+        fa->size        = st->ia_size;
+        fa->blocks      = st->ia_blocks;
+        fa->atime       = st->ia_atime;
+        fa->mtime       = st->ia_mtime;
+        fa->ctime       = st->ia_ctime;
+        fa->atimensec   = st->ia_atime_nsec;
+        fa->mtimensec   = st->ia_mtime_nsec;
+        fa->ctimensec   = st->ia_ctime_nsec;
+        fa->mode        = st_mode_from_ia (st->ia_prot, st->ia_type);
+        fa->nlink       = st->ia_nlink;
+        fa->uid         = st->ia_uid;
+        fa->gid         = st->ia_gid;
+        fa->rdev        = makedev (ia_major (st->ia_rdev),
+                                   ia_minor (st->ia_rdev));
 #if FUSE_KERNEL_MINOR_VERSION >= 9
-        fa->blksize    = st->ia_blksize;
+        fa->blksize     = st->ia_blksize;
 #endif
 #ifdef GF_DARWIN_HOST_OS
-        fa->crtime     = (uint64_t)-1;
-        fa->crtimensec = (uint32_t)-1;
-        fa->flags      = 0;
+        fa->crtime      = (uint64_t)-1;
+        fa->crtimensec  = (uint32_t)-1;
+        fa->flags       = 0;
 #endif
 }
 
-int
-fuse_flip_user_to_trusted (char *okey, char **nkey)
+void
+gf_fuse_fill_dirent (gf_dirent_t *entry, struct fuse_dirent *fde, gf_boolean_t enable_ino32)
+{
+        if (enable_ino32)
+                fde->ino = GF_FUSE_SQUASH_INO(entry->d_ino);
+        else
+                fde->ino = entry->d_ino;
+
+        fde->off         = entry->d_off;
+        fde->type        = entry->d_type;
+        fde->namelen     = strlen (entry->d_name);
+        strncpy (fde->name, entry->d_name, fde->namelen);
+}
+
+static int
+fuse_do_flip_xattr_ns (char *okey, const char *nns, char **nkey)
 {
         int   ret = 0;
         char *key = NULL;
 
-        key = GF_CALLOC (1, strlen(okey) + 10, gf_common_mt_char);
+        okey = strchr (okey, '.');
+        GF_ASSERT (okey);
+
+        key = GF_CALLOC (1, strlen (nns) + strlen(okey) + 1,
+                         gf_common_mt_char);
         if (!key) {
                 ret = -1;
                 goto out;
         }
 
-        okey += 5;
-        strncpy(key, "trusted.", 8);
-        strncat(key+8, okey, strlen(okey));
+        strcpy (key, nns);
+        strcat (key, okey);
 
         *nkey = key;
 
@@ -384,7 +509,7 @@ fuse_flip_user_to_trusted (char *okey, char **nkey)
         return ret;
 }
 
-int
+static int
 fuse_xattr_alloc_default (char *okey, char **nkey)
 {
         int ret = 0;
@@ -395,56 +520,71 @@ fuse_xattr_alloc_default (char *okey, char **nkey)
         return ret;
 }
 
+#define PRIV_XA_NS   "trusted"
+#define UNPRIV_XA_NS "system"
+
 int
 fuse_flip_xattr_ns (fuse_private_t *priv, char *okey, char **nkey)
 {
         int             ret       = 0;
         gf_boolean_t    need_flip = _gf_false;
-        gf_client_pid_t npid      = 0;
 
-        npid = priv->client_pid;
-        if (gf_client_pid_check (npid)) {
-                ret = fuse_xattr_alloc_default (okey, nkey);
-                goto out;
-        }
-
-        switch (npid) {
-                /*
-                 * These two cases will never execute as we check the
-                 * pid range above, but are kept to keep the compiler
-                 * happy.
-                 */
-        case GF_CLIENT_PID_MAX:
-        case GF_CLIENT_PID_MIN:
-                goto out;
-
+        switch (priv->client_pid) {
         case GF_CLIENT_PID_GSYNCD:
                 /* valid xattr(s): *xtime, volume-mark* */
                 gf_log("glusterfs-fuse", GF_LOG_DEBUG, "PID: %d, checking xattr(s): "
-                       "volume-mark*, *xtime", npid);
-                if ( (strcmp (okey, "user.glusterfs.volume-mark") == 0)
-                     || (fnmatch (okey, "user.glusterfs.volume-mark.*", FNM_PERIOD) == 0)
-                     || (fnmatch ("user.glusterfs.*.xtime", okey, FNM_PERIOD) == 0) )
+                       "volume-mark*, *xtime", priv->client_pid);
+                if ( (strcmp (okey, UNPRIV_XA_NS".glusterfs.volume-mark") == 0)
+                     || (fnmatch (UNPRIV_XA_NS".glusterfs.volume-mark.*", okey, FNM_PERIOD) == 0)
+                     || (fnmatch (UNPRIV_XA_NS".glusterfs.*.xtime", okey, FNM_PERIOD) == 0) )
                         need_flip = _gf_true;
                 break;
 
         case GF_CLIENT_PID_HADOOP:
                 /* valid xattr(s): pathinfo */
                 gf_log("glusterfs-fuse", GF_LOG_DEBUG, "PID: %d, checking xattr(s): "
-                       "pathinfo", npid);
-                if (strcmp (okey, "user.glusterfs.pathinfo") == 0)
+                       "pathinfo", priv->client_pid);
+                if (strcmp (okey, UNPRIV_XA_NS".glusterfs.pathinfo") == 0)
                         need_flip = _gf_true;
                 break;
         }
 
         if (need_flip) {
-                gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "flipping %s to trusted equivalent",
+                gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "flipping %s to "PRIV_XA_NS" equivalent",
                         okey);
-                ret = fuse_flip_user_to_trusted (okey, nkey);
+                ret = fuse_do_flip_xattr_ns (okey, PRIV_XA_NS, nkey);
         } else {
                 /* if we cannot match, continue with what we got */
                 ret = fuse_xattr_alloc_default (okey, nkey);
         }
+
+        return ret;
+}
+
+int
+fuse_ignore_xattr_set (fuse_private_t *priv, char *key)
+{
+        int ret = 0;
+
+        /* don't mess with user namespace */
+        if (fnmatch ("user.*", key, FNM_PERIOD) == 0)
+                goto out;
+
+        if (priv->client_pid != GF_CLIENT_PID_GSYNCD)
+                goto out;
+
+        /* trusted NS check */
+        if (!((fnmatch ("*.glusterfs.*.xtime", key, FNM_PERIOD) == 0)
+              || (fnmatch ("*.glusterfs.volume-mark",
+                           key, FNM_PERIOD) == 0)
+              || (fnmatch ("*.glusterfs.volume-mark.*",
+                           key, FNM_PERIOD) == 0)))
+                ret = -1;
+
  out:
+        gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "%s setxattr: key [%s], "
+                " client pid [%d]", (ret ? "disallowing" : "allowing"), key,
+                priv->client_pid);
+
         return ret;
 }

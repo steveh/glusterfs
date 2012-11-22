@@ -4,14 +4,16 @@ glusterfsd_SOURCES = glusterfsd.c glusterfsd-mgmt.c
 glusterfsd_LDADD = $(top_builddir)/libglusterfs/src/libglusterfs.la \
 	$(top_builddir)/rpc/rpc-lib/src/libgfrpc.la \
 	$(top_builddir)/rpc/xdr/src/libgfxdr.la \
-	$(GF_LDADD)
-glusterfsd_LDFLAGS = $(GF_LDFLAGS) $(GF_GLUSTERFS_LDFLAGS)
+	$(GF_LDADD) $(GF_GLUSTERFS_LIBS)
+glusterfsd_LDFLAGS = $(GF_LDFLAGS)
 noinst_HEADERS = glusterfsd.h glusterfsd-mem-types.h
 
-AM_CFLAGS = -fPIC -Wall -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -D$(GF_HOST_OS)\
+AM_CPPFLAGS = $(GF_CPPFLAGS) \
 	-I$(top_srcdir)/libglusterfs/src -DDATADIR=\"$(localstatedir)\" \
-	-DCONFDIR=\"$(sysconfdir)/glusterfs\" $(GF_GLUSTERFS_CFLAGS) \
+	-DCONFDIR=\"$(sysconfdir)/glusterfs\" \
 	-I$(top_srcdir)/rpc/rpc-lib/src -I$(top_srcdir)/rpc/xdr/src
+
+AM_CFLAGS = -Wall $(GF_GLUSTERFS_CFLAGS)
 
 CLEANFILES = 
 
@@ -25,6 +27,7 @@ uninstall-local:
 install-data-local:
 	$(INSTALL) -d -m 755 $(DESTDIR)$(localstatedir)/run
 	$(INSTALL) -d -m 755 $(DESTDIR)$(localstatedir)/log/glusterfs
+	$(INSTALL) -d -m 755 $(DESTDIR)$(sbindir)
 	rm -f $(DESTDIR)$(sbindir)/glusterfs
 	rm -f $(DESTDIR)$(sbindir)/glusterd
 	ln -s glusterfsd $(DESTDIR)$(sbindir)/glusterfs

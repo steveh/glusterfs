@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2011-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -82,18 +72,17 @@ glusterd_handle_log_rotate (rpcsvc_request_t *req)
         ret = glusterd_op_begin (req, GD_OP_LOG_ROTATE, dict);
 
 out:
-        if (ret && dict)
-                dict_unref (dict);
-
         glusterd_friend_sm ();
         glusterd_op_sm ();
 
-        if (ret)
+        if (ret) {
                 ret = glusterd_op_send_cli_response (cli_op, ret, 0, req,
-                                                     NULL, "operation failed");
+                                                     dict, "operation failed");
+                if (dict)
+                        dict_unref (dict);
+        }
 
-        if (cli_req.dict.dict_val)
-                free (cli_req.dict.dict_val);
+        free (cli_req.dict.dict_val);
         return ret;
 }
 
@@ -135,19 +124,20 @@ glusterd_op_stage_log_rotate (dict_t *dict, char **op_errstr)
         }
 
         ret = dict_get_str (dict, "brick", &brick);
-        if (ret)
+        /* If no brick is specified, do log-rotate for
+           all the bricks in the volume */
+        if (ret) {
+                ret = 0;
                 goto out;
+        }
 
-        if (strchr (brick, ':')) {
-                ret = glusterd_volume_brickinfo_get_by_brick (brick, volinfo, NULL,
-                                                              GF_PATH_COMPLETE);
-                if (ret) {
-                        snprintf (msg, sizeof (msg), "Incorrect brick %s "
-                                  "for volume %s", brick, volname);
-                        gf_log ("", GF_LOG_ERROR, "%s", msg);
-                        *op_errstr = gf_strdup (msg);
-                        goto out;
-                }
+        ret = glusterd_volume_brickinfo_get_by_brick (brick, volinfo, NULL);
+        if (ret) {
+                snprintf (msg, sizeof (msg), "Incorrect brick %s "
+                          "for volume %s", brick, volname);
+                gf_log ("", GF_LOG_ERROR, "%s", msg);
+                *op_errstr = gf_strdup (msg);
+                goto out;
         }
 out:
         gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
@@ -193,27 +183,26 @@ glusterd_op_log_rotate (dict_t *dict)
         }
 
         ret = dict_get_str (dict, "brick", &brick);
+        /* If no brick is specified, do log-rotate for
+           all the bricks in the volume */
         if (ret)
-                goto out;
+                goto cont;
 
-        if (!strchr (brick, ':'))
-                brick = NULL;
-        else {
-                ret = glusterd_brickinfo_from_brick (brick, &tmpbrkinfo);
-                if (ret) {
-                        gf_log ("glusterd", GF_LOG_ERROR,
-                                "cannot get brickinfo from brick");
-                        goto out;
-                }
+        ret = glusterd_brickinfo_new_from_brick (brick, &tmpbrkinfo);
+        if (ret) {
+                gf_log ("glusterd", GF_LOG_ERROR,
+                        "cannot get brickinfo from brick");
+                goto out;
         }
 
+cont:
         ret = glusterd_volinfo_find (volname, &volinfo);
         if (ret)
                 goto out;
 
         ret = -1;
         list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
-                if (uuid_compare (brickinfo->uuid, priv->uuid))
+                if (uuid_compare (brickinfo->uuid, MY_UUID))
                         continue;
 
                 if (brick &&

@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include <libgen.h>
@@ -123,7 +114,7 @@ out:
 int
 afr_open_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                        struct iatt *postbuf)
+                        struct iatt *postbuf, dict_t *xdata)
 {
         afr_local_t * local = frame->local;
         afr_private_t *priv = NULL;
@@ -132,7 +123,7 @@ afr_open_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (afr_open_only_data_self_heal (priv->data_self_heal))
                 afr_perform_data_self_heal (frame, this);
         AFR_STACK_UNWIND (open, frame, local->op_ret, local->op_errno,
-                          local->fd);
+                          local->fd, xdata);
         return 0;
 }
 
@@ -140,7 +131,7 @@ afr_open_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 afr_open_cbk (call_frame_t *frame, void *cookie,
               xlator_t *this, int32_t op_ret, int32_t op_errno,
-              fd_t *fd)
+              fd_t *fd, dict_t *xdata)
 {
         afr_local_t *  local       = NULL;
         int            ret         = 0;
@@ -162,8 +153,7 @@ afr_open_cbk (call_frame_t *frame, void *cookie,
                         local->success_count++;
 
                         ret = afr_child_fd_ctx_set (this, fd, child_index,
-                                                    local->cont.open.flags,
-                                                    local->cont.open.wbflags);
+                                                    local->cont.open.flags);
                         if (ret) {
                                 local->op_ret = -1;
                                 local->op_errno = -ret;
@@ -181,12 +171,12 @@ unlock:
                     && (local->op_ret >= 0)) {
                         STACK_WIND (frame, afr_open_ftruncate_cbk,
                                     this, this->fops->ftruncate,
-                                    fd, 0);
+                                    fd, 0, NULL);
                 } else {
                         if (afr_open_only_data_self_heal (priv->data_self_heal))
                                 afr_perform_data_self_heal (frame, this);
                         AFR_STACK_UNWIND (open, frame, local->op_ret,
-                                          local->op_errno, local->fd);
+                                          local->op_errno, local->fd, xdata);
                 }
         }
 
@@ -195,14 +185,13 @@ unlock:
 
 int
 afr_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
-          fd_t *fd, int32_t wbflags)
+          fd_t *fd, dict_t *xdata)
 {
         afr_private_t * priv       = NULL;
         afr_local_t *   local      = NULL;
         int             i          = 0;
         int             ret        = -1;
         int32_t         call_count = 0;
-        int32_t         op_ret     = -1;
         int32_t         op_errno   = 0;
         int32_t         wind_flags = flags & (~O_TRUNC);
         //We can't let truncation to happen outside transaction.
@@ -214,9 +203,9 @@ afr_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
 
         priv = this->private;
 
-	if (flags & (O_CREAT|O_TRUNC)) {
-		QUORUM_CHECK(open,out);
-	}
+        if (flags & (O_CREAT|O_TRUNC)) {
+                QUORUM_CHECK(open,out);
+        }
 
         if (afr_is_split_brain (this, loc->inode)) {
                 /* self-heal failed */
@@ -226,20 +215,17 @@ afr_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
-        frame->local = local;
         call_count   = local->call_count;
         loc_copy (&local->loc, loc);
 
         local->cont.open.flags   = flags;
-        local->cont.open.wbflags = wbflags;
 
         local->fd = fd_ref (fd);
 
@@ -248,18 +234,17 @@ afr_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
                         STACK_WIND_COOKIE (frame, afr_open_cbk, (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->open,
-                                           loc, wind_flags, fd, wbflags);
+                                           loc, wind_flags, fd, xdata);
 
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (open, frame, op_ret, op_errno, fd);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (open, frame, -1, op_errno, fd, xdata);
 
         return 0;
 }
@@ -312,7 +297,7 @@ afr_resume_calls (xlator_t *this, struct list_head *list)
 
 int
 afr_openfd_fix_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int32_t op_ret, int32_t op_errno, fd_t *fd)
+                         int32_t op_ret, int32_t op_errno, fd_t *fd, dict_t *xdata)
 {
         afr_local_t           *local       = NULL;
         afr_private_t         *priv        = NULL;
@@ -321,30 +306,35 @@ afr_openfd_fix_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int                    child_index = (long) cookie;
         struct list_head       paused_calls = {0};
         gf_boolean_t           fop_paused = _gf_false;
+        fd_t                   *local_fd  = NULL;
 
         priv     = this->private;
         local    = frame->local;
+        fop_paused = local->fop_paused;
 
+        if (op_ret >= 0) {
+                gf_log (this->name, GF_LOG_INFO, "fd for %s opened "
+                        "successfully on subvolume %s", local->loc.path,
+                        priv->children[child_index]->name);
+        }
+
+        local_fd = fd_ref (local->fd);
         call_count = afr_frame_return (frame);
+        //Note: Do not access any thing using the frame outside call_count 0
 
         //Note: No frame locking needed for this block of code
-        fd_ctx = afr_fd_ctx_get (local->fd, this);
+        fd_ctx = afr_fd_ctx_get (local_fd, this);
         if (!fd_ctx) {
                 gf_log (this->name, GF_LOG_WARNING,
-                        "failed to get fd context, %p", local->fd);
+                        "failed to get fd context, %p", local_fd);
                 goto out;
         }
 
-        fop_paused = local->fop_paused;
-        LOCK (&local->fd->lock);
+        LOCK (&local_fd->lock);
         {
                 if (op_ret >= 0) {
                         fd_ctx->opened_on[child_index] = AFR_FD_OPENED;
-                        gf_log (this->name, GF_LOG_INFO, "fd for %s opened "
-                                "successfully on subvolume %s", local->loc.path,
-                                priv->children[child_index]->name);
                 } else {
-                        //Change open status from OPENING to NOT OPENED.
                         fd_ctx->opened_on[child_index] = AFR_FD_NOT_OPENED;
                 }
                 if (call_count == 0) {
@@ -352,7 +342,7 @@ afr_openfd_fix_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         afr_get_resumable_calls (this, fd_ctx, &paused_calls);
                 }
         }
-        UNLOCK (&local->fd->lock);
+        UNLOCK (&local_fd->lock);
 out:
         if (call_count == 0) {
                 afr_resume_calls (this, &paused_calls);
@@ -367,6 +357,7 @@ out:
         }
 
 done:
+        fd_unref (local_fd);
         return 0;
 }
 
@@ -395,9 +386,9 @@ afr_fix_open (call_frame_t *frame, xlator_t *this, afr_fd_ctx_t *fd_ctx,
                         ret = -ENOMEM;
                         goto out;
                 }
-                ALLOC_OR_GOTO (open_local, afr_local_t, out);
-                open_frame->local = open_local;
-                ret = AFR_LOCAL_INIT (open_local, priv);
+                AFR_LOCAL_ALLOC_OR_GOTO (open_frame->local, out);
+                open_local = open_frame->local;
+                ret = afr_local_init (open_local, priv, &op_errno);
                 if (ret < 0)
                         goto out;
                 loc_copy (&open_local->loc, &local->loc);
@@ -423,11 +414,12 @@ afr_fix_open (call_frame_t *frame, xlator_t *this, afr_fd_ctx_t *fd_ctx,
                                 "opening fd for dir %s on subvolume %s",
                                 local->loc.path, priv->children[i]->name);
 
-                        STACK_WIND_COOKIE (frame, afr_openfd_fix_open_cbk,
+                        STACK_WIND_COOKIE (open_frame, afr_openfd_fix_open_cbk,
                                            (void*) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->opendir,
-                                           &open_local->loc, open_local->fd);
+                                           &open_local->loc, open_local->fd,
+                                           NULL);
                 } else {
                         gf_log (this->name, GF_LOG_DEBUG,
                                 "opening fd for file %s on subvolume %s",
@@ -437,11 +429,14 @@ afr_fix_open (call_frame_t *frame, xlator_t *this, afr_fd_ctx_t *fd_ctx,
                                            (void *)(long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->open,
-                                           &open_local->loc, fd_ctx->flags,
-                                           open_local->fd, fd_ctx->wbflags);
+                                           &open_local->loc,
+                                           fd_ctx->flags & (~O_TRUNC),
+                                           open_local->fd, NULL);
                 }
 
         }
+        op_errno = 0;
+        ret = 0;
 out:
         if (op_errno)
                 ret = -op_errno;

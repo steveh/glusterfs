@@ -102,21 +102,18 @@ struct nfs3stat_strerror nfs3stat_strerror_table[] = {
 uint64_t
 nfs3_iatt_gfid_to_ino (struct iatt *buf)
 {
-        uuid_t          gfid = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
-        uint64_t        ino = 0;
+        uint64_t ino  = 0;
 
         if (!buf)
                 return 0;
 
-        if ((buf->ia_ino != 1) && (uuid_compare (buf->ia_gfid, gfid) != 0)) {
-                if (gf_nfs_enable_ino32()) {
-                        ino = (uint32_t )nfs_hash_gfid (buf->ia_gfid);
-                        goto hashout;
-                }
+        if (gf_nfs_enable_ino32()) {
+                ino = (uint32_t )nfs_hash_gfid (buf->ia_gfid);
+                goto hashout;
+        }
 
-                memcpy (&ino, &buf->ia_gfid[8], sizeof (uint64_t));
-        } else
-                ino = 1;
+        /* from posix its guaranteed to send unique ino */
+        ino = buf->ia_ino;
 
 hashout:
         return ino;
@@ -346,25 +343,15 @@ nfs3_stat_to_fattr3 (struct iatt *buf)
 
         fa.fsid = buf->ia_dev;
         fa.fileid = nfs3_iatt_gfid_to_ino (buf);
-        /* FIXME: Handle time resolutions for sub-second granularity */
-        if (buf->ia_atime == 9669) {
-                fa.mtime.seconds = 0;
-                fa.mtime.nseconds = 0;
-                fa.atime.seconds = 0;
-                fa.atime.nseconds = 0;
-        } else {
-                fa.mtime.seconds = buf->ia_mtime;
-                fa.mtime.nseconds = 0;
-                fa.atime.seconds = buf->ia_atime;
-                fa.atime.seconds = 0;
-                fa.atime.nseconds = 0;
-        }
 
         fa.atime.seconds = buf->ia_atime;
-        fa.atime.nseconds = 0;
+        fa.atime.nseconds = buf->ia_atime_nsec;
 
         fa.ctime.seconds = buf->ia_ctime;
-        fa.ctime.nseconds = 0;
+        fa.ctime.nseconds = buf->ia_ctime_nsec;
+
+        fa.mtime.seconds = buf->ia_mtime;
+        fa.mtime.nseconds = buf->ia_mtime_nsec;
 
         return fa;
 }
@@ -408,11 +395,10 @@ nfs3_stat_to_pre_op_attr (struct iatt *pre)
 
         poa.attributes_follow = TRUE;
         poa.pre_op_attr_u.attributes.size = pre->ia_size;
-        if (pre->ia_atime == 9669)
-                poa.pre_op_attr_u.attributes.mtime.seconds = 0;
-        else
-                poa.pre_op_attr_u.attributes.mtime.seconds = pre->ia_mtime;
+        poa.pre_op_attr_u.attributes.mtime.seconds = pre->ia_mtime;
+        poa.pre_op_attr_u.attributes.mtime.nseconds = pre->ia_mtime_nsec;
         poa.pre_op_attr_u.attributes.ctime.seconds = pre->ia_ctime;
+        poa.pre_op_attr_u.attributes.ctime.nseconds = pre->ia_ctime_nsec;
 
 out:
         return poa;
@@ -578,7 +564,7 @@ nfs3_accessbits (int32_t accbits)
                 accresult |= ACCESS3_READ;
 
         if (accbits & POSIX_WRITE)
-                accresult |= (ACCESS3_MODIFY | ACCESS3_EXTEND);
+                accresult |= (ACCESS3_MODIFY | ACCESS3_EXTEND | ACCESS3_DELETE);
 
         /* lookup on directory allowed only in case of execute permission */
         if (accbits & POSIX_EXEC)
@@ -595,7 +581,7 @@ nfs3_request_to_accessbits (int32_t accbits)
         if (accbits & ACCESS3_READ)
                 acc_request |= POSIX_READ;
 
-        if (accbits & (ACCESS3_MODIFY | ACCESS3_EXTEND))
+        if (accbits & (ACCESS3_MODIFY | ACCESS3_EXTEND | ACCESS3_DELETE))
                 acc_request |= POSIX_WRITE;
 
         /* For lookup on directory check for execute permission */
@@ -1617,540 +1603,6 @@ err:
 }
 
 
-/* When remove a file, we need to unref the cached fd for an inode but this
- * needs to happen only when the file was in fact opened. However, it is
- * possible that fd_lookup on a file returns an fd because the file was in
- * process of being created(which also returns an fd) but since this fd was not
- * opened through this path, in the NFS3 remove path, we'll end up removing the
- * reference that belongs to someone else. That means, nfs3 remove path should
- * not unref unless it is sure that the file was cached open also. If it was,
- * only then perform the fd_unref, else not.
- *
- * We determine that using a flag in the inode context.
- */
-int
-nfs3_set_inode_opened (xlator_t *nfsxl, inode_t *inode)
-{
-        if ((!nfsxl) || (!inode))
-                return -1;
-
-        inode_ctx_put (inode, nfsxl, GF_NFS3_FD_CACHED);
-
-        return 0;
-}
-
-
-/* Returns 1 if inode was cached open, otherwise 0 */
-int
-nfs3_cached_inode_opened (xlator_t *nfsxl, inode_t *inode)
-{
-        int             ret = -1;
-        uint64_t        cflag = 0;
-
-        if ((!nfsxl) || (!inode))
-                return -1;
-
-        ret = inode_ctx_get (inode, nfsxl, &cflag);
-        if (ret == -1)
-                ret = 0;
-        else if (cflag == GF_NFS3_FD_CACHED)
-                ret = 1;
-
-        return ret;
-}
-
-
-int32_t
-nfs3_dir_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                   int32_t op_ret, int32_t op_errno, fd_t *fd)
-{
-        nfs3_call_state_t       *cs = NULL;
-
-        cs = frame->local;
-        if (op_ret == -1) {
-                gf_log (GF_NFS3, GF_LOG_ERROR, "Dir open failed path %s err %s"
-                                , cs->resolvedloc.path, strerror (op_errno));
-                cs->resolve_ret = -1;
-                cs->resolve_errno = op_errno;
-                nfs3_call_resume (cs);
-                goto err;
-        }
-
-        cs->fd = fd;     /* Gets unrefd when the call state is wiped. */
-        nfs3_set_inode_opened (cs->nfsx, cs->resolvedloc.inode);
-        gf_log (GF_NFS3, GF_LOG_TRACE, "FD_REF: %d", fd->refcount);
-        nfs3_call_resume (cs);
-err:
-        return 0;
-}
-
-
-int
-__nfs3_dir_open_and_resume (nfs3_call_state_t *cs)
-{
-        nfs_user_t      nfu = {0, };
-        int             ret = -EFAULT;
-
-        if (!cs)
-                return ret;
-
-        nfs_user_root_create (&nfu);
-        ret = nfs_opendir (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                           nfs3_dir_open_cbk, cs);
-        return ret;
-}
-
-
-int
-nfs3_dir_open_and_resume (nfs3_call_state_t *cs, nfs3_resume_fn_t resume)
-{
-        fd_t    *fd = NULL;
-        int     ret = -EFAULT;
-
-        if ((!cs))
-                return ret;
-
-        cs->resume_fn = resume;
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Opening: %s", cs->resolvedloc.path);
-        fd = fd_lookup (cs->resolvedloc.inode, 0);
-        if (fd) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "fd found in state: ref: %d",
-                        fd->refcount);
-                cs->fd = fd;    /* Gets unrefd when the call state is wiped. */
-                cs->resolve_ret = 0;
-                nfs3_call_resume (cs);
-                ret = 0;
-                goto err;
-        }
-
-        ret = __nfs3_dir_open_and_resume (cs);
-
-err:
-        return ret;
-}
-
-
-int
-nfs3_flush_call_state (nfs3_call_state_t *cs, fd_t *openedfd,
-                       int32_t call_resume)
-{
-        if ((!cs))
-                return -1;
-
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Calling resume");
-        if (openedfd) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Opening uncached fd done: %d",
-                        openedfd->refcount);
-                cs->fd = fd_ref (openedfd);
-                /* Set resove_ret to 0 so that the error checking in the resume
-                 * callback results in a successful read reply when the fd was
-                 * opened. If the fd opening failed, the resolve_ret is already
-                 * set to -1 in nfs3_file_open_cbk, so that will result in an
-                 * error being returned to the nfs client' read request.
-                 */
-                cs->resolve_ret = 0;
-        }
-        list_del (&cs->openwait_q);
-        if (call_resume)
-                nfs3_call_resume (cs);
-
-        return 0;
-}
-
-
-int
-nfs3_flush_inode_queue (struct inode_op_queue *inode_q, fd_t *openedfd,
-                        int32_t call_resume)
-{
-        nfs3_call_state_t       *cstmp = NULL;
-        nfs3_call_state_t       *cs = NULL;
-
-        if (!inode_q)
-                return -1;
-
-        list_for_each_entry_safe (cs, cstmp, &inode_q->opq, openwait_q)
-                nfs3_flush_call_state (cs, openedfd, call_resume);
-
-        return 0;
-}
-
-
-int
-nfs3_flush_open_wait_call_states (nfs3_call_state_t *cs, fd_t *openedfd)
-{
-        struct inode_op_queue   *inode_q = NULL;
-        uint64_t                ctxaddr = 0;
-        int                     ret = 0;
-
-        if (!cs)
-                return -1;
-
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Flushing call state");
-        ret = inode_ctx_get (cs->resolvedloc.inode, cs->nfsx, &ctxaddr);
-        if (ret == -1) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "No inode queue present");
-                goto out;
-        }
-
-        inode_q = (struct inode_op_queue *)(long)ctxaddr;
-        if (!inode_q)
-                goto out;
-
-        pthread_mutex_lock (&inode_q->qlock);
-        {
-                nfs3_flush_inode_queue (inode_q, openedfd, 1);
-        }
-        pthread_mutex_unlock (&inode_q->qlock);
-
-out:
-        return 0;
-}
-
-
-int
-__nfs3_fdcache_update_entry (struct nfs3_state *nfs3, fd_t *fd)
-{
-        uint64_t                ctxaddr = 0;
-        struct nfs3_fd_entry    *fde = NULL;
-
-        if ((!nfs3) || (!fd))
-                return -1;
-
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Updating fd: 0x%lx", (long int)fd);
-        fd_ctx_get (fd, nfs3->nfsx, &ctxaddr);
-        fde = (struct nfs3_fd_entry *)(long)ctxaddr;
-        if (fde) {
-                list_del (&fde->list);
-                list_add_tail (&fde->list, &nfs3->fdlru);
-        }
-
-        return 0;
-}
-
-
-int
-nfs3_fdcache_update (struct nfs3_state *nfs3, fd_t *fd)
-{
-        if ((!nfs3) || (!fd))
-                return -1;
-
-        LOCK (&nfs3->fdlrulock);
-        {
-                __nfs3_fdcache_update_entry (nfs3, fd);
-        }
-        UNLOCK (&nfs3->fdlrulock);
-
-        return 0;
-}
-
-
-int
-__nfs3_fdcache_remove_entry (struct nfs3_state *nfs3, struct nfs3_fd_entry *fde)
-{
-        if ((!fde) || (!nfs3))
-                return 0;
-
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Removing fd: 0x%lx: %d",
-                (long int)fde->cachedfd, fde->cachedfd->refcount);
-        list_del (&fde->list);
-        fd_ctx_del (fde->cachedfd, nfs3->nfsx, NULL);
-        fd_unref (fde->cachedfd);
-        GF_FREE (fde);
-        --nfs3->fdcount;
-
-        return 0;
-}
-
-
-int
-nfs3_fdcache_remove (struct nfs3_state *nfs3, fd_t *fd)
-{
-        struct nfs3_fd_entry    *fde = NULL;
-        uint64_t                ctxaddr = 0;
-
-        if ((!nfs3) || (!fd))
-                return -1;
-
-        LOCK (&nfs3->fdlrulock);
-        {
-                fd_ctx_get (fd, nfs3->nfsx, &ctxaddr);
-                fde = (struct nfs3_fd_entry *)(long)ctxaddr;
-                __nfs3_fdcache_remove_entry (nfs3, fde);
-        }
-        UNLOCK (&nfs3->fdlrulock);
-
-        return 0;
-}
-
-
-int
-__nfs3_fdcache_replace (struct nfs3_state *nfs3)
-{
-        struct nfs3_fd_entry    *fde = NULL;
-        struct nfs3_fd_entry    *tmp = NULL;
-
-        if (!nfs3)
-                return -1;
-
-        if (nfs3->fdcount <= GF_NFS3_FDCACHE_SIZE)
-                return 0;
-
-        list_for_each_entry_safe (fde, tmp, &nfs3->fdlru, list)
-                break;
-
-        __nfs3_fdcache_remove_entry (nfs3, fde);
-
-        return 0;
-}
-
-
-
-int
-nfs3_fdcache_add (struct nfs3_state *nfs3, fd_t *fd)
-{
-        struct nfs3_fd_entry    *fde = NULL;
-        int                     ret = -1;
-
-        if ((!nfs3) || (!fd))
-                return -1;
-
-        fde = GF_CALLOC (1, sizeof (*fd), gf_nfs_mt_nfs3_fd_entry);
-        if (!fde) {
-                gf_log (GF_NFS3, GF_LOG_ERROR, "fd entry allocation failed");
-                goto out;
-        }
-
-        /* Already refd by caller. */
-        fde->cachedfd = fd;
-        INIT_LIST_HEAD (&fde->list);
-
-        LOCK (&nfs3->fdlrulock);
-        {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Adding fd: 0x%lx",
-                        (long int) fd);
-                fd_ctx_set (fd, nfs3->nfsx, (uintptr_t)fde);
-                fd_bind (fd);
-                list_add_tail (&fde->list, &nfs3->fdlru);
-                ++nfs3->fdcount;
-                __nfs3_fdcache_replace (nfs3);
-        }
-        UNLOCK (&nfs3->fdlrulock);
-
-out:
-        return ret;
-}
-
-
-int32_t
-nfs3_file_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, fd_t *fd)
-{
-        nfs3_call_state_t       *cs = NULL;
-        struct nfs3_state       *nfs3 = NULL;
-
-        cs = frame->local;
-        if (op_ret == -1) {
-                gf_log (GF_NFS3, GF_LOG_ERROR, "Opening uncached fd failed: "
-                        "%s", strerror(op_errno));
-                cs->resolve_ret = -1;
-                cs->resolve_errno = op_errno;
-                fd = NULL;
-        } else {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Opening uncached fd done: %d",
-                        fd->refcount);
-        }
-
-        nfs3 = rpcsvc_request_program_private (cs->req);
-        /* Call states are flushed even when the opening of the file failed.
-         * This allows returning an error for each one of the file io requests
-         * that are currently queued waiting for the open to succeed.
-         */
-        nfs3_flush_open_wait_call_states (cs, fd);
-        if (fd)
-                nfs3_fdcache_add (nfs3, fd);
-        return 0;
-}
-
-
-struct inode_op_queue *
-__nfs3_get_inode_queue (nfs3_call_state_t *cs)
-{
-        struct inode_op_queue   *inode_q = NULL;
-        int                     ret = -1;
-        uint64_t                ctxaddr = 0;
-
-        ret = __inode_ctx_get (cs->resolvedloc.inode, cs->nfsx, &ctxaddr);
-        if (ret == 0) {
-                inode_q = (struct inode_op_queue *)(long)ctxaddr;
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Inode queue already inited");
-                goto err;
-        }
-
-        inode_q = GF_CALLOC (1, sizeof (*inode_q), gf_nfs_mt_inode_q);
-        if (!inode_q) {
-                gf_log (GF_NFS3, GF_LOG_ERROR, "Memory allocation failed");
-                goto err;
-        }
-
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Initing inode queue");
-        INIT_LIST_HEAD (&inode_q->opq);
-        pthread_mutex_init (&inode_q->qlock, NULL);
-        __inode_ctx_put (cs->resolvedloc.inode, cs->nfsx, (uintptr_t)inode_q);
-
-err:
-        return inode_q;
-}
-
-
-struct inode_op_queue *
-nfs3_get_inode_queue (nfs3_call_state_t *cs)
-{
-        struct inode_op_queue   *inode_q = NULL;
-
-        LOCK (&cs->resolvedloc.inode->lock);
-        {
-                inode_q = __nfs3_get_inode_queue (cs);
-        }
-        UNLOCK (&cs->resolvedloc.inode->lock);
-
-        return inode_q;
-}
-
-
-#define GF_NFS3_FD_OPEN_INPROGRESS      1
-#define GF_NFS3_FD_NEEDS_OPEN           0
-
-
-int
-__nfs3_queue_call_state (struct inode_op_queue *inode_q, nfs3_call_state_t *cs)
-{
-        int     ret = -1;
-
-        if (!inode_q)
-                goto err;
-
-        pthread_mutex_lock (&inode_q->qlock);
-        {
-                if (list_empty (&inode_q->opq)) {
-                        gf_log (GF_NFS3, GF_LOG_TRACE, "First call in queue");
-                        ret = GF_NFS3_FD_NEEDS_OPEN;
-                } else
-                        ret = GF_NFS3_FD_OPEN_INPROGRESS;
-
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Queueing call state");
-                list_add_tail (&cs->openwait_q, &inode_q->opq);
-        }
-        pthread_mutex_unlock (&inode_q->qlock);
-
-err:
-        return ret;
-}
-
-
-/* Returns GF_NFS3_FD_NEEDS_OPEN if the current call is the first one to be
- * queued. If so, the caller will need to send the open fop. If this is a
- * non-first call to be queued, it means the fd opening is in progress and
- * GF_NFS3_FD_OPEN_INPROGRESS is returned.
- *
- * Returns -1 on error.
- */
-int
-nfs3_queue_call_state (nfs3_call_state_t *cs)
-{
-        struct inode_op_queue   *inode_q = NULL;
-        int                     ret = -1;
-
-        inode_q = nfs3_get_inode_queue (cs);
-        if (!inode_q) {
-                gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to get inode op queue");
-                goto err;
-        }
-
-        ret = __nfs3_queue_call_state (inode_q, cs);
-
-err:
-        return ret;
-}
-
-
-int
-__nfs3_file_open_and_resume (nfs3_call_state_t *cs)
-{
-        nfs_user_t      nfu = {0, };
-        int             ret = -EFAULT;
-
-        if (!cs)
-                return ret;
-
-        ret = nfs3_queue_call_state (cs);
-        if (ret == -1) {
-                gf_log (GF_NFS3, GF_LOG_ERROR, "Error queueing call state");
-                ret = -EFAULT;
-                goto out;
-        } else if (ret == GF_NFS3_FD_OPEN_INPROGRESS) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Open in progress. Will wait.");
-                ret = 0;
-                goto out;
-        }
-
-        nfs_user_root_create (&nfu);
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Opening uncached fd");
-        ret = nfs_open (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc, O_RDWR,
-                        nfs3_file_open_cbk, cs);
-out:
-        return ret;
-}
-
-
-fd_t *
-nfs3_fdcache_getfd (struct nfs3_state *nfs3, inode_t *inode)
-{
-        fd_t    *fd = NULL;
-
-        if ((!nfs3) || (!inode))
-                return NULL;
-
-        fd = fd_lookup (inode, 0);
-        if (fd) {
-                /* Already refd by fd_lookup, so no need to ref again. */
-                gf_log (GF_NFS3, GF_LOG_TRACE, "fd found in state: %d",
-                        fd->refcount);
-                nfs3_fdcache_update (nfs3, fd);
-        } else
-                gf_log (GF_NFS3, GF_LOG_TRACE, "fd not found in state");
-
-        return fd;
-}
-
-
-
-int
-nfs3_file_open_and_resume (nfs3_call_state_t *cs, nfs3_resume_fn_t resume)
-{
-        fd_t    *fd = NULL;
-        int     ret = -EFAULT;
-
-        if (!cs)
-                return ret;
-
-        cs->resume_fn = resume;
-        gf_log (GF_NFS3, GF_LOG_TRACE, "Opening: %s", cs->resolvedloc.path);
-        fd = nfs3_fdcache_getfd (cs->nfs3state, cs->resolvedloc.inode);
-        if (fd) {
-                cs->fd = fd;    /* Gets unrefd when the call state is wiped. */
-                cs->resolve_ret = 0;
-                nfs3_call_resume (cs);
-                ret = 0;
-                goto err;
-        }
-
-        ret = __nfs3_file_open_and_resume (cs);
-
-err:
-        return ret;
-}
-
-
 void
 nfs3_stat_to_errstr (uint32_t xid, char *op, nfsstat3 stat, int pstat,
                      char *errstr)
@@ -2167,6 +1619,9 @@ nfs3_log_common_call (uint32_t xid, char *op, struct nfs3_fh *fh)
 {
         char    fhstr[1024];
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
+
         nfs3_fh_to_str (fh, fhstr);
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, %s: args: %s", xid, op,
                 fhstr);
@@ -2179,6 +1634,8 @@ nfs3_log_fh_entry_call (uint32_t xid, char *op, struct nfs3_fh *fh,
 {
         char    fhstr[1024];
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
         nfs3_fh_to_str (fh, fhstr);
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, %s: args: %s, name: %s", xid,
                 op, fhstr, name);
@@ -2192,6 +1649,8 @@ nfs3_log_rename_call (uint32_t xid, struct nfs3_fh *src, char *sname,
         char    sfhstr[1024];
         char    dfhstr[1024];
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
         nfs3_fh_to_str (src, sfhstr);
         nfs3_fh_to_str (dst, dfhstr);
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, RENAME: args: Src: %s, "
@@ -2211,6 +1670,8 @@ nfs3_log_create_call (uint32_t xid, struct nfs3_fh *fh, char *name,
         char    unchkd[] = "UNCHECKED";
         char    guarded[] = "GUARDED";
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
         nfs3_fh_to_str (fh, fhstr);
         if (mode == EXCLUSIVE)
                 modestr = exclmode;
@@ -2234,6 +1695,8 @@ nfs3_log_mknod_call (uint32_t xid, struct nfs3_fh *fh, char *name, int type)
         char    sock[] = "SOCK";
         char    fifo[] = "FIFO";
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
         nfs3_fh_to_str (fh, fhstr);
         if (type == NF3CHR)
                 modestr = chr;
@@ -2255,6 +1718,8 @@ nfs3_log_symlink_call (uint32_t xid, struct nfs3_fh *fh, char *name, char *tgt)
 {
         char    fhstr[1024];
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
         nfs3_fh_to_str (fh, fhstr);
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, SYMLINK: args: %s, name: %s,"
                 " target: %s", xid, fhstr, name, tgt);
@@ -2268,6 +1733,8 @@ nfs3_log_link_call (uint32_t xid, struct nfs3_fh *fh, char *name,
         char    dfhstr[1024];
         char    tfhstr[1024];
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
         nfs3_fh_to_str (fh, dfhstr);
         nfs3_fh_to_str (tgt, tfhstr);
         gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, LINK: args: %s, name: %s,"
@@ -2281,6 +1748,8 @@ nfs3_log_rw_call (uint32_t xid, char *op, struct nfs3_fh *fh, offset3 offt,
 {
         char    fhstr[1024];
 
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
         nfs3_fh_to_str (fh, fhstr);
         if (stablewrite == -1)
                 gf_log (GF_NFS3, GF_LOG_DEBUG, "XID: %x, %s: args: %s, offset:"
@@ -2295,22 +1764,1643 @@ nfs3_log_rw_call (uint32_t xid, char *op, struct nfs3_fh *fh, offset3 offt,
 }
 
 
+int
+nfs3_getattr_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_PERM:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ACCES:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_setattr_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_lookup_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_PERM:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ACCES:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_access_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_readlink_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+int
+nfs3_read_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_write_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_create_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_mkdir_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_symlink_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_mknod_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+int
+nfs3_remove_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_rmdir_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_rename_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_link_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_readdir_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+
+int
+nfs3_fsstat_loglevel (nfsstat3 stat) {
+
+	int ll = GF_LOG_DEBUG;
+
+	switch (stat) {
+
+        case NFS3ERR_PERM:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOENT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ACCES:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_EXIST:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_XDEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NODEV:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_IO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NXIO:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ISDIR:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_INVAL:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOSPC:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_ROFS:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_FBIG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_MLINK:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NAMETOOLONG:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTEMPTY:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_SERVERFAULT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_NOTSUPP:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_BADHANDLE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_STALE:
+		ll = GF_LOG_WARNING;
+                break;
+
+        case NFS3ERR_DQUOT:
+		ll = GF_LOG_WARNING;
+                break;
+
+        default:
+		ll = GF_LOG_DEBUG;
+                break;
+        }
+
+        return ll;
+}
+
+struct nfs3op_str {
+	int	op;
+	char	str[100];
+};
+
+struct nfs3op_str nfs3op_strings[] = {
+	{ NFS3_NULL, "NULL"},
+	{ NFS3_GETATTR, "GETATTR"},
+	{ NFS3_SETATTR, "SETATTR"},
+	{ NFS3_LOOKUP, "LOOKUP"},
+	{ NFS3_ACCESS, "ACCESS"},
+	{ NFS3_READLINK, "READLINK"},
+	{ NFS3_READ, "READ"},
+	{ NFS3_WRITE, "WRITE"},
+	{ NFS3_CREATE, "CREATE"},
+	{ NFS3_MKDIR, "MKDIR"},
+	{ NFS3_SYMLINK, "SYMLINK"},
+	{ NFS3_MKNOD, "MKNOD"},
+	{ NFS3_REMOVE, "REMOVE"},
+	{ NFS3_RMDIR, "RMDIR"},
+	{ NFS3_RENAME, "RENAME"},
+	{ NFS3_LINK, "LINK"},
+	{ NFS3_READDIR, "READDIR"},
+	{ NFS3_READDIRP, "READDIRP"},
+	{ NFS3_FSSTAT, "FSSTAT"},
+	{ NFS3_FSINFO, "FSINFO"},
+	{ NFS3_PATHCONF, "PATHCONF"},
+	{ NFS3_COMMIT, "COMMIT"},
+};
+
+int
+nfs3_loglevel (int nfs_op, nfsstat3 stat) {
+
+	int	ll = GF_LOG_DEBUG;
+
+	switch (nfs_op) {
+	case NFS3_GETATTR:
+		ll = nfs3_getattr_loglevel (stat);
+		break;
+
+	case NFS3_SETATTR:
+		ll = nfs3_setattr_loglevel (stat);
+		break;
+
+	case NFS3_LOOKUP:
+		ll = nfs3_lookup_loglevel (stat);
+		break;
+
+	case NFS3_ACCESS:
+		ll = nfs3_access_loglevel (stat);
+		break;
+
+	case NFS3_READLINK:
+		ll = nfs3_readlink_loglevel (stat);
+		break;
+
+	case NFS3_READ:
+		ll = nfs3_read_loglevel (stat);
+		break;
+
+	case NFS3_WRITE:
+		ll = nfs3_write_loglevel (stat);
+		break;
+
+	case NFS3_CREATE:
+		ll = nfs3_create_loglevel (stat);
+		break;
+
+	case NFS3_MKDIR:
+		ll = nfs3_mkdir_loglevel (stat);
+		break;
+
+	case NFS3_SYMLINK:
+		ll = nfs3_symlink_loglevel (stat);
+		break;
+
+	case NFS3_MKNOD:
+		ll = nfs3_mknod_loglevel (stat);
+		break;
+
+	case NFS3_REMOVE:
+		ll = nfs3_remove_loglevel (stat);
+		break;
+
+	case NFS3_RMDIR:
+		ll = nfs3_rmdir_loglevel (stat);
+		break;
+
+	case NFS3_RENAME:
+		ll = nfs3_rename_loglevel (stat);
+		break;
+
+	case NFS3_LINK:
+		ll = nfs3_link_loglevel (stat);
+		break;
+
+	case NFS3_READDIR:
+		ll = nfs3_readdir_loglevel (stat);
+		break;
+
+	case NFS3_READDIRP:
+		ll = nfs3_readdir_loglevel (stat);
+		break;
+
+	case NFS3_FSSTAT:
+		ll = nfs3_fsstat_loglevel (stat);
+		break;
+
+	case NFS3_FSINFO:
+		ll = nfs3_fsstat_loglevel (stat);
+		break;
+
+	case NFS3_PATHCONF:
+		ll = nfs3_fsstat_loglevel (stat);
+		break;
+
+	case NFS3_COMMIT:
+		ll = nfs3_write_loglevel (stat);
+		break;
+
+	default:
+		ll = GF_LOG_DEBUG;
+		break;
+	}
+
+	return ll;
+}
+
 void
-nfs3_log_common_res (uint32_t xid, char *op, nfsstat3 stat, int pstat)
+nfs3_log_common_res (uint32_t xid, int op, nfsstat3 stat, int pstat)
 {
         char    errstr[1024];
+	int	ll = nfs3_loglevel (op, stat);
 
-        nfs3_stat_to_errstr (xid, op, stat, pstat, errstr);
-        gf_log (GF_NFS3, GF_LOG_DEBUG, "%s", errstr);
+	if (THIS->ctx->log.loglevel < ll)
+		return;
+        nfs3_stat_to_errstr (xid, nfs3op_strings[op].str, stat, pstat, errstr);
+        gf_log (GF_NFS3, ll, "%s", errstr);
 }
 
 void
 nfs3_log_readlink_res (uint32_t xid, nfsstat3 stat, int pstat, char *linkpath)
 {
         char    errstr[1024];
+	int	ll = nfs3_loglevel (NFS3_READLINK, stat);
+
+	if (THIS->ctx->log.loglevel < ll)
+		return;
 
         nfs3_stat_to_errstr (xid, "READLINK", stat, pstat, errstr);
-        gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, target: %s", errstr, linkpath);
+        gf_log (GF_NFS3, ll, "%s, target: %s",
+		errstr, linkpath);
 
 }
 
@@ -2319,14 +3409,18 @@ nfs3_log_read_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
                    int is_eof, struct iovec *vec, int32_t veccount)
 {
         char    errstr[1024];
+	int	ll = GF_LOG_DEBUG;
 
+	ll = nfs3_loglevel (NFS3_READ, stat);
+	if (THIS->ctx->log.loglevel < ll)
+		return;
         nfs3_stat_to_errstr (xid, "READ", stat, pstat, errstr);
         if (vec)
-                gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, count: %"PRIu32", is_eof:"
+                gf_log (GF_NFS3, ll, "%s, count: %"PRIu32", is_eof:"
                         " %d, vector: count: %d, len: %zd", errstr, count,
                         is_eof, veccount, vec->iov_len);
         else
-                gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, count: %"PRIu32", is_eof:"
+                gf_log (GF_NFS3, ll, "%s, count: %"PRIu32", is_eof:"
                         " %d", errstr, count, is_eof);
 }
 
@@ -2336,25 +3430,32 @@ nfs3_log_write_res (uint32_t xid, nfsstat3 stat, int pstat, count3 count,
                     int stable, uint64_t wverf)
 {
         char    errstr[1024];
+	int	ll = nfs3_loglevel (NFS3_WRITE, stat);
+
+	if (THIS->ctx->log.loglevel < ll)
+		return;
 
         nfs3_stat_to_errstr (xid, "WRITE", stat, pstat, errstr);
-        gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, count: %"PRIu32", %s,wverf: %"PRIu64
+        gf_log (GF_NFS3, ll, "%s, count: %"PRIu32", %s,wverf: %"PRIu64
                 , errstr, count, (stable == UNSTABLE)?"UNSTABLE":"STABLE",
                 wverf);
 }
 
 
 void
-nfs3_log_newfh_res (uint32_t xid, char *op, nfsstat3 stat, int pstat,
+nfs3_log_newfh_res (uint32_t xid, int op, nfsstat3 stat, int pstat,
                     struct nfs3_fh *newfh)
 {
         char    errstr[1024];
         char    fhstr[1024];
+	int	ll = nfs3_loglevel (op, stat);
 
-        nfs3_stat_to_errstr (xid, op, stat, pstat, errstr);
+	if (THIS->ctx->log.loglevel < ll)
+		return;
+        nfs3_stat_to_errstr (xid, nfs3op_strings[op].str, stat, pstat, errstr);
         nfs3_fh_to_str (newfh, fhstr);
 
-        gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, %s", errstr, fhstr);
+        gf_log (GF_NFS3, nfs3_loglevel (op, stat), "%s, %s", errstr, fhstr);
 }
 
 
@@ -2363,9 +3464,12 @@ nfs3_log_readdir_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
                       count3 count, int is_eof)
 {
         char    errstr[1024];
+	int	ll = nfs3_loglevel (NFS3_READDIR, stat);
 
+	if (THIS->ctx->log.loglevel < ll)
+		return;
         nfs3_stat_to_errstr (xid, "READDIR", stat, pstat, errstr);
-        gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, count: %"PRIu32", cverf: %"PRIu64
+        gf_log (GF_NFS3, ll, "%s, count: %"PRIu32", cverf: %"PRIu64
                 ", is_eof: %d", errstr, count, cverf, is_eof);
 }
 
@@ -2375,9 +3479,12 @@ nfs3_log_readdirp_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t cverf,
                        count3 dircount, count3 maxcount, int is_eof)
 {
         char    errstr[1024];
+	int	ll = nfs3_loglevel (NFS3_READDIRP, stat);
 
+	if (THIS->ctx->log.loglevel < ll)
+		return;
         nfs3_stat_to_errstr (xid, "READDIRPLUS", stat, pstat, errstr);
-        gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, dircount: %"PRIu32", maxcount: %"
+        gf_log (GF_NFS3, ll, "%s, dircount: %"PRIu32", maxcount: %"
                 PRIu32", cverf: %"PRIu64", is_eof: %d", errstr, dircount,
                 maxcount, cverf, is_eof);
 }
@@ -2387,9 +3494,12 @@ void
 nfs3_log_commit_res (uint32_t xid, nfsstat3 stat, int pstat, uint64_t wverf)
 {
         char    errstr[1024];
+	int	ll = nfs3_loglevel (NFS3_COMMIT, stat);
 
+	if (THIS->ctx->log.loglevel < ll)
+		return;
         nfs3_stat_to_errstr (xid, "COMMIT", stat, pstat, errstr);
-        gf_log (GF_NFS3, GF_LOG_DEBUG, "%s, wverf: %"PRIu64, errstr, wverf);
+        gf_log (GF_NFS3, ll, "%s, wverf: %"PRIu64, errstr, wverf);
 }
 
 
@@ -2398,6 +3508,9 @@ nfs3_log_readdir_call (uint32_t xid, struct nfs3_fh *fh, count3 dircount,
                        count3 maxcount)
 {
         char    fhstr[1024];
+
+	if (THIS->ctx->log.loglevel < GF_LOG_DEBUG)
+		return;
 
         nfs3_fh_to_str (fh, fhstr);
 
@@ -2420,7 +3533,7 @@ nfs3_fh_resolve_inode_done (nfs3_call_state_t *cs, inode_t *inode)
                 return ret;
 
         gf_log (GF_NFS3, GF_LOG_TRACE, "FH inode resolved");
-        ret = nfs_inode_loc_fill (inode, &cs->resolvedloc);
+        ret = nfs_inode_loc_fill (inode, &cs->resolvedloc, NFS_RESOLVE_EXIST);
         if (ret < 0) {
                 gf_log (GF_NFS3, GF_LOG_ERROR, "inode loc fill failed");
                 goto err;
@@ -2429,55 +3542,6 @@ nfs3_fh_resolve_inode_done (nfs3_call_state_t *cs, inode_t *inode)
         nfs3_call_resume (cs);
 
 err:
-        return ret;
-}
-
-#define GF_NFS3_FHRESOLVE_FOUND         1
-#define GF_NFS3_FHRESOLVE_NOTFOUND      2
-#define GF_NFS3_FHRESOLVE_DIRFOUND      3
-
-int
-nfs3_fh_resolve_check_entry (struct nfs3_fh *fh, gf_dirent_t *candidate,
-                             int hashidx)
-{
-        struct iatt             *ia = NULL;
-        int                     ret = GF_NFS3_FHRESOLVE_NOTFOUND;
-        nfs3_hash_entry_t       entryhash = 0;
-
-        if ((!fh) || (!candidate))
-                return ret;
-
-        if ((strcmp (candidate->d_name, ".") == 0) ||
-            (strcmp (candidate->d_name, "..") == 0))
-                goto found_entry;
-
-        ia = &candidate->d_stat;
-        if ((uuid_compare (candidate->d_stat.ia_gfid, fh->gfid)) == 0) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Found entry: gfid: %s, "
-                        "name: %s, hashcount %d",
-                         uuid_utoa (candidate->d_stat.ia_gfid),
-                         candidate->d_name, hashidx);
-                ret = GF_NFS3_FHRESOLVE_FOUND;
-                goto found_entry;
-        }
-
-        /* This condition ensures that we never have to be afraid of having
-         * a directory hash conflict with a file hash. The consequence of
-         * this condition is that we can now have unlimited files in a directory
-         * and upto 65536 sub-directories in a directory.
-         */
-        if (!IA_ISDIR (candidate->d_stat.ia_type))
-                goto found_entry;
-        entryhash = fh->entryhash[hashidx];
-        if (entryhash == nfs3_fh_hash_entry (ia->ia_gfid)) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Found hash match: %s: %d, "
-                        "hashidx: %d", candidate->d_name, entryhash, hashidx);
-                ret = GF_NFS3_FHRESOLVE_DIRFOUND;
-                goto found_entry;
-        }
-
-found_entry:
-
         return ret;
 }
 
@@ -2505,11 +3569,14 @@ nfs3_fh_resolve_entry_lookup_cbk (call_frame_t *frame, void *cookie,
                 gf_log (GF_NFS3, GF_LOG_TRACE, "Entry looked up: %s",
                         cs->resolvedloc.path);
 
+	memcpy (&cs->stbuf, buf, sizeof (*buf));
+	memcpy (&cs->postparent, postparent, sizeof (*postparent));
         linked_inode = inode_link (inode, cs->resolvedloc.parent,
                                    cs->resolvedloc.name, buf);
         if (linked_inode) {
                 inode_lookup (linked_inode);
-                inode_unref (linked_inode);
+                inode_unref (cs->resolvedloc.inode);
+                cs->resolvedloc.inode = linked_inode;
         }
 err:
         nfs3_call_resume (cs);
@@ -2517,44 +3584,8 @@ err:
 }
 
 
-
 int32_t
-nfs3_fh_resolve_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                             int32_t op_ret, int32_t op_errno,
-                             gf_dirent_t *entries);
-
-int
-nfs3_fh_resolve_found_entry (nfs3_call_state_t *cs, gf_dirent_t *candidate)
-{
-        int             ret = 0;
-        nfs_user_t      nfu = {0, };
-        uuid_t          gfid = {0, };
-
-        if ((!cs) || (!candidate))
-                return -EFAULT;
-
-        uuid_copy (gfid, cs->resolvedloc.inode->gfid);
-        nfs_loc_wipe (&cs->resolvedloc);
-        ret = nfs_entry_loc_fill (cs->vol->itable, gfid, candidate->d_name,
-                                  &cs->resolvedloc, NFS_RESOLVE_CREATE);
-        if (ret == -ENOENT) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Entry not in itable, needs"
-                        " lookup");
-                nfs_user_root_create (&nfu);
-                ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                  nfs3_fh_resolve_entry_lookup_cbk,
-                                  cs);
-        } else {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Entry got from itable");
-                nfs3_call_resume (cs);
-        }
-
-        return ret;
-}
-
-
-int32_t
-nfs3_fh_resolve_parent_lookup_cbk (call_frame_t *frame, void *cookie,
+nfs3_fh_resolve_inode_lookup_cbk (call_frame_t *frame, void *cookie,
                                   xlator_t *this, int32_t op_ret,
                                   int32_t op_errno, inode_t *inode,
                                   struct iatt *buf, dict_t *xattr,
@@ -2573,357 +3604,32 @@ nfs3_fh_resolve_parent_lookup_cbk (call_frame_t *frame, void *cookie,
                         cs->resolvedloc.path, strerror (op_errno));
                 nfs3_call_resume (cs);
                 goto err;
-        } else
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Entry looked up: %s",
-                        cs->resolvedloc.path);
+        }
 
+	memcpy (&cs->stbuf, buf, sizeof(*buf));
+	memcpy (&cs->postparent, buf, sizeof(*postparent));
         linked_inode = inode_link (inode, cs->resolvedloc.parent,
                                    cs->resolvedloc.name, buf);
         if (linked_inode) {
                 inode_lookup (linked_inode);
-                inode_unref (linked_inode);
+		inode_unref (cs->resolvedloc.inode);
+		cs->resolvedloc.inode = linked_inode;
         }
-        nfs3_fh_resolve_entry_hard (cs);
 
-err:
-        return 0;
-}
-
-
-int
-nfs3_fh_resolve_found_parent (nfs3_call_state_t *cs, gf_dirent_t *candidate)
-{
-        int             ret = 0;
-        nfs_user_t      nfu = {0, };
-        uuid_t          gfid = {0, };
-
-        if ((!cs) || (!candidate))
-                return -EFAULT;
-
-        uuid_copy (gfid, cs->resolvedloc.inode->gfid);
-        nfs_loc_wipe (&cs->resolvedloc);
-        ret = nfs_entry_loc_fill (cs->vol->itable, gfid, candidate->d_name,
-                                  &cs->resolvedloc, NFS_RESOLVE_CREATE);
-        if (ret == -ENOENT) {
-                nfs_user_root_create (&nfu);
-                ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                  nfs3_fh_resolve_parent_lookup_cbk,
-                                  cs);
-        } else
+        /* If it is an entry lookup and we landed in the callback for hard
+         * inode resolution, it means the parent inode was not available and
+         * had to be resolved first. Now that is done, lets head back into
+         * entry resolution.
+         */
+        if (cs->resolventry)
                 nfs3_fh_resolve_entry_hard (cs);
-
-        return ret;
-}
-
-
-int
-nfs3_fh_resolve_found (nfs3_call_state_t *cs, gf_dirent_t *candidate)
-{
-        int             ret = 0;
-
-        if ((!cs) || (!candidate))
-                return -EFAULT;
-
-        if (!cs->resolventry) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Candidate entry was found");
-                ret = nfs3_fh_resolve_found_entry (cs, candidate);
-        } else {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Entry's parent was found");
-                ret = nfs3_fh_resolve_found_parent (cs, candidate);
-        }
-
-        return ret;
-}
-
-
-int32_t
-nfs3_fh_resolve_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                             int32_t op_ret, int32_t op_errno, fd_t *fd)
-{
-        nfs3_call_state_t       *cs = NULL;
-        int                     ret = -EFAULT;
-        nfs_user_t              nfu = {0, };
-
-        cs = frame->local;
-        cs->resolve_ret = op_ret;
-        cs->resolve_errno = op_errno;
-
-        if (op_ret == -1) {
-                gf_log (GF_NFS3, GF_LOG_ERROR, "Dir open failed: %s: %s",
-                        cs->resolvedloc.path, strerror (op_errno));
-                nfs3_call_resume (cs);
-                goto err;
-        } else
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Reading directory: %s",
-                        cs->resolvedloc.path);
-
-        nfs_user_root_create (&nfu);
-        /* Keep this directory fd_t around till we have either:
-         * a. found the entry,
-         * b. exhausted all the entries,
-         * c. decide to step into a child directory.
-         *
-         * This decision is made in nfs3_fh_resolve_check_response.
-         */
-        cs->resolve_dir_fd = fd;
-        gf_log (GF_NFS3, GF_LOG_TRACE, "resolve new fd refed: 0x%lx, ref: %d",
-                (long)cs->resolve_dir_fd, cs->resolve_dir_fd->refcount);
-        ret = nfs_readdirp (cs->nfsx, cs->vol, &nfu, fd, GF_NFS3_DTPREF, 0,
-                            nfs3_fh_resolve_readdir_cbk, cs);
-
-err:
-        return ret;
-}
-
-int32_t
-nfs3_fh_resolve_dir_lookup_cbk (call_frame_t *frame, void *cookie,
-                                xlator_t *this, int32_t op_ret,int32_t op_errno,
-                                inode_t *inode, struct iatt *buf, dict_t *xattr,
-                                struct iatt *postparent)
-{
-        nfs3_call_state_t       *cs = NULL;
-        nfs_user_t              nfu = {0, };
-        inode_t                 *linked_inode = NULL;
-
-        cs = frame->local;
-        cs->resolve_ret = op_ret;
-        cs->resolve_errno = op_errno;
-
-        if (op_ret == -1) {
-                gf_log (GF_NFS3, (op_errno == ENOENT ? GF_LOG_TRACE : GF_LOG_ERROR),
-                        "Lookup failed: %s: %s",
-                        cs->resolvedloc.path, strerror (op_errno));
-                nfs3_call_resume (cs);
-                goto err;
-        } else
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Dir will be opened: %s",
-                        cs->resolvedloc.path);
-
-        nfs_user_root_create (&nfu);
-        linked_inode = inode_link (inode, cs->resolvedloc.parent,
-                                   cs->resolvedloc.name, buf);
-        if (linked_inode) {
-                inode_lookup (linked_inode);
-                inode_unref (linked_inode);
-        }
-
-        nfs_opendir (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                     nfs3_fh_resolve_opendir_cbk, cs);
-
+	else
+		nfs3_call_resume (cs);
 err:
         return 0;
 }
 
 
-/* Validate the depth of the dir such that we do not end up opening and
- * reading directories beyond those that are needed for resolving the file
- * handle.
- * Returns 1 if fh resolution can continue, 0 otherwise.
- */
-int
-nfs3_fh_resolve_validate_dirdepth (nfs3_call_state_t *cs)
-{
-        int     ret = 1;
-
-        if (!cs)
-                return 0;
-
-        /* This condition will generally never be hit because the
-         * hash-matching scheme will prevent us from going into a
-         * directory that is not part of the hash-array.
-         */
-        if (nfs3_fh_hash_index_is_beyond (&cs->resolvefh, cs->hashidx)) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Hash index is beyond: idx %d,"
-                        " fh idx: %d", cs->hashidx, cs->resolvefh.hashcount);
-                ret = 0;
-                goto out;
-        }
-
-        if (cs->hashidx >= GF_NFSFH_MAXHASHES) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Hash index beyond max hashes:"
-                        " hashidx %d, max: %d", cs->hashidx,
-                        GF_NFSFH_MAXHASHES);
-                ret = 0;
-                goto out;
-        }
-
-out:
-        return ret;
-}
-
-
-int
-nfs3_fh_resolve_dir_hard (nfs3_call_state_t *cs, uuid_t dirgfid, char *entry)
-{
-        int             ret = -EFAULT;
-        nfs_user_t      nfu = {0, };
-
-        if (!cs)
-                return ret;
-
-        cs->hashidx++;
-        nfs_loc_wipe (&cs->resolvedloc);
-        if (!nfs3_fh_resolve_validate_dirdepth (cs)) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Dir depth validation failed");
-                nfs3_call_resume_estale (cs);
-                ret = 0;
-                goto out;
-        }
-
-        nfs_user_root_create (&nfu);
-        gf_log (GF_NFS3, GF_LOG_TRACE, "FH hard dir resolution: gfid: %s, "
-                "entry: %s, next hashcount: %d", uuid_utoa (dirgfid), entry,
-                cs->hashidx);
-        ret = nfs_entry_loc_fill (cs->vol->itable, dirgfid, entry,
-                                  &cs->resolvedloc, NFS_RESOLVE_CREATE);
-
-        if (ret == 0) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Dir will be opened: %s",
-                        cs->resolvedloc.path);
-                ret = nfs_opendir (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                   nfs3_fh_resolve_opendir_cbk, cs);
-        } else if (ret == -ENOENT) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Dir needs lookup: %s",
-                        cs->resolvedloc.path);
-                ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                  nfs3_fh_resolve_dir_lookup_cbk, cs);
-        }
-out:
-        return ret;
-}
-
-
-/*
- * Called in a recursive code path, so if another
- * directory was opened in an earlier call during fh resolution, we must unref
- * through this reference before opening another fd_t.
- */
-#define nfs3_fh_resolve_close_cwd(cst)                                  \
-        do {                                                            \
-                if ((cst)->resolve_dir_fd) {                            \
-                        gf_log (GF_NFS3, GF_LOG_TRACE, "resolve fd "    \
-                                "unrefing: 0x%lx, ref: %d",             \
-                                (long)(cst)->resolve_dir_fd,            \
-                                (cst)->resolve_dir_fd->refcount);       \
-                                fd_unref ((cst)->resolve_dir_fd);       \
-                }                                                       \
-        } while (0)                                                     \
-
-
-int
-nfs3_fh_resolve_determine_response (nfs3_call_state_t *cs) {
-
-        int     response = GF_NFS3_FHRESOLVE_NOTFOUND;
-
-        if (!cs)
-                return response;
-
-        if ((cs->hashmatch) && (cs->entrymatch))
-                response = GF_NFS3_FHRESOLVE_FOUND;
-        else if ((cs->hashmatch) && (!cs->entrymatch))
-                response = GF_NFS3_FHRESOLVE_DIRFOUND;
-        else if ((!cs->hashmatch) && (cs->entrymatch))
-                response = GF_NFS3_FHRESOLVE_FOUND;
-        else if ((!cs->hashmatch) && (!cs->entrymatch))
-                response = GF_NFS3_FHRESOLVE_NOTFOUND;
-
-        return response;
-}
-
-
-int
-nfs3_fh_resolve_check_response (nfs3_call_state_t *cs)
-{
-        int             ret = -EFAULT;
-        nfs_user_t      nfu = {0, };
-        int             response = GF_NFS3_FHRESOLVE_NOTFOUND;
-
-        if (!cs)
-                return ret;
-
-        response = nfs3_fh_resolve_determine_response (cs);
-        switch (response) {
-
-        case GF_NFS3_FHRESOLVE_DIRFOUND:
-                nfs3_fh_resolve_close_cwd (cs);
-                nfs3_fh_resolve_dir_hard (cs, cs->resolvedloc.inode->gfid,
-                                          cs->hashmatch->d_name);
-                break;
-
-        case GF_NFS3_FHRESOLVE_FOUND:
-                nfs3_fh_resolve_close_cwd (cs);
-                nfs3_fh_resolve_found (cs, cs->entrymatch);
-                break;
-
-        case GF_NFS3_FHRESOLVE_NOTFOUND:
-                nfs_user_root_create (&nfu);
-                nfs_readdirp (cs->nfsx, cs->vol, &nfu, cs->resolve_dir_fd,
-                              GF_NFS3_DTPREF, cs->lastentryoffset,
-                              nfs3_fh_resolve_readdir_cbk, cs);
-                break;
-        }
-
-        return 0;
-}
-
-int
-nfs3_fh_resolve_search_dir (nfs3_call_state_t *cs, gf_dirent_t *entries)
-{
-        gf_dirent_t     *candidate = NULL;
-        int             ret = GF_NFS3_FHRESOLVE_NOTFOUND;
-
-        if ((!cs) || (!entries))
-                return -EFAULT;
-
-        if (list_empty (&entries->list))
-                goto search_done;
-
-        list_for_each_entry (candidate, &entries->list, list) {
-                cs->lastentryoffset = candidate->d_off;
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Candidate: %s, gfid: %s",
-                        candidate->d_name,
-                        uuid_utoa (candidate->d_stat.ia_gfid));
-                ret = nfs3_fh_resolve_check_entry (&cs->resolvefh, candidate,
-                                                   cs->hashidx);
-                if (ret == GF_NFS3_FHRESOLVE_FOUND)
-                        cs->entrymatch = gf_dirent_for_name (candidate->d_name);
-                else if (ret == GF_NFS3_FHRESOLVE_DIRFOUND) {
-                        if (cs->hashmatch)
-                                gf_dirent_free (cs->hashmatch);
-                        cs->hashmatch = gf_dirent_for_name (candidate->d_name);
-                }
-        }
-
-search_done:
-        return ret;
-}
-
-
-int32_t
-nfs3_fh_resolve_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                             int32_t op_ret, int32_t op_errno,
-                             gf_dirent_t *entries)
-{
-        nfs3_call_state_t       *cs = NULL;
-        nfs_user_t              nfu = {0, };
-
-        cs = frame->local;
-        if (op_ret <= 0) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Directory read done: %s: %s",
-                        cs->resolvedloc.path, strerror (op_ret));
-                nfs3_fh_resolve_check_response (cs);
-                goto err;
-        }
-
-        nfs3_fh_resolve_search_dir (cs, entries);
-        nfs_user_root_create (&nfu);
-        nfs_readdirp (cs->nfsx, cs->vol, &nfu, cs->resolve_dir_fd,
-                      GF_NFS3_DTPREF, cs->lastentryoffset,
-                      nfs3_fh_resolve_readdir_cbk, cs);
-
-err:
-        return 0;
-}
 
 /* Needs no extra argument since it knows that the fh to be resolved is in
  * resolvefh and that it needs to start looking from the root.
@@ -2937,33 +3643,21 @@ nfs3_fh_resolve_inode_hard (nfs3_call_state_t *cs)
         if (!cs)
                 return ret;
 
-        cs->hashidx++;
+        gf_log (GF_NFS3, GF_LOG_TRACE, "FH hard resolution for: gfid 0x%s",
+                uuid_utoa (cs->resolvefh.gfid));
+	cs->hardresolved = 1;
         nfs_loc_wipe (&cs->resolvedloc);
-        if (!nfs3_fh_resolve_validate_dirdepth (cs)) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Dir depth validation failed");
-                nfs3_call_resume_estale (cs);
-                ret = 0;
+        ret = nfs_gfid_loc_fill (cs->vol->itable, cs->resolvefh.gfid,
+                                 &cs->resolvedloc, NFS_RESOLVE_CREATE);
+        if (ret < 0) {
+                gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to fill loc using gfid: "
+                        "%s", strerror (-ret));
                 goto out;
         }
 
         nfs_user_root_create (&nfu);
-        gf_log (GF_NFS3, GF_LOG_TRACE, "FH hard resolution for: gfid 0x%s"
-                ", hashcount: %d, current hashidx %d",
-                uuid_utoa (cs->resolvefh.gfid),
-                cs->resolvefh.hashcount, cs->hashidx);
-        ret = nfs_root_loc_fill (cs->vol->itable, &cs->resolvedloc);
-
-        if (ret == 0) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Dir will be opened: %s",
-                        cs->resolvedloc.path);
-                ret = nfs_opendir (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                   nfs3_fh_resolve_opendir_cbk, cs);
-        } else if (ret == -ENOENT) {
-                gf_log (GF_NFS3, GF_LOG_TRACE, "Dir needs lookup: %s",
-                        cs->resolvedloc.path);
-                ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                  nfs3_fh_resolve_dir_lookup_cbk, cs);
-        }
+        ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
+                          nfs3_fh_resolve_inode_lookup_cbk, cs);
 
 out:
         return ret;
@@ -2982,8 +3676,8 @@ nfs3_fh_resolve_entry_hard (nfs3_call_state_t *cs)
         nfs_loc_wipe (&cs->resolvedloc);
         nfs_user_root_create (&nfu);
         gf_log (GF_NFS3, GF_LOG_TRACE, "FH hard resolution: gfid: %s "
-                ", entry: %s, hashidx: %d", uuid_utoa (cs->resolvefh.gfid),
-                cs->resolventry, cs->hashidx);
+                ", entry: %s", uuid_utoa (cs->resolvefh.gfid),
+                cs->resolventry);
 
         ret = nfs_entry_loc_fill (cs->vol->itable, cs->resolvefh.gfid,
                                   cs->resolventry, &cs->resolvedloc,
@@ -2992,13 +3686,22 @@ nfs3_fh_resolve_entry_hard (nfs3_call_state_t *cs)
         if (ret == -2) {
                 gf_log (GF_NFS3, GF_LOG_TRACE, "Entry needs lookup: %s",
                         cs->resolvedloc.path);
-                if (nfs3_lookup_op (cs)) {
+		/* If the NFS op is lookup, let the resume callback
+		 * handle the sending of the lookup fop. Similarly,
+		 * if the NFS op is create, let the create call
+		 * go ahead in the resume callback so that an EEXIST gets
+		 * handled at posix without an extra fop at this point.
+		 */
+                if (nfs3_lookup_op (cs) ||
+		    (nfs3_create_op (cs) && !nfs3_create_exclusive_op (cs))) {
                         cs->lookuptype = GF_NFS3_FRESH;
                         cs->resolve_ret = 0;
                         nfs3_call_resume (cs);
-                } else
+                } else {
+			cs->hardresolved = 1;
                         nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
                                     nfs3_fh_resolve_entry_lookup_cbk, cs);
+		}
                 ret = 0;
         } else if (ret == -1) {
                 gf_log (GF_NFS3, GF_LOG_TRACE, "Entry needs parent lookup: %s",
@@ -3022,6 +3725,7 @@ nfs3_fh_resolve_inode (nfs3_call_state_t *cs)
                 return ret;
 
         gf_log (GF_NFS3, GF_LOG_TRACE, "FH needs inode resolution");
+        uuid_copy (cs->resolvedloc.gfid, cs->resolvefh.gfid);
         inode = inode_find (cs->vol->itable, cs->resolvefh.gfid);
         if (!inode)
                 ret = nfs3_fh_resolve_inode_hard (cs);
@@ -3119,6 +3823,11 @@ nfs3_fh_resolve_root (nfs3_call_state_t *cs)
         nfs_user_root_create (&nfu);
         gf_log (GF_NFS3, GF_LOG_TRACE, "Root needs lookup");
         ret = nfs_root_loc_fill (cs->vol->itable, &cs->resolvedloc);
+	if (ret < 0) {
+		gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to lookup root from itable: %s",
+			strerror (-ret));
+		goto out;
+	}
 
         ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
                           nfs3_fh_resolve_root_lookup_cbk, cs);

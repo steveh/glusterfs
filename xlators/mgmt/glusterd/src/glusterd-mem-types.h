@@ -1,22 +1,12 @@
 /*
-   Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
    This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 
 #ifndef __GLUSTERD_MEM_TYPES_H__
 #define __GLUSTERD_MEM_TYPES_H__
@@ -70,8 +60,12 @@ typedef enum gf_gld_mem_types_ {
         gf_gld_mt_mount_comp_container          = gf_common_mt_end + 44,
         gf_gld_mt_mount_component               = gf_common_mt_end + 45,
         gf_gld_mt_mount_spec                    = gf_common_mt_end + 46,
-        gf_gld_mt_nodesrv_t                     = gf_common_mt_end + 47,
-        gf_gld_mt_end                           = gf_common_mt_end + 48,
+        gf_gld_mt_georep_meet_spec              = gf_common_mt_end + 47,
+        gf_gld_mt_nodesrv_t                     = gf_common_mt_end + 48,
+        gf_gld_mt_charptr                       = gf_common_mt_end + 49,
+        gf_gld_mt_hooks_stub_t                  = gf_common_mt_end + 50,
+        gf_gld_mt_hooks_priv_t                  = gf_common_mt_end + 51,
+        gf_gld_mt_end                           = gf_common_mt_end + 52,
 } gf_gld_mem_types_t;
 #endif
 

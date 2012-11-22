@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 /*
@@ -44,12 +35,11 @@ read_ahead (call_frame_t *frame, ra_file_t *file);
 
 int
 ra_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-             int32_t op_ret, int32_t op_errno, fd_t *fd)
+             int32_t op_ret, int32_t op_errno, fd_t *fd, dict_t *xdata)
 {
         ra_conf_t  *conf    = NULL;
         ra_file_t  *file    = NULL;
         int         ret     = 0;
-        long        wbflags = 0;
 
         GF_ASSERT (frame);
         GF_VALIDATE_OR_GOTO (frame->this->name, this, unwind);
@@ -59,8 +49,6 @@ ra_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (op_ret == -1) {
                 goto unwind;
         }
-
-        wbflags = (long)frame->local;
 
         file = GF_CALLOC (1, sizeof (*file), gf_ra_mt_ra_file_t);
         if (!file) {
@@ -73,10 +61,6 @@ ra_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if ((fd->flags & O_DIRECT) || ((fd->flags & O_ACCMODE) == O_WRONLY))
                 file->disabled = 1;
-
-        if (wbflags & GF_OPEN_NOWB) {
-                file->disabled = 1;
-        }
 
         file->offset = (unsigned long long) 0;
         file->conf = conf;
@@ -116,7 +100,7 @@ ra_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 unwind:
         frame->local = NULL;
 
-        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd);
+        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd, xdata);
 
         return 0;
 }
@@ -126,7 +110,7 @@ int
 ra_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                int32_t op_ret, int32_t op_errno, fd_t *fd, inode_t *inode,
                struct iatt *buf, struct iatt *preparent,
-               struct iatt *postparent)
+               struct iatt *postparent, dict_t *xdata)
 {
         ra_conf_t  *conf = NULL;
         ra_file_t  *file = NULL;
@@ -187,7 +171,7 @@ ra_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 unwind:
         STACK_UNWIND_STRICT (create, frame, op_ret, op_errno, fd, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
 
         return 0;
 }
@@ -195,17 +179,15 @@ unwind:
 
 int
 ra_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
-         fd_t *fd, int32_t wbflags)
+         fd_t *fd, dict_t *xdata)
 {
         GF_ASSERT (frame);
         GF_ASSERT (this);
 
-        frame->local = (void *)(long)wbflags;
-
         STACK_WIND (frame, ra_open_cbk,
                     FIRST_CHILD (this),
                     FIRST_CHILD (this)->fops->open,
-                    loc, flags, fd, wbflags);
+                    loc, flags, fd, xdata);
 
         return 0;
 }
@@ -213,7 +195,7 @@ ra_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
 
 int
 ra_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
-           mode_t mode, fd_t *fd, dict_t *params)
+           mode_t mode, mode_t umask, fd_t *fd, dict_t *xdata)
 {
         GF_ASSERT (frame);
         GF_ASSERT (this);
@@ -221,7 +203,7 @@ ra_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
         STACK_WIND (frame, ra_create_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->create,
-                    loc, flags, mode, fd, params);
+                    loc, flags, mode, umask, fd, xdata);
 
         return 0;
 }
@@ -231,7 +213,8 @@ ra_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
 */
 
 static void
-flush_region (call_frame_t *frame, ra_file_t *file, off_t offset, off_t size)
+flush_region (call_frame_t *frame, ra_file_t *file, off_t offset, off_t size,
+              int for_write)
 {
         ra_page_t *trav = NULL;
         ra_page_t *next = NULL;
@@ -243,8 +226,17 @@ flush_region (call_frame_t *frame, ra_file_t *file, off_t offset, off_t size)
                        && trav->offset < (offset + size)) {
 
                         next = trav->next;
-                        if (trav->offset >= offset && !trav->waitq) {
-                                ra_page_purge (trav);
+                        if (trav->offset >= offset) {
+                                if (!trav->waitq) {
+                                        ra_page_purge (trav);
+                                }
+                                else {
+                                        trav->stale = 1;
+
+                                        if (for_write) {
+                                                trav->poisoned = 1;
+                                        }
+                                }
                         }
                         trav = next;
                 }
@@ -352,7 +344,8 @@ out:
 int
 ra_need_atime_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct iovec *vector,
-                   int32_t count, struct iatt *stbuf, struct iobref *iobref)
+                   int32_t count, struct iatt *stbuf, struct iobref *iobref,
+                   dict_t *xdata)
 {
         GF_ASSERT (frame);
         STACK_DESTROY (frame->root);
@@ -392,15 +385,15 @@ dispatch_requests (call_frame_t *frame, ra_file_t *file)
                         trav = ra_page_get (file, trav_offset);
                         if (!trav) {
                                 trav = ra_page_create (file, trav_offset);
+                                if (!trav) {
+                                        local->op_ret = -1;
+                                        local->op_errno = ENOMEM;
+                                        goto unlock;
+                                }
                                 fault = 1;
                                 need_atime_update = 0;
                         }
-
-                        if (!trav) {
-                                local->op_ret = -1;
-                                local->op_errno = ENOMEM;
-                                goto unlock;
-                        }
+                        trav->dirty = 0;
 
                         if (trav->ready) {
                                 gf_log (frame->this->name, GF_LOG_TRACE,
@@ -443,7 +436,7 @@ dispatch_requests (call_frame_t *frame, ra_file_t *file)
                 STACK_WIND (ra_frame, ra_need_atime_cbk,
                             FIRST_CHILD (frame->this),
                             FIRST_CHILD (frame->this)->fops->readv,
-                            file->fd, 1, 1);
+                            file->fd, 1, 1, 0, NULL);
         }
 
 out:
@@ -454,12 +447,13 @@ out:
 int
 ra_readv_disabled_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                        int32_t op_ret, int32_t op_errno, struct iovec *vector,
-                       int32_t count, struct iatt *stbuf, struct iobref *iobref)
+                       int32_t count, struct iatt *stbuf, struct iobref *iobref,
+                       dict_t *xdata)
 {
         GF_ASSERT (frame);
 
         STACK_UNWIND_STRICT (readv, frame, op_ret, op_errno, vector, count,
-                             stbuf, iobref);
+                             stbuf, iobref, xdata);
 
         return 0;
 }
@@ -467,7 +461,7 @@ ra_readv_disabled_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 ra_readv (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
-          off_t offset)
+          off_t offset, uint32_t flags, dict_t *xdata)
 {
         ra_file_t   *file            = NULL;
         ra_local_t  *local           = NULL;
@@ -489,12 +483,8 @@ ra_readv (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
         fd_ctx_get (fd, this, &tmp_file);
         file = (ra_file_t *)(long)tmp_file;
 
-        if (file == NULL) {
-                op_errno = EBADF;
-                gf_log (this->name, GF_LOG_WARNING,
-                        "readv received on fd (%p) with no"
-                        " file set in its context", fd);
-                goto unwind;
+        if (!file || file->disabled) {
+                goto disabled;
         }
 
         if (file->offset != offset) {
@@ -517,18 +507,10 @@ ra_readv (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
         }
 
         if (!expected_offset) {
-                flush_region (frame, file, 0, file->pages.prev->offset + 1);
+                flush_region (frame, file, 0, file->pages.prev->offset + 1, 0);
         }
 
-        if (file->disabled) {
-                STACK_WIND (frame, ra_readv_disabled_cbk,
-                            FIRST_CHILD (frame->this),
-                            FIRST_CHILD (frame->this)->fops->readv,
-                            file->fd, size, offset);
-                return 0;
-        }
-
-        local = (void *) GF_CALLOC (1, sizeof (*local), gf_ra_mt_ra_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 op_errno = ENOMEM;
                 goto unwind;
@@ -548,7 +530,7 @@ ra_readv (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
 
         dispatch_requests (frame, file);
 
-        flush_region (frame, file, 0, floor (offset, file->page_size));
+        flush_region (frame, file, 0, floor (offset, file->page_size), 0);
 
         read_ahead (frame, file);
 
@@ -559,18 +541,26 @@ ra_readv (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (readv, frame, -1, op_errno, NULL, 0, NULL, NULL);
+        STACK_UNWIND_STRICT (readv, frame, -1, op_errno, NULL, 0, NULL, NULL,
+                             NULL);
 
+        return 0;
+
+disabled:
+        STACK_WIND (frame, ra_readv_disabled_cbk,
+                    FIRST_CHILD (frame->this),
+                    FIRST_CHILD (frame->this)->fops->readv,
+                    fd, size, offset, flags, xdata);
         return 0;
 }
 
 
 int
 ra_flush_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
-              int32_t op_errno)
+              int32_t op_errno, dict_t *xdata)
 {
         GF_ASSERT (frame);
-        STACK_UNWIND_STRICT (flush, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (flush, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
@@ -578,16 +568,18 @@ ra_flush_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
 
 int
 ra_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
-              int32_t op_errno, struct iatt *prebuf, struct iatt *postbuf)
+              int32_t op_errno, struct iatt *prebuf, struct iatt *postbuf,
+              dict_t *xdata)
 {
         GF_ASSERT (frame);
-        STACK_UNWIND_STRICT (fsync, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (fsync, frame, op_ret, op_errno, prebuf, postbuf,
+                             xdata);
         return 0;
 }
 
 
 int
-ra_flush (call_frame_t *frame, xlator_t *this, fd_t *fd)
+ra_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 {
         ra_file_t *file     = NULL;
         uint64_t   tmp_file = 0;
@@ -600,28 +592,23 @@ ra_flush (call_frame_t *frame, xlator_t *this, fd_t *fd)
         fd_ctx_get (fd, this, &tmp_file);
 
         file = (ra_file_t *)(long)tmp_file;
-        if (file == NULL) {
-                op_errno = EBADF;
-                gf_log (this->name, GF_LOG_WARNING,
-                        "flush received on fd (%p) with no"
-                        " file set in its context", fd);
-                goto unwind;
+        if (file) {
+                flush_region (frame, file, 0, file->pages.prev->offset+1, 0);
         }
-
-        flush_region (frame, file, 0, file->pages.prev->offset+1);
 
         STACK_WIND (frame, ra_flush_cbk, FIRST_CHILD (this),
-                    FIRST_CHILD (this)->fops->flush, fd);
+                    FIRST_CHILD (this)->fops->flush, fd, xdata);
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (flush, frame, -1, op_errno);
+        STACK_UNWIND_STRICT (flush, frame, -1, op_errno, NULL);
         return 0;
 }
 
 
 int
-ra_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t datasync)
+ra_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t datasync,
+          dict_t *xdata)
 {
         ra_file_t *file     = NULL;
         uint64_t   tmp_file = 0;
@@ -634,22 +621,16 @@ ra_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t datasync)
         fd_ctx_get (fd, this, &tmp_file);
 
         file = (ra_file_t *)(long)tmp_file;
-        if (file == NULL) {
-                op_errno = EBADF;
-                gf_log (this->name, GF_LOG_WARNING,
-                        "fsync received on fd (%p) with no"
-                        " file set in its context", fd);
-                goto unwind;
+        if (file) {
+                flush_region (frame, file, 0, file->pages.prev->offset+1, 0);
         }
 
-        flush_region (frame, file, 0, file->pages.prev->offset+1);
-
         STACK_WIND (frame, ra_fsync_cbk, FIRST_CHILD (this),
-                    FIRST_CHILD (this)->fops->fsync, fd, datasync);
+                    FIRST_CHILD (this)->fops->fsync, fd, datasync, xdata);
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (fsync, frame, -1, op_errno, NULL, NULL);
+        STACK_UNWIND_STRICT (fsync, frame, -1, op_errno, NULL, NULL, NULL);
         return 0;
 }
 
@@ -657,39 +638,29 @@ unwind:
 int
 ra_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-               struct iatt *postbuf)
+               struct iatt *postbuf, dict_t *xdata)
 {
-        fd_t      *fd       = NULL;
         ra_file_t *file     = NULL;
-        uint64_t   tmp_file = 0;
 
         GF_ASSERT (frame);
 
-        fd = frame->local;
+        file = frame->local;
 
-        fd_ctx_get (fd, this, &tmp_file);
-        file = (ra_file_t *)(long)tmp_file;
-
-        if (file == NULL) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "no read-ahead context set in fd (%p)", fd);
-                op_errno = EBADF;
-                op_ret = -1;
-                goto out;
+        if (file) {
+                flush_region (frame, file, 0, file->pages.prev->offset+1, 1);
         }
 
-        flush_region (frame, file, 0, file->pages.prev->offset+1);
-
-out:
         frame->local = NULL;
-        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf,
+                             xdata);
         return 0;
 }
 
 
 int
 ra_writev (call_frame_t *frame, xlator_t *this, fd_t *fd, struct iovec *vector,
-           int32_t count, off_t offset, struct iobref *iobref)
+           int32_t count, off_t offset, uint32_t flags, struct iobref *iobref,
+           dict_t *xdata)
 {
         ra_file_t *file    = NULL;
         uint64_t  tmp_file = 0;
@@ -701,29 +672,22 @@ ra_writev (call_frame_t *frame, xlator_t *this, fd_t *fd, struct iovec *vector,
 
         fd_ctx_get (fd, this, &tmp_file);
         file = (ra_file_t *)(long)tmp_file;
-        if (file == NULL) {
-                op_errno = EBADF;
-                gf_log (this->name, GF_LOG_WARNING, "writev received on fd with"
-                        "no file set in its context");
-                goto unwind;
+        if (file) {
+                flush_region (frame, file, 0, file->pages.prev->offset+1, 1);
+                frame->local = file;
+                /* reset the read-ahead counters too */
+                file->expected = file->page_count = 0;
         }
-
-        flush_region (frame, file, 0, file->pages.prev->offset+1);
-
-        /* reset the read-ahead counters too */
-        file->expected = file->page_count = 0;
-
-        frame->local = fd;
 
         STACK_WIND (frame, ra_writev_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->writev,
-                    fd, vector, count, offset, iobref);
+                    fd, vector, count, offset, flags, iobref, xdata);
 
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (writev, frame, -1, op_errno, NULL, NULL);
+        STACK_UNWIND_STRICT (writev, frame, -1, op_errno, NULL, NULL, NULL);
         return 0;
 }
 
@@ -731,29 +695,30 @@ unwind:
 int
 ra_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                 struct iatt *postbuf)
+                 struct iatt *postbuf, dict_t *xdata)
 {
         GF_ASSERT (frame);
 
         STACK_UNWIND_STRICT (truncate, frame, op_ret, op_errno, prebuf,
-                             postbuf);
+                             postbuf, xdata);
         return 0;
 }
 
 
 int
 ra_attr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-             int32_t op_ret, int32_t op_errno, struct iatt *buf)
+             int32_t op_ret, int32_t op_errno, struct iatt *buf, dict_t *xdata)
 {
         GF_ASSERT (frame);
 
-        STACK_UNWIND_STRICT (stat, frame, op_ret, op_errno, buf);
+        STACK_UNWIND_STRICT (stat, frame, op_ret, op_errno, buf, xdata);
         return 0;
 }
 
 
 int
-ra_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset)
+ra_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset,
+             dict_t *xdata)
 {
         ra_file_t *file     = NULL;
         fd_t      *iter_fd  = NULL;
@@ -775,8 +740,16 @@ ra_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset)
 
                         if (!file)
                                 continue;
+                        /*
+                         * Truncation invalidates reads just like writing does.
+                         * TBD: this seems to flush more than it should.  The
+                         * only time we should flush at all is when we're
+                         * shortening (not lengthening) the file, and then only
+                         * from new EOF to old EOF.  The same problem exists in
+                         * ra_ftruncate.
+                         */
                         flush_region (frame, file, 0,
-                                      file->pages.prev->offset + 1);
+                                      file->pages.prev->offset + 1, 1);
                 }
         }
         UNLOCK (&inode->lock);
@@ -784,11 +757,11 @@ ra_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset)
         STACK_WIND (frame, ra_truncate_cbk,
                     FIRST_CHILD (this),
                     FIRST_CHILD (this)->fops->truncate,
-                    loc, offset);
+                    loc, offset, xdata);
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (truncate, frame, -1, op_errno, NULL, NULL);
+        STACK_UNWIND_STRICT (truncate, frame, -1, op_errno, NULL, NULL, NULL);
         return 0;
 }
 
@@ -810,6 +783,8 @@ ra_page_dump (struct ra_page *page)
         gf_proc_dump_write ("size", "%"PRId64, page->size);
 
         gf_proc_dump_write ("dirty", "%s", page->dirty ? "yes" : "no");
+
+        gf_proc_dump_write ("poisoned", "%s", page->poisoned ? "yes" : "no");
 
         gf_proc_dump_write ("ready", "%s", page->ready ? "yes" : "no");
 
@@ -883,7 +858,7 @@ out:
 }
 
 int
-ra_fstat (call_frame_t *frame, xlator_t *this, fd_t *fd)
+ra_fstat (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 {
         ra_file_t *file     = NULL;
         fd_t      *iter_fd  = NULL;
@@ -906,23 +881,24 @@ ra_fstat (call_frame_t *frame, xlator_t *this, fd_t *fd)
                         if (!file)
                                 continue;
                         flush_region (frame, file, 0,
-                                      file->pages.prev->offset + 1);
+                                      file->pages.prev->offset + 1, 0);
                 }
         }
         UNLOCK (&inode->lock);
 
         STACK_WIND (frame, ra_attr_cbk, FIRST_CHILD (this),
-                    FIRST_CHILD (this)->fops->fstat, fd);
+                    FIRST_CHILD (this)->fops->fstat, fd, xdata);
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (stat, frame, -1, op_errno, NULL);
+        STACK_UNWIND_STRICT (stat, frame, -1, op_errno, NULL, NULL);
         return 0;
 }
 
 
 int
-ra_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset)
+ra_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+              dict_t *xdata)
 {
         ra_file_t *file    = NULL;
         fd_t      *iter_fd = NULL;
@@ -943,18 +919,26 @@ ra_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset)
                         file = (ra_file_t *)(long)tmp_file;
                         if (!file)
                                 continue;
+                        /*
+                         * Truncation invalidates reads just like writing does.
+                         * TBD: this seems to flush more than it should.  The
+                         * only time we should flush at all is when we're
+                         * shortening (not lengthening) the file, and then only
+                         * from new EOF to old EOF.  The same problem exists in
+                         * ra_truncate.
+                         */
                         flush_region (frame, file, 0,
-                                      file->pages.prev->offset + 1);
+                                      file->pages.prev->offset + 1, 1);
                 }
         }
         UNLOCK (&inode->lock);
 
         STACK_WIND (frame, ra_truncate_cbk, FIRST_CHILD (this),
-                    FIRST_CHILD (this)->fops->ftruncate, fd, offset);
+                    FIRST_CHILD (this)->fops->ftruncate, fd, offset, xdata);
         return 0;
 
 unwind:
-        STACK_UNWIND_STRICT (truncate, frame, -1, op_errno, NULL, NULL);
+        STACK_UNWIND_STRICT (truncate, frame, -1, op_errno, NULL, NULL, NULL);
         return 0;
 }
 
@@ -965,6 +949,7 @@ ra_priv_dump (xlator_t *this)
         ra_conf_t       *conf                           = NULL;
         int             ret                             = -1;
         char            key_prefix[GF_DUMP_MAX_BUF_LEN] = {0, };
+        gf_boolean_t    add_section                     = _gf_false;
 
         if (!this) {
                 goto out;
@@ -976,26 +961,32 @@ ra_priv_dump (xlator_t *this)
                 goto out;
         }
 
-        ret = pthread_mutex_trylock (&conf->conf_lock);
-        if (ret) {
-                gf_log (this->name, GF_LOG_WARNING, "Unable to lock client %s "
-                        "(%s)", this->name, strerror (ret));
-                ret = -1;
-                goto out;
-        }
-
         gf_proc_dump_build_key (key_prefix, "xlator.performance.read-ahead",
                                 "priv");
 
         gf_proc_dump_add_section (key_prefix);
-        gf_proc_dump_write ("page_size", "%d", conf->page_size);
-        gf_proc_dump_write ("page_count", "%d", conf->page_count);
-        gf_proc_dump_write ("force_atime_update", "%d", conf->force_atime_update);
+        add_section = _gf_true;
 
+        ret = pthread_mutex_trylock (&conf->conf_lock);
+        if (ret)
+                goto out;
+        {
+                gf_proc_dump_write ("page_size", "%d", conf->page_size);
+                gf_proc_dump_write ("page_count", "%d", conf->page_count);
+                gf_proc_dump_write ("force_atime_update", "%d",
+                                    conf->force_atime_update);
+        }
         pthread_mutex_unlock (&conf->conf_lock);
 
         ret = 0;
 out:
+        if (ret && conf) {
+                if (add_section == _gf_false)
+                        gf_proc_dump_add_section (key_prefix);
+
+                gf_proc_dump_write ("Unable to dump priv",
+                                    "(Lock acquisition failed) %s", this->name);
+        }
         return ret;
 }
 
@@ -1021,16 +1012,31 @@ out:
 }
 
 int
+reconfigure (xlator_t *this, dict_t *options)
+{
+        ra_conf_t      *conf = NULL;
+        int             ret = -1;
+
+        GF_VALIDATE_OR_GOTO ("read-ahead", this, out);
+        GF_VALIDATE_OR_GOTO ("read-ahead", this->private, out);
+
+        conf = this->private;
+
+        GF_OPTION_RECONF ("page-count", conf->page_count, options, uint32, out);
+
+        ret = 0;
+ out:
+        return ret;
+}
+
+int
 init (xlator_t *this)
 {
         ra_conf_t *conf              = NULL;
-        dict_t    *options           = NULL;
-        char      *page_count_string = NULL;
         int32_t    ret               = -1;
 
         GF_VALIDATE_OR_GOTO ("read-ahead", this, out);
 
-        options = this->options;
         if (!this->children || this->children->next) {
                 gf_log (this->name,  GF_LOG_ERROR,
                         "FATAL: read-ahead not configured with exactly one"
@@ -1049,60 +1055,30 @@ init (xlator_t *this)
         }
 
         conf->page_size = this->ctx->page_size;
-        conf->page_count = 4;
 
-        if (dict_get (options, "page-count")) {
-                page_count_string = data_to_str (dict_get (options,
-                                                           "page-count"));
-        }
+        GF_OPTION_INIT ("page-count", conf->page_count, uint32, out);
 
-        if (page_count_string) {
-                if (gf_string2uint_base10 (page_count_string, &conf->page_count)
-                    != 0) {
-                        gf_log ("read-ahead", GF_LOG_ERROR,
-                                "invalid number format \"%s\" of \"option "
-                                "page-count\"",
-                                page_count_string);
-                        goto out;
-                }
-
-                gf_log (this->name, GF_LOG_WARNING,
-                        "Using conf->page_count = %u", conf->page_count);
-        }
-
-        if (dict_get (options, "force-atime-update")) {
-                char *force_atime_update_str = NULL;
-
-                force_atime_update_str
-                        = data_to_str (dict_get (options,
-                                                 "force-atime-update"));
-
-                if (gf_string2boolean (force_atime_update_str,
-                                       &conf->force_atime_update) == -1) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "'force-atime-update' takes only boolean "
-                                "options");
-                        goto out;
-                }
-
-                if (conf->force_atime_update) {
-                        gf_log (this->name, GF_LOG_WARNING, "Forcing atime "
-                                "updates on cache hit");
-                }
-        }
+        GF_OPTION_INIT ("force-atime-update", conf->force_atime_update, bool, out);
 
         conf->files.next = &conf->files;
         conf->files.prev = &conf->files;
 
         pthread_mutex_init (&conf->conf_lock, NULL);
+
+        this->local_pool = mem_pool_new (ra_local_t, 64);
+        if (!this->local_pool) {
+                ret = -1;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to create local_t's memory pool");
+                goto out;
+        }
+
         this->private = conf;
         ret = 0;
 
 out:
         if (ret == -1) {
-                if (conf != NULL) {
-                        GF_FREE (conf);
-                }
+                GF_FREE (conf);
         }
 
         return ret;
@@ -1121,10 +1097,13 @@ fini (xlator_t *this)
                 goto out;
         }
 
+        this->private = NULL;
+
+        GF_ASSERT ((conf->files.next == &conf->files)
+                   && (conf->files.prev == &conf->files));
+
         pthread_mutex_destroy (&conf->conf_lock);
         GF_FREE (conf);
-
-        this->private = NULL;
 
 out:
         return;
@@ -1153,12 +1132,15 @@ struct xlator_dumpops dumpops = {
 
 struct volume_options options[] = {
         { .key  = {"force-atime-update"},
-          .type = GF_OPTION_TYPE_BOOL
+          .type = GF_OPTION_TYPE_BOOL,
+          .default_value = "false"
         },
         { .key  = {"page-count"},
           .type = GF_OPTION_TYPE_INT,
           .min  = 1,
-          .max  = 16
+          .max  = 16,
+          .default_value = "4",
+          .description = "Number of pages that will be pre-fetched"
         },
         { .key = {NULL} },
 };

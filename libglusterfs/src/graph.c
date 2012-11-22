@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -29,28 +20,23 @@
 #include "defaults.h"
 
 
-
-
 #if 0
 static void
 _gf_dump_details (int argc, char **argv)
 {
         extern FILE *gf_log_logfile;
         int          i = 0;
-        char         timestr[256];
+        char         timestr[64];
         time_t       utime = 0;
-        struct tm   *tm = NULL;
         pid_t        mypid = 0;
         struct utsname uname_buf = {{0, }, };
         int            uname_ret = -1;
 
-        utime = time (NULL);
-        tm    = localtime (&utime);
         mypid = getpid ();
         uname_ret   = uname (&uname_buf);
 
-        /* Which git? What time? */
-        strftime (timestr, 256, "%Y-%m-%d %H:%M:%S", tm);
+        utime = time (NULL);
+        gf_time_fmt (timestr, sizeof timestr, utime, gf_timefmt_FT);
         fprintf (gf_log_logfile,
                  "========================================"
                  "========================================\n");
@@ -131,7 +117,8 @@ glusterfs_graph_set_first (glusterfs_graph_t *graph, xlator_t *xl)
 
 int
 glusterfs_graph_insert (glusterfs_graph_t *graph, glusterfs_ctx_t *ctx,
-                        const char *type, const char *name)
+                        const char *type, const char *name,
+                        gf_boolean_t autoload)
 {
         xlator_t        *ixl = NULL;
 
@@ -156,6 +143,8 @@ glusterfs_graph_insert (glusterfs_graph_t *graph, glusterfs_ctx_t *ctx,
         ixl->name  = gf_strdup (name);
         if (!ixl->name)
                 goto err;
+
+        ixl->is_autoloaded = autoload;
 
         if (xlator_set_type (ixl, type) == -1) {
                 gf_log ("glusterfs", GF_LOG_ERROR,
@@ -187,7 +176,7 @@ glusterfs_graph_acl (glusterfs_graph_t *graph, glusterfs_ctx_t *ctx)
                 return 0;
 
         ret = glusterfs_graph_insert (graph, ctx, "system/posix-acl",
-                                      "posix-acl-autoload");
+                                      "posix-acl-autoload", 1);
         return ret;
 }
 
@@ -203,7 +192,7 @@ glusterfs_graph_worm (glusterfs_graph_t *graph, glusterfs_ctx_t *ctx)
                 return 0;
 
         ret = glusterfs_graph_insert (graph, ctx, "features/worm",
-                                      "worm-autoload");
+                                      "worm-autoload", 1);
         return ret;
 }
 
@@ -219,7 +208,7 @@ glusterfs_graph_mac_compat (glusterfs_graph_t *graph, glusterfs_ctx_t *ctx)
                 return 0;
 
         ret = glusterfs_graph_insert (graph, ctx, "features/mac-compat",
-                                      "mac-compat-autoload");
+                                      "mac-compat-autoload", 1);
 
         return ret;
 }
@@ -310,7 +299,7 @@ glusterfs_graph_init (glusterfs_graph_t *graph)
 }
 
 
-static void
+static int
 _log_if_unknown_option (dict_t *dict, char *key, data_t *value, void *data)
 {
         volume_option_t   *found = NULL;
@@ -325,7 +314,7 @@ _log_if_unknown_option (dict_t *dict, char *key, data_t *value, void *data)
                         "option '%s' is not recognized", key);
         }
 
-        return;
+        return 0;
 }
 
 
@@ -349,8 +338,7 @@ fill_uuid (char *uuid, int size)
 {
         char           hostname[256] = {0,};
         struct timeval tv = {0,};
-        struct tm      now = {0, };
-        char           now_str[32];
+        char           now_str[64];
 
         if (gettimeofday (&tv, NULL) == -1) {
                 gf_log ("graph", GF_LOG_ERROR,
@@ -364,8 +352,7 @@ fill_uuid (char *uuid, int size)
                         strerror (errno));
         }
 
-        localtime_r (&tv.tv_sec, &now);
-        strftime (now_str, 32, "%Y/%m/%d-%H:%M:%S", &now);
+        gf_time_fmt (now_str, sizeof now_str, tv.tv_sec, gf_timefmt_Ymd_T);
         snprintf (uuid, size, "%s-%d-%s:%"GF_PRI_SUSECONDS,
                   hostname, getpid(), now_str, tv.tv_usec);
 
@@ -522,18 +509,26 @@ glusterfs_graph_activate (glusterfs_graph_t *graph, glusterfs_ctx_t *ctx)
         return 0;
 }
 
+
 int
 glusterfs_graph_reconfigure (glusterfs_graph_t *oldgraph,
                              glusterfs_graph_t *newgraph)
 {
-        xlator_t *old_xl = NULL;
-        xlator_t *new_xl = NULL;
+        xlator_t   *old_xl   = NULL;
+        xlator_t   *new_xl   = NULL;
 
         GF_ASSERT (oldgraph);
         GF_ASSERT (newgraph);
 
         old_xl   = oldgraph->first;
+        while (old_xl->is_autoloaded) {
+                old_xl = old_xl->children->xlator;
+        }
+
         new_xl   = newgraph->first;
+        while (new_xl->is_autoloaded) {
+                new_xl = new_xl->children->xlator;
+        }
 
         return xlator_tree_reconfigure (old_xl, new_xl);
 }

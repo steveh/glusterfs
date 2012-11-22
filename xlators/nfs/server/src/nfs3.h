@@ -34,11 +34,12 @@
 #include "nfs-common.h"
 #include "xdr-nfs3.h"
 #include "mem-pool.h"
-
+#include "nlm4.h"
+#include "acl3-xdr.h"
+#include "acl3.h"
 #include <sys/statvfs.h>
 
 #define GF_NFS3                 GF_NFS"-nfsv3"
-#define GF_NFS3_PORT            38467
 
 #define GF_NFS3_DEFAULT_MEMFACTOR       15
 #define GF_NFS3_IOBPOOL_MULT            GF_NFS_CONCURRENT_OPS_MULT
@@ -94,7 +95,7 @@ struct nfs3_export {
 #define GF_NFS3_DEFAULT_VOLACCESS       (GF_NFS3_VOLACCESS_RW)
 
 /* The NFSv3 protocol state */
-struct nfs3_state {
+typedef struct nfs3_state {
 
         /* The NFS xlator pointer. The NFS xlator can be running
          * multiple versions of the NFS protocol.
@@ -133,12 +134,34 @@ struct nfs3_state {
         struct list_head        fdlru;
         gf_lock_t               fdlrulock;
         int                     fdcount;
-};
+} nfs3_state_t;
 
 typedef enum nfs3_lookup_type {
         GF_NFS3_REVALIDATE = 1,
         GF_NFS3_FRESH,
 } nfs3_lookup_type_t;
+
+typedef union args_ {
+        nlm4_stat nlm4_stat;
+        nlm4_holder nlm4_holder;
+        nlm4_lock nlm4_lock;
+        nlm4_share nlm4_share;
+        nlm4_testrply nlm4_testrply;
+        nlm4_testres nlm4_testres;
+        nlm4_testargs nlm4_testargs;
+        nlm4_res nlm4_res;
+        nlm4_lockargs nlm4_lockargs;
+        nlm4_cancargs nlm4_cancargs;
+        nlm4_unlockargs nlm4_unlockargs;
+        nlm4_shareargs nlm4_shareargs;
+        nlm4_shareres nlm4_shareres;
+        nlm4_freeallargs nlm4_freeallargs;
+        getaclargs getaclargs;
+        setaclargs setaclargs;
+        getaclreply getaclreply;
+        setaclreply setaclreply;
+} args;
+
 
 typedef int (*nfs3_resume_fn_t) (void *cs);
 /* Structure used to communicate state between a fop and its callback.
@@ -196,6 +219,7 @@ struct nfs3_local {
         mode_t                  mode;
 
         /* NFSv3 FH resolver state */
+	int			hardresolved;
         struct nfs3_fh          resolvefh;
         loc_t                   resolvedloc;
         int                     resolve_ret;
@@ -207,10 +231,29 @@ struct nfs3_local {
         gf_dirent_t             *hashmatch;
         gf_dirent_t             *entrymatch;
         off_t                   lastentryoffset;
+        struct flock            flock;
+        args                    args;
+        nlm4_lkowner_t          lkowner;
+        char                    cookiebytes[1024];
+        struct nfs3_fh          lockfh;
+        int                     monitor;
+        rpc_transport_t         *trans;
+        call_frame_t            *frame;
+
+        /* ACL */
+        aclentry                aclentry[NFS_ACL_MAX_ENTRIES];
+        aclentry                daclentry[NFS_ACL_MAX_ENTRIES];
+        int                     aclcount;
+        char                    aclxattr[NFS_ACL_MAX_ENTRIES*8 + 4];
+        int                     daclcount;
+        char                    daclxattr[NFS_ACL_MAX_ENTRIES*8 + 4];
 };
 
 #define nfs3_is_revalidate_lookup(cst) ((cst)->lookuptype == GF_NFS3_REVALIDATE)
 #define nfs3_lookup_op(cst) (rpcsvc_request_procnum(cst->req) == NFS3_LOOKUP)
+#define nfs3_create_op(cst) (rpcsvc_request_procnum(cst->req) == NFS3_CREATE)
+#define nfs3_create_exclusive_op(cst) ((cst)->createmode == EXCLUSIVE)
+
 typedef struct nfs3_local nfs3_call_state_t;
 
 /* Queue of ops waiting for open fop to return. */

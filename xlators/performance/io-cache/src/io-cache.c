@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -33,9 +24,6 @@
 #include <sys/time.h>
 
 int ioc_log2_page_size;
-
-uint32_t
-ioc_get_priority (ioc_table_t *table, const char *path);
 
 uint32_t
 ioc_get_priority (ioc_table_t *table, const char *path);
@@ -157,15 +145,16 @@ ioc_inode_flush (ioc_inode_t *ioc_inode)
 int32_t
 ioc_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno,
-                 struct iatt *preop, struct iatt *postop)
+                 struct iatt *preop, struct iatt *postop, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (setattr, frame, op_ret, op_errno, preop, postop);
+        STACK_UNWIND_STRICT (setattr, frame, op_ret, op_errno, preop, postop,
+                             xdata);
         return 0;
 }
 
 int32_t
 ioc_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-             struct iatt *stbuf, int32_t valid)
+             struct iatt *stbuf, int32_t valid, dict_t *xdata)
 {
         uint64_t ioc_inode = 0;
 
@@ -177,7 +166,7 @@ ioc_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
                 ioc_inode_flush ((ioc_inode_t *)(long)ioc_inode);
 
         STACK_WIND (frame, ioc_setattr_cbk, FIRST_CHILD (this),
-                    FIRST_CHILD (this)->fops->setattr, loc, stbuf, valid);
+                    FIRST_CHILD (this)->fops->setattr, loc, stbuf, valid, xdata);
 
         return 0;
 }
@@ -185,7 +174,7 @@ ioc_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 int32_t
 ioc_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 int32_t op_ret,	int32_t op_errno, inode_t *inode,
-                struct iatt *stbuf, dict_t *dict, struct iatt *postparent)
+                struct iatt *stbuf, dict_t *xdata, struct iatt *postparent)
 {
         ioc_inode_t *ioc_inode         = NULL;
         ioc_table_t *table             = NULL;
@@ -264,19 +253,18 @@ out:
         }
 
         STACK_UNWIND_STRICT (lookup, frame, op_ret, op_errno, inode, stbuf,
-                             dict, postparent);
+                             xdata, postparent);
         return 0;
 }
 
 int32_t
 ioc_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
-            dict_t *xattr_req)
+            dict_t *xdata)
 {
         ioc_local_t *local    = NULL;
         int32_t      op_errno = -1, ret = -1;
 
-        local = GF_CALLOC (1, sizeof (*local),
-                           gf_ioc_mt_ioc_local_t);
+        local = mem_get0 (this->local_pool);
         if (local == NULL) {
                 op_errno = ENOMEM;
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
@@ -293,7 +281,7 @@ ioc_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         frame->local = local;
 
         STACK_WIND (frame, ioc_lookup_cbk, FIRST_CHILD (this),
-                    FIRST_CHILD (this)->fops->lookup, loc, xattr_req);
+                    FIRST_CHILD (this)->fops->lookup, loc, xdata);
 
         return 0;
 
@@ -325,6 +313,18 @@ ioc_forget (xlator_t *this, inode_t *inode)
         return 0;
 }
 
+static int32_t
+ioc_invalidate(xlator_t *this, inode_t *inode)
+{
+	ioc_inode_t *ioc_inode = NULL;
+
+	inode_ctx_get(inode, this, (uint64_t *) &ioc_inode);
+
+	if (ioc_inode)
+		ioc_inode_flush(ioc_inode);
+
+	return 0;
+}
 
 /*
  * ioc_cache_validate_cbk -
@@ -339,7 +339,8 @@ ioc_forget (xlator_t *this, inode_t *inode)
  */
 int32_t
 ioc_cache_validate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int32_t op_ret, int32_t op_errno, struct iatt *stbuf)
+                        int32_t op_ret, int32_t op_errno, struct iatt *stbuf,
+                        dict_t *xdata)
 {
         ioc_local_t *local        = NULL;
         ioc_inode_t *ioc_inode    = NULL;
@@ -455,8 +456,7 @@ ioc_cache_validate (call_frame_t *frame, ioc_inode_t *ioc_inode, fd_t *fd,
         int32_t       ret            = 0;
 
         local = frame->local;
-        validate_local = GF_CALLOC (1, sizeof (ioc_local_t),
-                                    gf_ioc_mt_ioc_local_t);
+        validate_local = mem_get0 (THIS->local_pool);
         if (validate_local == NULL) {
                 ret = -1;
                 local->op_ret = -1;
@@ -471,7 +471,7 @@ ioc_cache_validate (call_frame_t *frame, ioc_inode_t *ioc_inode, fd_t *fd,
                 ret = -1;
                 local->op_ret = -1;
                 local->op_errno = ENOMEM;
-                GF_FREE (validate_local);
+                mem_put (validate_local);
                 gf_log (ioc_inode->table->xl->name, GF_LOG_ERROR,
                         "out of memory");
                 goto out;
@@ -483,7 +483,7 @@ ioc_cache_validate (call_frame_t *frame, ioc_inode_t *ioc_inode, fd_t *fd,
 
         STACK_WIND (validate_frame, ioc_cache_validate_cbk,
                     FIRST_CHILD (frame->this),
-                    FIRST_CHILD (frame->this)->fops->fstat, fd);
+                    FIRST_CHILD (frame->this)->fops->fstat, fd, NULL);
 
 out:
         return ret;
@@ -530,7 +530,7 @@ ioc_get_priority (ioc_table_t *table, const char *path)
  */
 int32_t
 ioc_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
-              int32_t op_errno, fd_t *fd)
+              int32_t op_errno, fd_t *fd, dict_t *xdata)
 {
         uint64_t     tmp_ioc_inode = 0;
         ioc_local_t *local         = NULL;
@@ -575,10 +575,6 @@ ioc_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
                          */
                         fd_ctx_set (fd, this, 1);
                 }
-                if ((local->wbflags & GF_OPEN_NOWB) != 0) {
-                        /* disable caching as asked by NFS */
-                        fd_ctx_set (fd, this, 1);
-                }
 
                 /* weight = 0, we disable caching on it */
                 if (weight == 0) {
@@ -589,10 +585,10 @@ ioc_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
         }
 
 out:
-        GF_FREE (local);
+        mem_put (local);
         frame->local = NULL;
 
-        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd);
+        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd, xdata);
 
         return 0;
 }
@@ -614,7 +610,7 @@ int32_t
 ioc_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 int32_t op_ret,	int32_t op_errno, fd_t *fd,
                 inode_t *inode,	struct iatt *buf, struct iatt *preparent,
-                struct iatt *postparent)
+                struct iatt *postparent, dict_t *xdata)
 {
         ioc_local_t *local     = NULL;
         ioc_table_t *table     = NULL;
@@ -686,10 +682,10 @@ ioc_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 out:
         frame->local = NULL;
-        GF_FREE (local);
+        mem_put (local);
 
         STACK_UNWIND_STRICT (create, frame, op_ret, op_errno, fd, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
 
         return 0;
 }
@@ -699,7 +695,7 @@ int32_t
 ioc_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                int32_t op_ret, int32_t op_errno, inode_t *inode,
                struct iatt *buf, struct iatt *preparent,
-               struct iatt *postparent)
+               struct iatt *postparent, dict_t *xdata)
 {
         ioc_local_t *local     = NULL;
         ioc_table_t *table     = NULL;
@@ -739,23 +735,22 @@ out:
         frame->local = NULL;
 
         loc_wipe (&local->file_loc);
-        GF_FREE (local);
+        mem_put (local);
 
         STACK_UNWIND_STRICT (mknod, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
 ioc_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
-           dev_t rdev, dict_t *params)
+           dev_t rdev, mode_t umask, dict_t *xdata)
 {
         ioc_local_t *local    = NULL;
         int32_t      op_errno = -1, ret = -1;
 
-        local = GF_CALLOC (1, sizeof (*local),
-                           gf_ioc_mt_ioc_local_t);
+        local = mem_get0 (this->local_pool);
         if (local == NULL) {
                 op_errno = ENOMEM;
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
@@ -774,17 +769,17 @@ ioc_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         STACK_WIND (frame, ioc_mknod_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->mknod,
-                    loc, mode, rdev, params);
+                    loc, mode, rdev, umask, xdata);
         return 0;
 
 unwind:
         if (local != NULL) {
                 loc_wipe (&local->file_loc);
-                GF_FREE (local);
+                mem_put (local);
         }
 
         STACK_UNWIND_STRICT (mknod, frame, -1, op_errno, NULL, NULL,
-                             NULL, NULL);
+                             NULL, NULL, NULL);
 
         return 0;
 }
@@ -800,27 +795,27 @@ unwind:
  */
 int32_t
 ioc_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
-          fd_t *fd, int32_t wbflags)
+          fd_t *fd, dict_t *xdata)
 {
 
         ioc_local_t *local = NULL;
 
-        local = GF_CALLOC (1, sizeof (ioc_local_t), gf_ioc_mt_ioc_local_t);
+        local = mem_get0 (this->local_pool);
         if (local == NULL) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
-                STACK_UNWIND_STRICT (open, frame, -1, ENOMEM, NULL);
+                STACK_UNWIND_STRICT (open, frame, -1, ENOMEM, NULL, NULL);
                 return 0;
         }
 
         local->flags = flags;
         local->file_loc.path = loc->path;
         local->file_loc.inode = loc->inode;
-        local->wbflags = wbflags;
 
         frame->local = local;
 
         STACK_WIND (frame, ioc_open_cbk, FIRST_CHILD(this),
-                    FIRST_CHILD(this)->fops->open, loc, flags, fd, wbflags);
+                    FIRST_CHILD(this)->fops->open, loc, flags, fd,
+                    xdata);
 
         return 0;
 }
@@ -837,15 +832,15 @@ ioc_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
  */
 int32_t
 ioc_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
-            mode_t mode, fd_t *fd, dict_t *params)
+            mode_t mode, mode_t umask, fd_t *fd, dict_t *xdata)
 {
         ioc_local_t *local = NULL;
 
-        local = GF_CALLOC (1, sizeof (ioc_local_t), gf_ioc_mt_ioc_local_t);
+        local = mem_get0 (this->local_pool);
         if (local == NULL) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
                 STACK_UNWIND_STRICT (create, frame, -1, ENOMEM, NULL, NULL,
-                                     NULL, NULL, NULL);
+                                     NULL, NULL, NULL, NULL);
                 return 0;
         }
 
@@ -855,7 +850,7 @@ ioc_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
 
         STACK_WIND (frame, ioc_create_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->create, loc, flags, mode,
-                    fd, params);
+                    umask, fd, xdata);
 
         return 0;
 }
@@ -892,10 +887,10 @@ int32_t
 ioc_readv_disabled_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         int32_t op_ret,	int32_t op_errno, struct iovec *vector,
                         int32_t count, struct iatt *stbuf,
-                        struct iobref *iobref)
+                        struct iobref *iobref, dict_t *xdata)
 {
         STACK_UNWIND_STRICT (readv, frame, op_ret, op_errno, vector, count,
-                             stbuf, iobref);
+                             stbuf, iobref, xdata);
         return 0;
 }
 
@@ -1002,7 +997,8 @@ ioc_dispatch_requests (call_frame_t *frame, ioc_inode_t *ioc_inode, fd_t *fd,
                                                 "cache hit for trav_offset=%"
                                                 PRId64"/local_offset=%"PRId64"",
                                                 trav_offset, local_offset);
-                                        waitq = __ioc_page_wakeup (trav);
+                                        waitq = __ioc_page_wakeup (trav,
+                                                                   trav->op_errno);
                                 } else {
                                         /* if waitq already exists, fstat
                                          * revalidate is
@@ -1019,7 +1015,8 @@ ioc_dispatch_requests (call_frame_t *frame, ioc_inode_t *ioc_inode, fd_t *fd,
                                                 local->op_errno = -ret;
                                                 need_validate = 0;
 
-                                                waitq = __ioc_page_wakeup (trav);
+                                                waitq = __ioc_page_wakeup (trav,
+                                                                           trav->op_errno);
                                                 ioc_inode_unlock (ioc_inode);
 
                                                 ioc_waitq_return (waitq);
@@ -1051,7 +1048,8 @@ ioc_dispatch_requests (call_frame_t *frame, ioc_inode_t *ioc_inode, fd_t *fd,
                         if (ret == -1) {
                                 ioc_inode_lock (ioc_inode);
                                 {
-                                        waitq = __ioc_page_wakeup (trav);
+                                        waitq = __ioc_page_wakeup (trav,
+                                                                   trav->op_errno);
                                 }
                                 ioc_inode_unlock (ioc_inode);
 
@@ -1087,14 +1085,13 @@ out:
  */
 int32_t
 ioc_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
-           size_t size, off_t offset)
+           size_t size, off_t offset, uint32_t flags, dict_t *xdata)
 {
         uint64_t     tmp_ioc_inode = 0;
         ioc_inode_t *ioc_inode     = NULL;
         ioc_local_t *local         = NULL;
         uint32_t     weight        = 0;
         ioc_table_t *table         = NULL;
-        uint32_t     num_pages     = 0;
         int32_t      op_errno      = -1;
 
         if (!this) {
@@ -1108,7 +1105,7 @@ ioc_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
                 STACK_WIND (frame, ioc_readv_disabled_cbk,
                             FIRST_CHILD (frame->this),
                             FIRST_CHILD (frame->this)->fops->readv, fd, size,
-                            offset);
+                            offset, flags, xdata);
                 return 0;
         }
 
@@ -1120,29 +1117,6 @@ ioc_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
                 op_errno = EINVAL;
                 goto out;
         }
-
-
-        ioc_table_lock (table);
-        {
-                if (!table->mem_pool) {
-
-                        num_pages = (table->cache_size / table->page_size)
-                                + ((table->cache_size % table->page_size)
-                                   ? 1 : 0);
-
-                        table->mem_pool
-                                =  mem_pool_new (rbthash_entry_t, num_pages);
-
-                        if (!table->mem_pool) {
-                                gf_log (this->name, GF_LOG_ERROR,
-                                        "Unable to allocate mem_pool");
-                                op_errno = ENOMEM;
-                                ioc_table_unlock (table);
-                                goto out;
-                        }
-                }
-        }
-        ioc_table_unlock (table);
 
         ioc_inode_lock (ioc_inode);
         {
@@ -1167,12 +1141,11 @@ ioc_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
                 STACK_WIND (frame, ioc_readv_disabled_cbk,
                             FIRST_CHILD (frame->this),
                             FIRST_CHILD (frame->this)->fops->readv, fd, size,
-                            offset);
+                            offset, flags, xdata);
                 return 0;
         }
 
-        local = (ioc_local_t *) GF_CALLOC (1, sizeof (ioc_local_t),
-                                           gf_ioc_mt_ioc_local_t);
+        local = mem_get0 (this->local_pool);
         if (local == NULL) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
                 op_errno = ENOMEM;
@@ -1205,7 +1178,8 @@ ioc_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         return 0;
 
 out:
-        STACK_UNWIND_STRICT (readv, frame, -1, op_errno, NULL, 0, NULL, NULL);
+        STACK_UNWIND_STRICT (readv, frame, -1, op_errno, NULL, 0, NULL, NULL,
+                             NULL);
         return 0;
 }
 
@@ -1222,7 +1196,7 @@ out:
 int32_t
 ioc_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 int32_t op_ret,	int32_t op_errno, struct iatt *prebuf,
-                struct iatt *postbuf)
+                struct iatt *postbuf, dict_t *xdata)
 {
         ioc_local_t *local     = NULL;
         uint64_t     ioc_inode = 0;
@@ -1233,7 +1207,8 @@ ioc_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (ioc_inode)
                 ioc_inode_flush ((ioc_inode_t *)(long)ioc_inode);
 
-        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf,
+                             xdata);
         return 0;
 }
 
@@ -1251,16 +1226,16 @@ ioc_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int32_t
 ioc_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
             struct iovec *vector, int32_t count, off_t offset,
-            struct iobref *iobref)
+            uint32_t flags, struct iobref *iobref, dict_t *xdata)
 {
         ioc_local_t *local     = NULL;
         uint64_t     ioc_inode = 0;
 
-        local = GF_CALLOC (1, sizeof (ioc_local_t), gf_ioc_mt_ioc_local_t);
+        local = mem_get0 (this->local_pool);
         if (local == NULL) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
 
-                STACK_UNWIND_STRICT (writev, frame, -1, ENOMEM, NULL, NULL);
+                STACK_UNWIND_STRICT (writev, frame, -1, ENOMEM, NULL, NULL, NULL);
                 return 0;
         }
 
@@ -1274,7 +1249,7 @@ ioc_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         STACK_WIND (frame, ioc_writev_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->writev, fd, vector, count, offset,
-                    iobref);
+                    flags, iobref, xdata);
 
         return 0;
 }
@@ -1293,11 +1268,11 @@ ioc_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 int32_t
 ioc_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                  struct iatt *postbuf)
+                  struct iatt *postbuf, dict_t *xdata)
 {
 
         STACK_UNWIND_STRICT (truncate, frame, op_ret, op_errno, prebuf,
-                             postbuf);
+                             postbuf, xdata);
         return 0;
 }
 
@@ -1316,11 +1291,11 @@ ioc_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int32_t
 ioc_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                   struct iatt *postbuf)
+                   struct iatt *postbuf, dict_t *xdata)
 {
 
         STACK_UNWIND_STRICT (ftruncate, frame, op_ret, op_errno, prebuf,
-                             postbuf);
+                             postbuf, xdata);
         return 0;
 }
 
@@ -1335,7 +1310,8 @@ ioc_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
  *
  */
 int32_t
-ioc_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset)
+ioc_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset,
+              dict_t *xdata)
 {
         uint64_t ioc_inode = 0;
 
@@ -1345,7 +1321,7 @@ ioc_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset)
                 ioc_inode_flush ((ioc_inode_t *)(long)ioc_inode);
 
         STACK_WIND (frame, ioc_truncate_cbk, FIRST_CHILD(this),
-                    FIRST_CHILD(this)->fops->truncate, loc, offset);
+                    FIRST_CHILD(this)->fops->truncate, loc, offset, xdata);
         return 0;
 }
 
@@ -1359,7 +1335,8 @@ ioc_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset)
  *
  */
 int32_t
-ioc_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset)
+ioc_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
+               dict_t *xdata)
 {
         uint64_t ioc_inode = 0;
 
@@ -1369,21 +1346,21 @@ ioc_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset)
                 ioc_inode_flush ((ioc_inode_t *)(long)ioc_inode);
 
         STACK_WIND (frame, ioc_ftruncate_cbk, FIRST_CHILD(this),
-                    FIRST_CHILD(this)->fops->ftruncate, fd, offset);
+                    FIRST_CHILD(this)->fops->ftruncate, fd, offset, xdata);
         return 0;
 }
 
 int32_t
 ioc_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this, int32_t op_ret,
-            int32_t op_errno, struct gf_flock *lock)
+            int32_t op_errno, struct gf_flock *lock, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (lk, frame, op_ret, op_errno, lock);
+        STACK_UNWIND_STRICT (lk, frame, op_ret, op_errno, lock, xdata);
         return 0;
 }
 
 int32_t
 ioc_lk (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t cmd,
-        struct gf_flock *lock)
+        struct gf_flock *lock, dict_t *xdata)
 {
         ioc_inode_t *ioc_inode = NULL;
         uint64_t     tmp_inode = 0;
@@ -1393,7 +1370,7 @@ ioc_lk (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t cmd,
         if (!ioc_inode) {
                 gf_log (this->name, GF_LOG_DEBUG,
                         "inode context is NULL: returning EBADFD");
-                STACK_UNWIND_STRICT (lk, frame, -1, EBADFD, NULL);
+                STACK_UNWIND_STRICT (lk, frame, -1, EBADFD, NULL, NULL);
                 return 0;
         }
 
@@ -1404,7 +1381,36 @@ ioc_lk (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t cmd,
         ioc_inode_unlock (ioc_inode);
 
         STACK_WIND (frame, ioc_lk_cbk, FIRST_CHILD (this),
-                    FIRST_CHILD (this)->fops->lk, fd, cmd, lock);
+                    FIRST_CHILD (this)->fops->lk, fd, cmd, lock, xdata);
+
+        return 0;
+}
+
+int
+ioc_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                  int op_ret, int op_errno, gf_dirent_t *entries, dict_t *xdata)
+{
+        gf_dirent_t *entry = NULL;
+
+        if (op_ret <= 0)
+                goto unwind;
+
+        list_for_each_entry (entry, &entries->list, list) {
+                /* TODO: fill things */
+        }
+
+unwind:
+        STACK_UNWIND_STRICT (readdirp, frame, op_ret, op_errno, entries, xdata);
+
+        return 0;
+}
+int
+ioc_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
+              off_t offset, dict_t *dict)
+{
+        STACK_WIND (frame, ioc_readdirp_cbk,
+                    FIRST_CHILD(this), FIRST_CHILD(this)->fops->readdirp,
+                    fd, size, offset, dict);
 
         return 0;
 }
@@ -1489,13 +1495,9 @@ ioc_get_priority_list (const char *opt_str, struct list_head *first)
                 stripe_str = strtok_r (NULL, ",", &tmp_str);
         }
 out:
-        if (string != NULL) {
-                GF_FREE (string);
-        }
+        GF_FREE (string);
 
-        if (dup_str != NULL) {
-                GF_FREE (dup_str);
-        }
+        GF_FREE (dup_str);
 
         if (max_pri == -1) {
                 list_for_each_entry_safe (curr, tmp, first, list) {
@@ -1528,7 +1530,7 @@ mem_acct_init (xlator_t *this)
 }
 
 
-gf_boolean_t
+static gf_boolean_t
 check_cache_size_ok (xlator_t *this, uint64_t cache_size)
 {
         gf_boolean_t            ret = _gf_true;
@@ -1551,7 +1553,7 @@ check_cache_size_ok (xlator_t *this, uint64_t cache_size)
         else
                 max_cache_size = total_mem;
 
-        gf_log (this->name, GF_LOG_INFO, "Max cache size is %"PRIu64,
+        gf_log (this->name, GF_LOG_DEBUG, "Max cache size is %"PRIu64,
                 max_cache_size);
 
         if (cache_size > max_cache_size) {
@@ -1647,6 +1649,7 @@ init (xlator_t *this)
         int32_t          ret               = -1;
         glusterfs_ctx_t *ctx               = NULL;
         data_t          *data              = 0;
+        uint32_t         num_pages         = 0;
 
         xl_options = this->options;
 
@@ -1722,8 +1725,28 @@ init (xlator_t *this)
         for (index = 0; index < (table->max_pri); index++)
                 INIT_LIST_HEAD (&table->inode_lru[index]);
 
+        this->local_pool = mem_pool_new (ioc_local_t, 64);
+        if (!this->local_pool) {
+                ret = -1;
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to create local_t's memory pool");
+                goto out;
+        }
+
         pthread_mutex_init (&table->table_lock, NULL);
         this->private = table;
+
+        num_pages = (table->cache_size / table->page_size)
+                + ((table->cache_size % table->page_size)
+                   ? 1 : 0);
+
+        table->mem_pool = mem_pool_new (rbthash_entry_t, num_pages);
+        if (!table->mem_pool) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Unable to allocate mem_pool");
+                goto out;
+        }
+
         ret = 0;
 
         ctx = this->ctx;
@@ -1783,7 +1806,16 @@ void
 __ioc_page_dump (ioc_page_t *page, char *prefix)
 {
 
-        ioc_page_lock (page);
+        int    ret = -1;
+
+        if (!page)
+                return;
+        /* ioc_page_lock can be used to hold the mutex. But in statedump
+         * its better to use trylock to avoid deadlocks.
+         */
+        ret = pthread_mutex_trylock (&page->page_lock);
+        if (ret)
+                goto out;
         {
                 gf_proc_dump_write ("offset", "%"PRId64, page->offset);
                 gf_proc_dump_write ("size", "%"PRId64, page->size);
@@ -1791,7 +1823,14 @@ __ioc_page_dump (ioc_page_t *page, char *prefix)
                 gf_proc_dump_write ("ready", "%s", page->ready ? "yes" : "no");
                 ioc_page_waitq_dump (page, prefix);
         }
-        ioc_page_unlock (page);
+        pthread_mutex_unlock (&page->page_lock);
+
+out:
+        if (ret && page)
+                gf_proc_dump_write ("Unable to dump the page information",
+                                    "(Lock acquisition failed) %p", page);
+
+        return;
 }
 
 void
@@ -1801,7 +1840,6 @@ __ioc_cache_dump (ioc_inode_t *ioc_inode, char *prefix)
         ioc_table_t *table                    = NULL;
         ioc_page_t  *page                     = NULL;
         int          i                        = 0;
-        struct tm   *tm                       = NULL;
         char         key[GF_DUMP_MAX_BUF_LEN] = {0, };
         char         timestr[256]             = {0, };
 
@@ -1811,12 +1849,15 @@ __ioc_cache_dump (ioc_inode_t *ioc_inode, char *prefix)
 
         table = ioc_inode->table;
 
-        tm = localtime (&ioc_inode->cache.tv.tv_sec);
-        strftime (timestr, 256, "%Y-%m-%d %H:%M:%S", tm);
-        snprintf (timestr + strlen (timestr), 256 - strlen (timestr),
-                  ".%"GF_PRI_SUSECONDS, ioc_inode->cache.tv.tv_usec);
+        if (ioc_inode->cache.tv.tv_sec) {
+                gf_time_fmt (timestr, sizeof timestr,
+                             ioc_inode->cache.tv.tv_sec, gf_timefmt_FT);
+                snprintf (timestr + strlen (timestr), sizeof timestr - strlen (timestr),
+                          ".%"GF_PRI_SUSECONDS, ioc_inode->cache.tv.tv_usec);
 
-        gf_proc_dump_write ("last-cache-validation-time", "%s", timestr);
+                gf_proc_dump_write ("last-cache-validation-time", "%s",
+                                    timestr);
+        }
 
         for (offset = 0; offset < ioc_inode->ia_size;
              offset += table->page_size) {
@@ -1833,41 +1874,88 @@ out:
 }
 
 
-void
-ioc_inode_dump (ioc_inode_t *ioc_inode, char *prefix)
+int
+ioc_inode_dump (xlator_t *this, inode_t *inode)
 {
 
-       if ((ioc_inode == NULL) || (prefix == NULL)) {
-                goto out;
-        }
+        char          *path                           = NULL;
+        int           ret                             = -1;
+        char          key_prefix[GF_DUMP_MAX_BUF_LEN] = {0, };
+        uint64_t      tmp_ioc_inode                   = 0;
+        ioc_inode_t   *ioc_inode                      = NULL;
+        gf_boolean_t  section_added                   = _gf_false;
+        char          uuid_str[64]                    = {0,};
 
-        ioc_inode_lock (ioc_inode);
+        if (this == NULL || inode == NULL)
+                goto out;
+
+        gf_proc_dump_build_key (key_prefix, "io-cache", "inode");
+
+        inode_ctx_get (inode, this, &tmp_ioc_inode);
+        ioc_inode = (ioc_inode_t *)(long)tmp_ioc_inode;
+        if (ioc_inode == NULL)
+                goto out;
+
+        gf_proc_dump_add_section (key_prefix);
+        section_added = _gf_true;
+
+        /* Similar to ioc_page_dump function its better to use
+         * pthread_mutex_trylock and not to use gf_log in statedump
+         * to avoid deadlocks.
+         */
+        ret = pthread_mutex_trylock (&ioc_inode->inode_lock);
+        if (ret)
+                goto out;
+        else
         {
                 gf_proc_dump_write ("inode.weight", "%d", ioc_inode->weight);
-                __ioc_cache_dump (ioc_inode, prefix);
-                __ioc_inode_waitq_dump (ioc_inode, prefix);
+
+                //inode_path takes blocking lock on the itable.
+                __inode_path (ioc_inode->inode, NULL, &path);
+
+                if (path) {
+                        gf_proc_dump_write ("path", "%s", path);
+                        GF_FREE (path);
+                }
+                gf_proc_dump_write ("uuid", "%s", uuid_utoa_r
+                                    (ioc_inode->inode->gfid, uuid_str));
+                __ioc_cache_dump (ioc_inode, key_prefix);
+                __ioc_inode_waitq_dump (ioc_inode, key_prefix);
+
+                pthread_mutex_unlock (&ioc_inode->inode_lock);
         }
-        ioc_inode_unlock (ioc_inode);
+
 out:
-        return;
+        if (ret && ioc_inode) {
+                if (section_added == _gf_false)
+                        gf_proc_dump_add_section (key_prefix);
+                gf_proc_dump_write ("Unable to print the status of ioc_inode",
+                                    "(Lock acquisition failed) %s",
+                                    uuid_utoa (inode->gfid));
+        }
+        return ret;
 }
 
 int
 ioc_priv_dump (xlator_t *this)
 {
         ioc_table_t *priv                            = NULL;
-        ioc_inode_t *ioc_inode                       = NULL;
         char         key_prefix[GF_DUMP_MAX_BUF_LEN] = {0, };
+        int          ret                             = -1;
+        gf_boolean_t add_section                     = _gf_false;
 
         if (!this || !this->private)
                 goto out;
 
         priv = this->private;
-        gf_proc_dump_build_key (key_prefix, "xlator.performance.io-cache",
-                                "priv");
-        gf_proc_dump_add_section (key_prefix);
 
-        ioc_table_lock (priv);
+        gf_proc_dump_build_key (key_prefix, "io-cache", "priv");
+        gf_proc_dump_add_section (key_prefix);
+        add_section = _gf_true;
+
+        ret = pthread_mutex_trylock (&priv->table_lock);
+        if (ret)
+                goto out;
         {
                 gf_proc_dump_write ("page_size", "%ld", priv->page_size);
                 gf_proc_dump_write ("cache_size", "%ld", priv->cache_size);
@@ -1876,13 +1964,20 @@ ioc_priv_dump (xlator_t *this)
                 gf_proc_dump_write ("cache_timeout", "%u", priv->cache_timeout);
                 gf_proc_dump_write ("min-file-size", "%u", priv->min_file_size);
                 gf_proc_dump_write ("max-file-size", "%u", priv->max_file_size);
-
-                list_for_each_entry (ioc_inode, &priv->inodes, inode_list) {
-                        ioc_inode_dump (ioc_inode, key_prefix);
-                }
         }
-        ioc_table_unlock (priv);
+        pthread_mutex_unlock (&priv->table_lock);
 out:
+        if (ret && priv) {
+                if (!add_section) {
+                        gf_proc_dump_build_key (key_prefix, "xlator."
+                                                "performance.io-cache", "priv");
+                        gf_proc_dump_add_section (key_prefix);
+                }
+                gf_proc_dump_write ("Unable to dump the state of private "
+                                    "structure of io-cache xlator", "(Lock "
+                                    "acquisition failed) %s", this->name);
+        }
+
         return 0;
 }
 
@@ -1895,18 +1990,33 @@ out:
 void
 fini (xlator_t *this)
 {
-        ioc_table_t *table = NULL;
+        ioc_table_t         *table = NULL;
+        struct ioc_priority *curr  = NULL, *tmp = NULL;
+        int                  i     = 0;
 
         table = this->private;
 
         if (table == NULL)
                 return;
 
+        this->private = NULL;
+
         if (table->mem_pool != NULL) {
                 mem_pool_destroy (table->mem_pool);
                 table->mem_pool = NULL;
         }
 
+        list_for_each_entry_safe (curr, tmp, &table->priority_list, list) {
+                list_del_init (&curr->list);
+                GF_FREE (curr->pattern);
+                GF_FREE (curr);
+        }
+
+        for (i = 0; i < table->max_pri; i++) {
+                GF_ASSERT (list_empty (&table->inode_lru[i]));
+        }
+
+        GF_ASSERT (list_empty (&table->inodes));
         pthread_mutex_destroy (&table->table_lock);
         GF_FREE (table);
 
@@ -1924,22 +2034,26 @@ struct xlator_fops fops = {
         .lookup      = ioc_lookup,
         .lk          = ioc_lk,
         .setattr     = ioc_setattr,
-        .mknod       = ioc_mknod
+        .mknod       = ioc_mknod,
+
+        .readdirp    = ioc_readdirp,
 };
 
 
 struct xlator_dumpops dumpops = {
         .priv        = ioc_priv_dump,
+        .inodectx    = ioc_inode_dump,
 };
 
 struct xlator_cbks cbks = {
         .forget      = ioc_forget,
-        .release     = ioc_release
+        .release     = ioc_release,
+	.invalidate  = ioc_invalidate,
 };
 
 struct volume_options options[] = {
         { .key  = {"priority"},
-          .type = GF_OPTION_TYPE_ANY,
+          .type = GF_OPTION_TYPE_PRIORITY_LIST,
           .default_value = "",
           .description = "Assigns priority to filenames with specific "
           "patterns so that when a page needs to be ejected "

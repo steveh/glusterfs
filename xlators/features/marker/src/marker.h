@@ -1,21 +1,12 @@
-/*Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+/*
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _MARKER_H
 #define _MARKER_H
 
@@ -103,8 +94,26 @@ struct marker_local{
         call_stub_t    *stub;
         int64_t         contribution;
         struct marker_local *oplocal;
+
+        /* marker quota specific */
+        int64_t delta;
+        int64_t d_off;
+        int64_t sum;
+        int64_t size;
+        int32_t hl_count;
+        int32_t dentry_child_count;
+
+        fd_t         *fd;
+        call_frame_t *frame;
+
+        quota_inode_ctx_t    *ctx;
+        inode_contribution_t *contri;
+
+        int xflag;
 };
 typedef struct marker_local marker_local_t;
+
+#define quota_local_t marker_local_t
 
 struct marker_inode_ctx {
         struct quota_inode_ctx *quota_ctx;

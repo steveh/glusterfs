@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2010-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -48,7 +38,6 @@ cli_rl_out (struct cli_state *state, const char *fmt, va_list ap)
 {
         int tmp_rl_point = rl_point;
         int            n = rl_end;
-        int            i = 0;
         int            ret = 0;
 
         if (rl_end >= 0 ) {
@@ -56,17 +45,40 @@ cli_rl_out (struct cli_state *state, const char *fmt, va_list ap)
                 rl_redisplay ();
         }
 
-        printf ("\r");
-
-        for (i = 0; i <= strlen (state->prompt); i++)
-                printf (" ");
-
-        printf ("\r");
+        printf ("\r%*s\r", (int)strlen (state->prompt), "");
 
         ret = vprintf (fmt, ap);
 
         printf ("\n");
         fflush(stdout);
+
+        if (n) {
+                rl_do_undo ();
+                rl_point = tmp_rl_point;
+                rl_reset_line_state ();
+        }
+
+        return ret;
+}
+
+int
+cli_rl_err (struct cli_state *state, const char *fmt, va_list ap)
+{
+        int tmp_rl_point = rl_point;
+        int            n = rl_end;
+        int            ret = 0;
+
+        if (rl_end >= 0 ) {
+                rl_kill_text (0, rl_end);
+                rl_redisplay ();
+        }
+
+        fprintf (stderr, "\r%*s\r", (int)strlen (state->prompt), "");
+
+        ret = vfprintf (stderr, fmt, ap);
+
+        fprintf (stderr, "\n");
+        fflush(stderr);
 
         if (n) {
                 rl_do_undo ();
@@ -204,8 +216,7 @@ cli_rl_tokenize (const char *text)
         }
 
 out:
-        if (copy)
-                free (copy);
+        free (copy);
 
         if (i < count) {
                 cli_cmd_tokens_destroy (tokens);
@@ -352,7 +363,7 @@ cli_rl_input (void *_data)
         for (;;) {
                 line = readline (state->prompt);
                 if (!line)
-                        break;
+                        exit(0);  //break;
 
                 cli_rl_process_line (line);
 

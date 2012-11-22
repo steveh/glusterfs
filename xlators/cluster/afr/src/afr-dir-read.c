@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -51,7 +42,7 @@
 
 int
 afr_examine_dir_sh_unwind (call_frame_t *frame, xlator_t *this, int32_t op_ret,
-                           int32_t op_errno)
+                           int32_t op_errno, int32_t sh_failed)
 {
         afr_local_t *local  = NULL;
 
@@ -60,7 +51,7 @@ afr_examine_dir_sh_unwind (call_frame_t *frame, xlator_t *this, int32_t op_ret,
         afr_set_opendir_done (this, local->fd->inode);
 
         AFR_STACK_UNWIND (opendir, frame, local->op_ret,
-                          local->op_errno, local->fd);
+                          local->op_errno, local->fd, NULL);
 
         return 0;
 }
@@ -99,7 +90,7 @@ __checksums_differ (uint32_t *checksum, int child_count,
 int32_t
 afr_examine_dir_readdir_cbk (call_frame_t *frame, void *cookie,
                              xlator_t *this, int32_t op_ret, int32_t op_errno,
-                             gf_dirent_t *entries)
+                             gf_dirent_t *entries, dict_t *xdata)
 {
         afr_private_t *   priv        = NULL;
         afr_local_t *     local       = NULL;
@@ -137,7 +128,7 @@ afr_examine_dir_readdir_cbk (call_frame_t *frame, void *cookie,
         }
 
         list_for_each_entry_safe (entry, tmp, &entries->list, list) {
-                entry_cksum = gf_rsync_weak_checksum (entry->d_name,
+                entry_cksum = gf_rsync_weak_checksum ((unsigned char *)entry->d_name,
                                                       strlen (entry->d_name));
                 local->cont.opendir.checksum[child_index] ^= entry_cksum;
         }
@@ -152,7 +143,7 @@ afr_examine_dir_readdir_cbk (call_frame_t *frame, void *cookie,
                            (void *) (long) child_index,
                            priv->children[child_index],
                            priv->children[child_index]->fops->readdir,
-                           local->fd, 131072, last_offset);
+                           local->fd, 131072, last_offset, NULL);
 
         return 0;
 
@@ -175,7 +166,7 @@ out:
                         afr_set_opendir_done (this, inode);
 
                         AFR_STACK_UNWIND (opendir, frame, local->op_ret,
-                                          local->op_errno, local->fd);
+                                          local->op_errno, local->fd, NULL);
                 }
         }
 
@@ -208,7 +199,7 @@ afr_examine_dir (call_frame_t *frame, xlator_t *this)
                                            (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->readdir,
-                                           local->fd, 131072, 0);
+                                           local->fd, 131072, 0, NULL);
 
                         if (!--call_count)
                                 break;
@@ -222,7 +213,7 @@ afr_examine_dir (call_frame_t *frame, xlator_t *this)
 int32_t
 afr_opendir_cbk (call_frame_t *frame, void *cookie,
                  xlator_t *this, int32_t op_ret, int32_t op_errno,
-                 fd_t *fd)
+                 fd_t *fd, dict_t *xdata)
 {
         afr_private_t *priv              = NULL;
         afr_local_t   *local             = NULL;
@@ -242,8 +233,7 @@ afr_opendir_cbk (call_frame_t *frame, void *cookie,
         {
                 if (op_ret >= 0) {
                         local->op_ret = op_ret;
-                        ret = afr_child_fd_ctx_set (this, fd, child_index,
-                                                    0, 0);
+                        ret = afr_child_fd_ctx_set (this, fd, child_index, 0);
                         if (ret) {
                                 local->op_ret = -1;
                                 local->op_errno = -ret;
@@ -291,7 +281,7 @@ unlock:
 
 out:
         AFR_STACK_UNWIND (opendir, frame, local->op_ret,
-                          local->op_errno, local->fd);
+                          local->op_errno, local->fd, NULL);
 
         return 0;
 }
@@ -307,7 +297,6 @@ afr_opendir (call_frame_t *frame, xlator_t *this,
         int             i           = 0;
         int             ret         = -1;
         int             call_count  = -1;
-        int32_t         op_ret      = -1;
         int32_t         op_errno    = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -318,16 +307,15 @@ afr_opendir (call_frame_t *frame, xlator_t *this,
 
         child_count = priv->child_count;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
+
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         loc_copy (&local->loc, loc);
 
-        frame->local = local;
         local->fd    = fd_ref (fd);
 
         call_count = local->call_count;
@@ -338,18 +326,17 @@ afr_opendir (call_frame_t *frame, xlator_t *this,
                                            (void*) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->opendir,
-                                           loc, fd);
+                                           loc, fd, NULL);
 
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (opendir, frame, op_ret, op_errno, fd);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (opendir, frame, -1, op_errno, fd, NULL);
 
         return 0;
 }
@@ -479,27 +466,9 @@ afr_forget_entries (fd_t *fd)
 int32_t
 afr_readdir_cbk (call_frame_t *frame, void *cookie,
                  xlator_t *this, int32_t op_ret, int32_t op_errno,
-                 gf_dirent_t *entries)
+                 gf_dirent_t *entries, dict_t *xdata)
 {
-        afr_local_t *   local       = NULL;
-        gf_dirent_t *   entry       = NULL;
-        gf_dirent_t *   tmp         = NULL;
-
-        local = frame->local;
-
-        if (op_ret == -1)
-                goto out;
-
-        list_for_each_entry_safe (entry, tmp, &entries->list, list) {
-                if ((local->fd->inode == local->fd->inode->table->root)
-                    && !strcmp (entry->d_name, GF_REPLICATE_TRASH_DIR)) {
-                        list_del_init (&entry->list);
-                        GF_FREE (entry);
-                }
-        }
-
-out:
-        AFR_STACK_UNWIND (readdir, frame, op_ret, op_errno, entries);
+        AFR_STACK_UNWIND (readdir, frame, op_ret, op_errno, entries, NULL);
 
         return 0;
 }
@@ -507,15 +476,14 @@ out:
 
 int32_t
 afr_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                  int32_t op_ret, int32_t op_errno, gf_dirent_t *entries)
+                  int32_t op_ret, int32_t op_errno, gf_dirent_t *entries,
+                  dict_t *xdata)
 {
         afr_private_t *  priv            = NULL;
         afr_local_t *    local           = NULL;
         xlator_t **      children        = NULL;
         int32_t          next_call_child = -1;
         int              ret             = 0;
-        gf_dirent_t *    entry           = NULL;
-        gf_dirent_t *    tmp             = NULL;
         int32_t          *last_index     = NULL;
         int32_t          read_child      = -1;
         int32_t         *fresh_children   = NULL;
@@ -573,18 +541,9 @@ afr_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                            children[next_call_child],
                                            children[next_call_child]->fops->readdirp,
                                            local->fd,
-                                           local->cont.readdir.size, 0);
+                                           local->cont.readdir.size, 0,
+                                           local->cont.readdir.dict);
                         return 0;
-                }
-        }
-
-        if (op_ret != -1) {
-                list_for_each_entry_safe (entry, tmp, &entries->list, list) {
-                        if ((local->fd->inode == local->fd->inode->table->root)
-                            && !strcmp (entry->d_name, GF_REPLICATE_TRASH_DIR)) {
-                                list_del_init (&entry->list);
-                                GF_FREE (entry);
-                        }
                 }
         }
 
@@ -615,7 +574,8 @@ afr_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                                    (void *) (long) read_child,
                                                    children[call_child],
                                                    children[call_child]->fops->readdirp,
-                                                   local->fd, local->cont.readdir.size, offset);
+                                                   local->fd, local->cont.readdir.size, offset,
+                                                   local->cont.readdir.dict);
                                 return 0;
                         }
                 } else {
@@ -624,14 +584,14 @@ afr_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
 out:
-        AFR_STACK_UNWIND (readdirp, frame, op_ret, op_errno, entries);
+        AFR_STACK_UNWIND (readdirp, frame, op_ret, op_errno, entries, NULL);
 
         return 0;
 }
 
 int32_t
 afr_do_readdir (call_frame_t *frame, xlator_t *this,
-                fd_t *fd, size_t size, off_t offset, int whichop)
+                fd_t *fd, size_t size, off_t offset, int whichop, dict_t *dict)
 {
         afr_private_t *  priv       = NULL;
         xlator_t **      children   = NULL;
@@ -640,7 +600,6 @@ afr_do_readdir (call_frame_t *frame, xlator_t *this,
         uint64_t         ctx        = 0;
         afr_fd_ctx_t    *fd_ctx     = NULL;
         int              ret        = -1;
-        int32_t          op_ret     = -1;
         int32_t          op_errno   = 0;
         uint64_t         read_child = 0;
 
@@ -651,14 +610,12 @@ afr_do_readdir (call_frame_t *frame, xlator_t *this,
         priv     = this->private;
         children = priv->children;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
-        frame->local = local;
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         local->fresh_children = afr_children_create (priv->child_count);
         if (!local->fresh_children) {
@@ -668,18 +625,18 @@ afr_do_readdir (call_frame_t *frame, xlator_t *this,
 
         read_child = afr_inode_get_read_ctx (this, fd->inode,
                                              local->fresh_children);
-        op_ret = afr_get_call_child (this, local->child_up, read_child,
+        ret = afr_get_call_child (this, local->child_up, read_child,
                                      local->fresh_children,
                                      &call_child,
                                      &local->cont.readdir.last_index);
-        if (op_ret < 0) {
-                op_errno = -op_ret;
-                op_ret = -1;
+        if (ret < 0) {
+                op_errno = -ret;
                 goto out;
         }
 
         local->fd                  = fd_ref (fd);
         local->cont.readdir.size   = size;
+        local->cont.readdir.dict   = (dict)? dict_ref (dict) : NULL;
 
         if (priv->strict_readdir) {
                 ret = fd_ctx_get (fd, this, &ctx);
@@ -710,37 +667,36 @@ afr_do_readdir (call_frame_t *frame, xlator_t *this,
                                    (void *) (long) call_child,
                                    children[call_child],
                                    children[call_child]->fops->readdir, fd,
-                                   size, offset);
+                                   size, offset, dict);
         else
                 STACK_WIND_COOKIE (frame, afr_readdirp_cbk,
                                    (void *) (long) call_child,
                                    children[call_child],
                                    children[call_child]->fops->readdirp, fd,
-                                   size, offset);
+                                   size, offset, dict);
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (readdir, frame, op_ret, op_errno, NULL);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (readdir, frame, -1, op_errno, NULL, NULL);
         return 0;
 }
 
 
 int32_t
 afr_readdir (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
-             off_t offset)
+             off_t offset, dict_t *xdata)
 {
-        afr_do_readdir (frame, this, fd, size, offset, GF_FOP_READDIR);
+        afr_do_readdir (frame, this, fd, size, offset, GF_FOP_READDIR, xdata);
         return 0;
 }
 
 
 int32_t
 afr_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
-              off_t offset)
+              off_t offset, dict_t *dict)
 {
-        afr_do_readdir (frame, this, fd, size, offset, GF_FOP_READDIRP);
+        afr_do_readdir (frame, this, fd, size, offset, GF_FOP_READDIRP, dict);
         return 0;
 }
 

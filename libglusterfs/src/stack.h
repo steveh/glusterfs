@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 /*
@@ -44,6 +35,7 @@ typedef struct _call_pool_t call_pool_t;
 #include "list.h"
 #include "common-utils.h"
 #include "globals.h"
+#include "lkowner.h"
 
 #define NFS_PID 1
 #define LOW_PRIO_PROC_PID -1
@@ -99,15 +91,16 @@ struct _call_stack_t {
                 };
         };
         call_pool_t                  *pool;
+        gf_lock_t                     stack_lock;
         void                         *trans;
         uint64_t                      unique;
         void                         *state;  /* pointer to request state */
         uid_t                         uid;
         gid_t                         gid;
         pid_t                         pid;
-        uint32_t                      ngrps;
-        uint32_t                      groups[GF_REQUEST_MAXGROUPS];
-        uint64_t                      lk_owner;
+        uint16_t                      ngrps;
+        uint32_t                      groups[GF_MAX_AUX_GROUPS];
+        gf_lkowner_t                  lk_owner;
 
         call_frame_t                  frames;
 
@@ -153,7 +146,7 @@ FRAME_DESTROY (call_frame_t *frame)
         mem_put (frame);
 
         if (local)
-                GF_FREE (local);
+                mem_put (local);
 }
 
 
@@ -175,6 +168,7 @@ STACK_DESTROY (call_stack_t *stack)
         }
 
         LOCK_DESTROY (&stack->frames.lock);
+        LOCK_DESTROY (&stack->stack_lock);
 
         while (stack->frames.next) {
                 FRAME_DESTROY (stack->frames.next);
@@ -182,9 +176,26 @@ STACK_DESTROY (call_stack_t *stack)
         mem_put (stack);
 
         if (local)
-                GF_FREE (local);
+                mem_put (local);
 }
 
+static inline void
+STACK_RESET (call_stack_t *stack)
+{
+        void *local = NULL;
+
+        if (stack->frames.local) {
+                local = stack->frames.local;
+                stack->frames.local = NULL;
+        }
+
+        while (stack->frames.next) {
+                FRAME_DESTROY (stack->frames.next);
+        }
+
+        if (local)
+                mem_put (local);
+}
 
 #define cbk(x) cbk_##x
 
@@ -218,23 +229,41 @@ STACK_DESTROY (call_stack_t *stack)
                 }                                                       \
                 typeof(fn##_cbk) tmp_cbk = rfn;                         \
                 _new->root = frame->root;                               \
-                _new->next = frame->root->frames.next;                  \
-                _new->prev = &frame->root->frames;                      \
-                if (frame->root->frames.next)                           \
-                        frame->root->frames.next->prev = _new;          \
-                frame->root->frames.next = _new;                        \
                 _new->this = obj;                                       \
                 _new->ret = (ret_fn_t) tmp_cbk;                         \
                 _new->parent = frame;                                   \
                 _new->cookie = _new;                                    \
-                LOCK_INIT (&_new->lock);                                \
                 _new->wind_from = __FUNCTION__;                         \
                 _new->wind_to = #fn;                                    \
                 _new->unwind_to = #rfn;                                 \
-                frame->ref_count++;                                     \
+                LOCK_INIT (&_new->lock);                                \
+                LOCK(&frame->root->stack_lock);                         \
+                {                                                       \
+                        _new->next = frame->root->frames.next;          \
+                        _new->prev = &frame->root->frames;              \
+                        if (frame->root->frames.next)                   \
+                                frame->root->frames.next->prev = _new;  \
+                        frame->root->frames.next = _new;                \
+                        frame->ref_count++;                             \
+                }                                                       \
+                UNLOCK(&frame->root->stack_lock);                       \
                 old_THIS = THIS;                                        \
                 THIS = obj;                                             \
                 fn (_new, obj, params);                                 \
+                THIS = old_THIS;                                        \
+        } while (0)
+
+
+/* make a call without switching frames */
+#define STACK_WIND_TAIL(frame, obj, fn, params ...)                     \
+        do {                                                            \
+                xlator_t     *old_THIS = NULL;                          \
+                                                                        \
+                frame->this = obj;                                      \
+                frame->wind_to = #fn;                                   \
+                old_THIS = THIS;                                        \
+                THIS = obj;                                             \
+                fn (frame, obj, params);                                \
                 THIS = old_THIS;                                        \
         } while (0)
 
@@ -252,20 +281,24 @@ STACK_DESTROY (call_stack_t *stack)
                 }                                                       \
                 typeof(fn##_cbk) tmp_cbk = rfn;                         \
                 _new->root = frame->root;                               \
-                _new->next = frame->root->frames.next;                  \
-                _new->prev = &frame->root->frames;                      \
-                if (frame->root->frames.next)                           \
-                        frame->root->frames.next->prev = _new;          \
-                frame->root->frames.next = _new;                        \
                 _new->this = obj;                                       \
                 _new->ret = (ret_fn_t) tmp_cbk;                         \
                 _new->parent = frame;                                   \
                 _new->cookie = cky;                                     \
-                LOCK_INIT (&_new->lock);                                \
                 _new->wind_from = __FUNCTION__;                         \
                 _new->wind_to = #fn;                                    \
                 _new->unwind_to = #rfn;                                 \
-                frame->ref_count++;                                     \
+                LOCK_INIT (&_new->lock);                                \
+                LOCK(&frame->root->stack_lock);                         \
+                {                                                       \
+                        frame->ref_count++;                             \
+                        _new->next = frame->root->frames.next;          \
+                        _new->prev = &frame->root->frames;              \
+                        if (frame->root->frames.next)                   \
+                                frame->root->frames.next->prev = _new;  \
+                        frame->root->frames.next = _new;                \
+                }                                                       \
+                UNLOCK(&frame->root->stack_lock);                       \
                 fn##_cbk = rfn;                                         \
                 old_THIS = THIS;                                        \
                 THIS = obj;                                             \
@@ -286,7 +319,11 @@ STACK_DESTROY (call_stack_t *stack)
                 }                                                       \
                 fn = frame->ret;                                        \
                 _parent = frame->parent;                                \
-                _parent->ref_count--;                                   \
+                LOCK(&frame->root->stack_lock);                         \
+                {                                                       \
+                        _parent->ref_count--;                           \
+                }                                                       \
+                UNLOCK(&frame->root->stack_lock);                       \
                 old_THIS = THIS;                                        \
                 THIS = _parent->this;                                   \
                 frame->complete = _gf_true;                             \
@@ -309,7 +346,11 @@ STACK_DESTROY (call_stack_t *stack)
                 }                                                       \
                 fn = (fop_##op##_cbk_t )frame->ret;                     \
                 _parent = frame->parent;                                \
-                _parent->ref_count--;                                   \
+                LOCK(&frame->root->stack_lock);                         \
+                {                                                       \
+                        _parent->ref_count--;                           \
+                }                                                       \
+                UNLOCK(&frame->root->stack_lock);                       \
                 old_THIS = THIS;                                        \
                 THIS = _parent->this;                                   \
                 frame->complete = _gf_true;                             \
@@ -343,7 +384,7 @@ copy_frame (call_frame_t *frame)
         newstack->op  = oldstack->op;
         newstack->type = oldstack->type;
         memcpy (newstack->groups, oldstack->groups,
-                sizeof (uint32_t) * GF_REQUEST_MAXGROUPS);
+                sizeof (gid_t) * GF_MAX_AUX_GROUPS);
         newstack->unique = oldstack->unique;
 
         newstack->frames.this = frame->this;
@@ -352,6 +393,7 @@ copy_frame (call_frame_t *frame)
         newstack->lk_owner = oldstack->lk_owner;
 
         LOCK_INIT (&newstack->frames.lock);
+        LOCK_INIT (&newstack->stack_lock);
 
         LOCK (&oldstack->pool->lock);
         {
@@ -389,11 +431,13 @@ create_frame (xlator_t *xl, call_pool_t *pool)
         UNLOCK (&pool->lock);
 
         LOCK_INIT (&stack->frames.lock);
+        LOCK_INIT (&stack->stack_lock);
 
         return &stack->frames;
 }
 
 void gf_proc_dump_pending_frames(call_pool_t *call_pool);
-
+void gf_proc_dump_pending_frames_to_dict (call_pool_t *call_pool,
+                                          dict_t *dict);
 gf_boolean_t __is_fuse_call (call_frame_t *frame);
 #endif /* _STACK_H */

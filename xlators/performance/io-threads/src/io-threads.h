@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef __IOT_H
@@ -37,6 +28,7 @@
 #include "locking.h"
 #include "iot-mem-types.h"
 #include <semaphore.h>
+#include "statedump.h"
 
 
 struct iot_conf;
@@ -61,6 +53,14 @@ typedef enum {
         IOT_PRI_MAX,
 } iot_pri_t;
 
+#define IOT_LEAST_THROTTLE_DELAY 1	/* sample interval in seconds */
+struct iot_least_throttle {
+	struct timeval	sample_time;	/* timestamp of current sample */
+	uint32_t	sample_cnt;	/* sample count for active interval */
+	uint32_t	cached_rate;	/* the most recently measured rate */
+	int32_t		rate_limit;	/* user-specified rate limit */
+	pthread_mutex_t	lock;
+};
 
 struct iot_conf {
         pthread_mutex_t      mutex;
@@ -76,10 +76,15 @@ struct iot_conf {
 
         int32_t              ac_iot_limit[IOT_PRI_MAX];
         int32_t              ac_iot_count[IOT_PRI_MAX];
+        int                  queue_sizes[IOT_PRI_MAX];
         int                  queue_size;
         pthread_attr_t       w_attr;
+        gf_boolean_t         least_priority; /*Enable/Disable least-priority */
 
         xlator_t            *this;
+        size_t              stack_size;
+
+	struct iot_least_throttle throttle;
 };
 
 typedef struct iot_conf iot_conf_t;

@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _PROTOCOL_COMMON_H
@@ -64,6 +55,7 @@ enum gf_fop_procnum {
         GFS3_OP_READDIRP,
         GFS3_OP_RELEASE,
         GFS3_OP_RELEASEDIR,
+        GFS3_OP_FREMOVEXATTR,
         GFS3_OP_MAXVALUE,
 } ;
 
@@ -72,6 +64,8 @@ enum gf_handshake_procnum {
         GF_HNDSK_SETVOLUME,
         GF_HNDSK_GETSPEC,
         GF_HNDSK_PING,
+        GF_HNDSK_SET_LK_VER,
+        GF_HNDSK_EVENT_NOTIFY,
         GF_HNDSK_MAXVALUE,
 };
 
@@ -100,6 +94,7 @@ enum gf_probe_resp {
 	GF_PROBE_FRIEND,
         GF_PROBE_ANOTHER_CLUSTER,
         GF_PROBE_VOLUME_CONFLICT,
+        GF_PROBE_SAME_UUID,
         GF_PROBE_UNKNOWN_PEER,
         GF_PROBE_ADD_FAILED
 };
@@ -116,6 +111,7 @@ enum gf_cbk_procnum {
         GF_CBK_NULL = 0,
         GF_CBK_FETCHSPEC,
         GF_CBK_INO_FLUSH,
+        GF_CBK_EVENT_NOTIFY,
         GF_CBK_MAXVALUE,
 };
 
@@ -148,10 +144,13 @@ enum gluster_cli_procnum {
         GLUSTER_CLI_TOP_VOLUME,
         GLUSTER_CLI_GETWD,
         GLUSTER_CLI_STATUS_VOLUME,
+        GLUSTER_CLI_STATUS_ALL,
         GLUSTER_CLI_MOUNT,
         GLUSTER_CLI_UMOUNT,
         GLUSTER_CLI_HEAL_VOLUME,
         GLUSTER_CLI_STATEDUMP_VOLUME,
+        GLUSTER_CLI_LIST_VOLUME,
+        GLUSTER_CLI_CLRLOCKS_VOLUME,
         GLUSTER_CLI_MAXVALUE,
 };
 
@@ -177,13 +176,34 @@ enum glusterd_brick_procnum {
         GLUSTERD_BRICK_NULL,    /* 0 */
         GLUSTERD_BRICK_TERMINATE,
         GLUSTERD_BRICK_XLATOR_INFO,
-        GLUSTERD_BRICK_XLATOR_HEAL,
+        GLUSTERD_BRICK_XLATOR_OP,
+        GLUSTERD_BRICK_STATUS,
         GLUSTERD_BRICK_OP,
+        GLUSTERD_BRICK_XLATOR_DEFRAG,
+        GLUSTERD_NODE_PROFILE,
+        GLUSTERD_NODE_STATUS,
         GLUSTERD_BRICK_MAXVALUE,
 };
 
+enum glusterd_mgmt_hndsk_procnum {
+        GD_MGMT_HNDSK_NULL,
+        GD_MGMT_HNDSK_VERSIONS,
+        GD_MGMT_HNDSK_VERSIONS_ACK,
+        GD_MGMT_HNDSK_MAXVALUE,
+};
+
+typedef enum {
+        GF_AFR_OP_INVALID,
+        GF_AFR_OP_HEAL_INDEX,
+        GF_AFR_OP_HEAL_FULL,
+        GF_AFR_OP_INDEX_SUMMARY,
+        GF_AFR_OP_HEALED_FILES,
+        GF_AFR_OP_HEAL_FAILED_FILES,
+        GF_AFR_OP_SPLIT_BRAIN_FILES
+} gf_xl_afr_op_t ;
+
 #define GLUSTER_HNDSK_PROGRAM    14398633 /* Completely random */
-#define GLUSTER_HNDSK_VERSION    1   /* 0.0.1 */
+#define GLUSTER_HNDSK_VERSION    2   /* 0.0.2 */
 
 #define GLUSTER_PMAP_PROGRAM     34123456
 #define GLUSTER_PMAP_VERSION     1
@@ -191,9 +211,9 @@ enum glusterd_brick_procnum {
 #define GLUSTER_CBK_PROGRAM      52743234 /* Completely random */
 #define GLUSTER_CBK_VERSION      1   /* 0.0.1 */
 
-#define GLUSTER3_1_FOP_PROGRAM   1298437 /* Completely random */
-#define GLUSTER3_1_FOP_VERSION   310 /* 3.1.0 */
-#define GLUSTER3_1_FOP_PROCCNT   GFS3_OP_MAXVALUE
+#define GLUSTER_FOP_PROGRAM   1298437 /* Completely random */
+#define GLUSTER_FOP_VERSION   330 /* 3.3.0 */
+#define GLUSTER_FOP_PROCCNT   GFS3_OP_MAXVALUE
 
 /* Second version */
 #define GD_MGMT_PROGRAM          1238433 /* Completely random */
@@ -203,9 +223,13 @@ enum glusterd_brick_procnum {
 #define GD_FRIEND_VERSION        2  /* 0.0.2 */
 
 #define GLUSTER_CLI_PROGRAM      1238463 /* Completely random */
-#define GLUSTER_CLI_VERSION      2   /* 0.0.1 */
+#define GLUSTER_CLI_VERSION      2   /* 0.0.2 */
 
 #define GD_BRICK_PROGRAM         4867634 /*Completely random*/
 #define GD_BRICK_VERSION         2
+
+/* OP-VERSION handshake */
+#define GD_MGMT_HNDSK_PROGRAM    1239873 /* Completely random */
+#define GD_MGMT_HNDSK_VERSION    1
 
 #endif /* !_PROTOCOL_COMMON_H */

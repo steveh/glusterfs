@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -33,6 +24,7 @@
 struct gf_printer {
         ssize_t (*write) (struct gf_printer *gp, char *buf, size_t len);
         void *priv;
+        int  len;
 };
 
 static ssize_t
@@ -89,19 +81,31 @@ gpprintf (struct gf_printer *gp, const char *format, ...)
         return ret;
 }
 
-static int
-glusterfs_graph_print (struct gf_printer *gp, glusterfs_graph_t *graph)
-{
 #define GPPRINTF(gp, fmt, ...) do {                             \
                 ret = gpprintf (gp, fmt, ## __VA_ARGS__);       \
                 if (ret == -1)                                  \
                         goto out;                               \
                 else                                            \
-                        len += ret;                             \
+                        gp->len += ret;                             \
         } while (0)
 
+static int
+_print_volume_options (dict_t *d, char *k, data_t *v,
+                           void *tmp)
+{
+        struct gf_printer *gp  = tmp;
+        int                ret = 0;
+        GPPRINTF (gp, "    option %s %s\n", k, v->data);
+        return 0;
+out:
+        /* means, it is a failure */
+        return -1;
+}
+
+static int
+glusterfs_graph_print (struct gf_printer *gp, glusterfs_graph_t *graph)
+{
         xlator_t      *trav = NULL;
-        data_pair_t   *pair = NULL;
         xlator_list_t *xch = NULL;
         int            ret = 0;
         ssize_t        len = 0;
@@ -114,11 +118,9 @@ glusterfs_graph_print (struct gf_printer *gp, glusterfs_graph_t *graph)
                 GPPRINTF (gp, "volume %s\n    type %s\n", trav->name,
                           trav->type);
 
-                for (pair =  trav->options->members_list; pair && pair->next;
-                     pair = pair->next);
-                for (; pair; pair = pair->prev)
-                        GPPRINTF (gp, "    option %s %s\n", pair->key,
-                                  pair->value->data);
+                ret = dict_foreach (trav->options, _print_volume_options, gp);
+                if (ret)
+                        goto out;
 
                 if (trav->children) {
                         GPPRINTF (gp, "    subvolumes");
@@ -135,6 +137,7 @@ glusterfs_graph_print (struct gf_printer *gp, glusterfs_graph_t *graph)
         }
 
 out:
+        len = gp->len;
         if (ret == -1) {
                 gf_log ("graph-print", GF_LOG_ERROR, "printing failed");
 

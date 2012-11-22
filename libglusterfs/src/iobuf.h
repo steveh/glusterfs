@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _IOBUF_H_
@@ -40,6 +31,11 @@
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 
+#define GF_ALIGN_BUF(ptr,bound) ((void *)((unsigned long)(ptr + bound - 1) & \
+                                          (unsigned long)(~(bound - 1))))
+
+#define GF_IOBUF_ALIGN_SIZE 512
+
 /* one allocatable unit for the consumers of the IOBUF API */
 /* each unit hosts @page_size bytes of memory */
 struct iobuf;
@@ -52,6 +48,10 @@ struct iobuf_arena;
 /* expandable and contractable pool of memory, internally broken into arenas */
 struct iobuf_pool;
 
+struct iobuf_init_config {
+        size_t   pagesize;
+        int32_t  num_pages;
+};
 
 struct iobuf {
         union {
@@ -67,6 +67,9 @@ struct iobuf {
         int                  ref;  /* 0 == passive, >0 == active */
 
         void                *ptr;  /* usable memory region by the consumer */
+
+        void                *free_ptr; /* in case of stdalloc, this is the
+                                          one to be freed */
 };
 
 
@@ -83,6 +86,7 @@ struct iobuf_arena {
         size_t              arena_size; /* this is equal to
                                            (iobuf_pool->arena_size / page_size)
                                            * page_size */
+        size_t              page_count;
 
         struct iobuf_pool  *iobuf_pool;
 
@@ -108,25 +112,21 @@ struct iobuf_pool {
 
         int                 arena_cnt;
         struct list_head    arenas[GF_VARIABLE_IOBUF_COUNT];
-        /* array of arenas. Each element of
-           the array is a list of arenas
-           holding iobufs of particular
-           page_size
-        */
+        /* array of arenas. Each element of the array is a list of arenas
+           holding iobufs of particular page_size */
+
         struct list_head    filled[GF_VARIABLE_IOBUF_COUNT];
-        /*
-          array of arenas without free iobufs
-        */
+        /* array of arenas without free iobufs */
 
         struct list_head    purge[GF_VARIABLE_IOBUF_COUNT];
-        /*
-          array of of arenas which can be
-          purged
-        */
+        /* array of of arenas which can be purged */
+
+        uint64_t            request_misses; /* mostly the requests for higher
+                                               value of iobufs */
 };
 
 
-struct iobuf_pool *iobuf_pool_new (size_t arena_size, size_t page_size);
+struct iobuf_pool *iobuf_pool_new (void);
 void iobuf_pool_destroy (struct iobuf_pool *iobuf_pool);
 struct iobuf *iobuf_get (struct iobuf_pool *iobuf_pool);
 void iobuf_unref (struct iobuf *iobuf);

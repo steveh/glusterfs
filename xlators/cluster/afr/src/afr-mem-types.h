@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -26,7 +17,6 @@
 enum gf_afr_mem_types_ {
         gf_afr_mt_iovec  = gf_common_mt_end + 1,
         gf_afr_mt_afr_fd_ctx_t,
-        gf_afr_mt_afr_local_t,
         gf_afr_mt_afr_private_t,
         gf_afr_mt_int32_t,
         gf_afr_mt_char,
@@ -44,8 +34,13 @@ enum gf_afr_mem_types_ {
         gf_afr_mt_locked_fd,
         gf_afr_mt_inode_ctx_t,
         gf_afr_fd_paused_call_t,
-        gf_afr_mt_afr_crawl_data_t,
-        gf_afr_mt_afr_brick_pos_t,
+        gf_afr_mt_crawl_data_t,
+        gf_afr_mt_brick_pos_t,
+        gf_afr_mt_shd_bool_t,
+        gf_afr_mt_shd_timer_t,
+        gf_afr_mt_shd_event_t,
+        gf_afr_mt_time_t,
+        gf_afr_mt_pos_data_t,
         gf_afr_mt_end
 };
 #endif

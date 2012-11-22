@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -69,6 +60,7 @@ fill_defaults (xlator_t *xl)
         SET_DEFAULT_FOP (fsetxattr);
         SET_DEFAULT_FOP (fgetxattr);
         SET_DEFAULT_FOP (removexattr);
+        SET_DEFAULT_FOP (fremovexattr);
         SET_DEFAULT_FOP (opendir);
         SET_DEFAULT_FOP (readdir);
         SET_DEFAULT_FOP (readdirp);
@@ -176,6 +168,8 @@ xlator_volopt_dynload (char *xlator_type, void **dl_handle,
 
         ret = 0;
  out:
+        GF_FREE (name);
+
         gf_log ("xlator", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 
@@ -237,23 +231,23 @@ xlator_dynload (xlator_t *xl)
         }
 
         if (!(xl->notify = dlsym (handle, "notify"))) {
-                gf_log ("xlator", GF_LOG_DEBUG,
+                gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(notify) on %s -- neglecting", dlerror ());
         }
 
         if (!(xl->dumpops = dlsym (handle, "dumpops"))) {
-                gf_log ("xlator", GF_LOG_DEBUG,
+                gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(dumpops) on %s -- neglecting", dlerror ());
         }
 
         if (!(xl->mem_acct_init = dlsym (handle, "mem_acct_init"))) {
-                gf_log (xl->name, GF_LOG_DEBUG,
+                gf_log (xl->name, GF_LOG_TRACE,
                         "dlsym(mem_acct_init) on %s -- neglecting",
                         dlerror ());
         }
 
         if (!(xl->reconfigure = dlsym (handle, "reconfigure"))) {
-                gf_log ("xlator", GF_LOG_DEBUG,
+                gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(reconfigure) on %s -- neglecting",
                         dlerror());
         }
@@ -267,7 +261,7 @@ xlator_dynload (xlator_t *xl)
 
         if (!(vol_opt->given_opt = dlsym (handle, "options"))) {
                 dlerror ();
-                gf_log (xl->name, GF_LOG_DEBUG,
+                gf_log (xl->name, GF_LOG_TRACE,
                         "Strict option validation not enforced -- neglecting");
         }
         list_add_tail (&vol_opt->list, &xl->volume_options);
@@ -277,8 +271,7 @@ xlator_dynload (xlator_t *xl)
         ret = 0;
 
 out:
-        if (name)
-                GF_FREE (name);
+        GF_FREE (name);
         return ret;
 }
 
@@ -429,6 +422,9 @@ xlator_fini_rec (xlator_t *xl)
 
                         xl->fini (xl);
 
+                        if (xl->local_pool)
+                                mem_pool_destroy (xl->local_pool);
+
                         THIS = old_THIS;
                 } else {
                         gf_log (xl->name, GF_LOG_DEBUG, "No fini() found");
@@ -464,11 +460,11 @@ xlator_mem_acct_init (xlator_t *xl, int num_types)
         int             i = 0;
         int             ret = 0;
 
-        if (!gf_mem_acct_is_enabled())
-                return 0;
-
         if (!xl)
                 return -1;
+
+        if (!xl->ctx->mem_acct_enable)
+                return 0;
 
         xl->mem_acct.num_types = num_types;
 
@@ -544,10 +540,46 @@ loc_wipe (loc_t *loc)
                 inode_unref (loc->parent);
                 loc->parent = NULL;
         }
-        uuid_clear (loc->gfid);
-        uuid_clear (loc->pargfid);
+
+        memset (loc, 0, sizeof (*loc));
 }
 
+int
+loc_path (loc_t *loc, const char *bname)
+{
+        int     ret = 0;
+
+        if (loc->path)
+                goto out;
+
+        ret = -1;
+
+        if (bname && !strlen (bname))
+                bname = NULL;
+
+        if (!bname)
+                goto inode_path;
+
+        if (loc->parent && !uuid_is_null (loc->parent->gfid)) {
+                ret = inode_path (loc->parent, bname, (char**)&loc->path);
+        } else if (!uuid_is_null (loc->pargfid)) {
+                ret = gf_asprintf ((char**)&loc->path, INODE_PATH_FMT"/%s",
+                                   uuid_utoa (loc->pargfid), bname);
+        }
+
+        if (loc->path)
+                goto out;
+
+inode_path:
+        if (loc->inode && !uuid_is_null (loc->inode->gfid)) {
+                ret = inode_path (loc->inode, NULL, (char **)&loc->path);
+        } else if (!uuid_is_null (loc->gfid)) {
+                ret = gf_asprintf ((char**)&loc->path, INODE_PATH_FMT,
+                                   uuid_utoa (loc->gfid));
+        }
+out:
+        return ret;
+}
 
 int
 loc_copy (loc_t *dst, loc_t *src)
@@ -559,6 +591,7 @@ loc_copy (loc_t *dst, loc_t *src)
 
         uuid_copy (dst->gfid, src->gfid);
         uuid_copy (dst->pargfid, src->pargfid);
+        uuid_copy (dst->gfid, src->gfid);
 
         if (src->inode)
                 dst->inode = inode_ref (src->inode);
@@ -566,24 +599,22 @@ loc_copy (loc_t *dst, loc_t *src)
         if (src->parent)
                 dst->parent = inode_ref (src->parent);
 
-        dst->path = gf_strdup (src->path);
+        if (src->path) {
+                dst->path = gf_strdup (src->path);
 
-        if (!dst->path)
-                goto out;
+                if (!dst->path)
+                        goto out;
 
-        dst->name = strrchr (dst->path, '/');
-        if (dst->name)
-                dst->name++;
+                if (src->name)
+                        dst->name = strrchr (dst->path, '/');
+                if (dst->name)
+                        dst->name++;
+        }
 
         ret = 0;
 out:
-        if (ret == -1) {
-                if (dst->inode)
-                        inode_unref (dst->inode);
-
-                if (dst->parent)
-                        inode_unref (dst->parent);
-        }
+        if (ret == -1)
+                loc_wipe (dst);
 
 err:
         return ret;
@@ -614,10 +645,8 @@ xlator_destroy (xlator_t *xl)
         if (!xl)
                 return 0;
 
-        if (xl->name)
-                GF_FREE (xl->name);
-        if (xl->type)
-                GF_FREE (xl->type);
+        GF_FREE (xl->name);
+        GF_FREE (xl->type);
         if (xl->dlhandle)
                 dlclose (xl->dlhandle);
         if (xl->options)
@@ -692,7 +721,7 @@ is_gf_log_command (xlator_t *this, const char *name, char *value)
                 goto out;
         }
 
-        ctx = glusterfs_ctx_get();
+        ctx = this->ctx;
         if (!ctx)
                 goto out;
         if (!ctx->active)

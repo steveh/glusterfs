@@ -37,7 +37,7 @@
 #define NFS_PATH_MAX    4096
 #define NFS_NAME_MAX    NAME_MAX
 
-#define NFS_DEFAULT_CREATE_MODE 0644
+#define NFS_DEFAULT_CREATE_MODE 0600
 
 extern xlator_t *
 nfs_xlid_to_xlator (xlator_list_t *cl, uint8_t xlid);
@@ -67,7 +67,7 @@ nfs_loc_fill (loc_t *loc, inode_t *inode, inode_t *parent, char *path);
 #define NFS_RESOLVE_CREATE      2
 
 extern int
-nfs_inode_loc_fill (inode_t *inode, loc_t *loc);
+nfs_inode_loc_fill (inode_t *inode, loc_t *loc, int how);
 
 extern int
 nfs_ino_loc_fill (inode_table_t *itable, uuid_t gfid, loc_t *l);
@@ -81,4 +81,10 @@ nfs_root_loc_fill (inode_table_t *itable, loc_t *loc);
 
 extern uint32_t
 nfs_hash_gfid (uuid_t gfid);
+
+extern int
+nfs_gfid_loc_fill (inode_table_t *itable, uuid_t gfid, loc_t *loc, int how);
+
+void
+nfs_fix_generation (xlator_t *this, inode_t *inode);
 #endif

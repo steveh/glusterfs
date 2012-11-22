@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2011-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -38,7 +28,7 @@
 #include "glusterd-mem-types.h"
 #include "glusterd.h"
 #include "glusterd-utils.h"
-
+#include "common-utils.h"
 #include "glusterd-mountbroker.h"
 #include "glusterd-op-sm.h"
 
@@ -62,31 +52,6 @@ seq_dict_foreach (dict_t *dict,
                         return ret;
         }
 }
-
-static void
-skipwhite (char **s)
-{
-        while (isspace (**s))
-                (*s)++;
-}
-
-static char *
-nwstrtail (char *str, char *pattern)
-{
-        for (;;) {
-                skipwhite (&str);
-                skipwhite (&pattern);
-
-                if (*str != *pattern || !*str)
-                        break;
-
-                str++;
-                pattern++;
-        }
-
-        return *pattern ? NULL : str;
-}
-
 
 int
 parse_mount_pattern_desc (gf_mount_spec_t *mspec, char *pdesc)
@@ -269,12 +234,15 @@ const char *georep_mnt_desc_template =
                 "xlator-option=\\*-dht.assert-no-child-down=true "
                 "volfile-server=localhost "
                 "client-pid=%d "
-                "volfile-id=%s "
                 "user-map-root=%s "
         ")"
         "SUB+("
                 "log-file="DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"*/* "
                 "log-level=* "
+                "volfile-id=* "
+        ")"
+        "MEET("
+                "%s"
         ")";
 
 const char *hadoop_mnt_desc_template =
@@ -290,18 +258,69 @@ const char *hadoop_mnt_desc_template =
         ")";
 
 int
-make_georep_mountspec (gf_mount_spec_t *mspec, const char *volname,
+make_georep_mountspec (gf_mount_spec_t *mspec, const char *volnames,
                        char *user)
 {
         char *georep_mnt_desc = NULL;
+        char *meetspec        = NULL;
+        char *vols            = NULL;
+        char *vol             = NULL;
+        char *p               = NULL;
+        char *savetok         = NULL;
+        char *fa[3]           = {0,};
+        size_t siz            = 0;
+        int vc                = 0;
+        int i                 = 0;
         int ret               = 0;
 
-        ret = gf_asprintf (&georep_mnt_desc, georep_mnt_desc_template,
-                           GF_CLIENT_PID_GSYNCD, volname, user);
-        if (ret == -1)
-                return ret;
+        vols = gf_strdup ((char *)volnames);
+        if (!vols)
+                goto out;
 
-        return parse_mount_pattern_desc (mspec, georep_mnt_desc);
+        for (vc = 1, p = vols; *p; p++) {
+                if (*p == ',')
+                        vc++;
+        }
+        siz = strlen (volnames) + vc * strlen("volfile-id=");
+        meetspec = GF_CALLOC (1, siz + 1, gf_gld_mt_georep_meet_spec);
+        if (!meetspec)
+                goto out;
+
+        for (p = vols;;) {
+                vol = strtok_r (p, ",", &savetok);
+                if (!vol) {
+                        GF_ASSERT (vc == 0);
+                        break;
+                }
+                p = NULL;
+                strcat (meetspec, "volfile-id=");
+                strcat (meetspec, vol);
+                if (--vc > 0)
+                        strcat (meetspec, " ");
+        }
+
+        ret = gf_asprintf (&georep_mnt_desc, georep_mnt_desc_template,
+                           GF_CLIENT_PID_GSYNCD, user, meetspec);
+        if (ret == -1) {
+                georep_mnt_desc = NULL;
+                goto out;
+        }
+
+        ret = parse_mount_pattern_desc (mspec, georep_mnt_desc);
+
+ out:
+        fa[0] = meetspec;
+        fa[1] = vols;
+        fa[2] = georep_mnt_desc;
+
+        for (i = 0; i < 3; i++) {
+                if (fa[i] == NULL)
+                        ret = -1;
+                else
+                        GF_FREE (fa[i]);
+        }
+
+        return ret;
 }
 
 int
@@ -450,6 +469,7 @@ evaluate_mount_request (gf_mount_spec_t *mspec, dict_t *argdict)
                         break;
                 case SET_INTERSECT:
                         match = sd.common;
+                        break;
                 default:
                         GF_ASSERT(!"unreached");
                 }
@@ -667,8 +687,7 @@ glusterd_do_mount (char *label, dict_t *argdict, char **path, int *op_errno)
                 *path = cookie;
         }
 
-        if (mtptemp)
-                GF_FREE (mtptemp);
+        GF_FREE (mtptemp);
 
         return ret;
 }

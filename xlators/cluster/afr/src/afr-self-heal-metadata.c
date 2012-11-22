@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include <libgen.h>
@@ -54,51 +45,22 @@ afr_sh_metadata_done (call_frame_t *frame, xlator_t *this)
 {
         afr_local_t     *local = NULL;
         afr_self_heal_t *sh = NULL;
-        afr_private_t   *priv = NULL;
 
         local = frame->local;
         sh = &local->self_heal;
-        priv = this->private;
 
-//      memset (sh->child_errno, 0, sizeof (int) * priv->child_count);
-        memset (sh->buf, 0, sizeof (struct iatt) * priv->child_count);
-        memset (sh->success, 0, sizeof (*sh->success) * priv->child_count);
-
-        afr_reset_xattr (sh->xattr, priv->child_count);
-        if (local->govinda_gOvinda) {
-                gf_log (this->name, GF_LOG_INFO,
-                        "split-brain detected, aborting selfheal of %s",
+        afr_sh_reset (frame, this);
+        if (IA_ISDIR (sh->type)) {
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "proceeding to entry check on %s",
                         local->loc.path);
-                sh->op_failed = 1;
-                sh->completion_cbk (frame, this);
+                afr_self_heal_entry (frame, this);
         } else {
-                if (IA_ISDIR (sh->type)) {
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "proceeding to entry check on %s",
-                                local->loc.path);
-                        afr_self_heal_entry (frame, this);
-                        return 0;
-                }
                 gf_log (this->name, GF_LOG_DEBUG,
                         "proceeding to data check on %s",
                         local->loc.path);
                 afr_self_heal_data (frame, this);
         }
-
-        return 0;
-}
-
-
-int
-afr_sh_metadata_unlck_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                           int32_t op_ret, int32_t op_errno)
-{
-        int               call_count = 0;
-
-        call_count = afr_frame_return (frame);
-
-        if (call_count == 0)
-                afr_sh_metadata_done (frame, this);
 
         return 0;
 }
@@ -130,7 +92,7 @@ afr_sh_metadata_finish (call_frame_t *frame, xlator_t *this)
 int
 afr_sh_metadata_erase_pending_cbk (call_frame_t *frame, void *cookie,
                                    xlator_t *this, int32_t op_ret,
-                                   int32_t op_errno, dict_t *xattr)
+                                   int32_t op_errno, dict_t *xattr, dict_t *xdata)
 {
         afr_local_t     *local     = NULL;
         int             call_count = 0;
@@ -162,85 +124,19 @@ afr_sh_metadata_erase_pending_cbk (call_frame_t *frame, void *cookie,
         return 0;
 }
 
-
 int
 afr_sh_metadata_erase_pending (call_frame_t *frame, xlator_t *this)
 {
-        afr_local_t     *local = NULL;
-        afr_self_heal_t *sh = NULL;
-        afr_private_t   *priv = NULL;
-        int              call_count = 0;
-        int              i = 0;
-        dict_t          **erase_xattr = NULL;
-
-
-        local = frame->local;
-        sh = &local->self_heal;
-        priv = this->private;
-
-        afr_sh_pending_to_delta (priv, sh->xattr, sh->delta_matrix,
-                                 sh->success, priv->child_count,
-                                 AFR_METADATA_TRANSACTION);
-
-        erase_xattr = GF_CALLOC (sizeof (*erase_xattr), priv->child_count,
-                                 gf_afr_mt_dict_t);
-        if (!erase_xattr)
-                return -ENOMEM;
-
-        for (i = 0; i < priv->child_count; i++) {
-                if (sh->xattr[i]) {
-                        call_count++;
-
-                        erase_xattr[i] = get_new_dict();
-                        dict_ref (erase_xattr[i]);
-                }
-        }
-
-        afr_sh_delta_to_xattr (priv, sh->delta_matrix, erase_xattr,
-                               priv->child_count, AFR_METADATA_TRANSACTION);
-
-        local->call_count = call_count;
-
-        if (call_count == 0) {
-                gf_log (this->name, GF_LOG_INFO,
-                        "metadata of %s not healed on any subvolume",
-                        local->loc.path);
-
-                afr_sh_metadata_finish (frame, this);
-        }
-
-        for (i = 0; i < priv->child_count; i++) {
-                if (!erase_xattr[i])
-                        continue;
-
-                gf_log (this->name, GF_LOG_TRACE,
-                        "erasing pending flags from %s on %s",
-                        local->loc.path, priv->children[i]->name);
-
-                STACK_WIND_COOKIE (frame, afr_sh_metadata_erase_pending_cbk,
-                                   (void *) (long) i,
-                                   priv->children[i],
-                                   priv->children[i]->fops->xattrop,
-                                   &local->loc,
-                                   GF_XATTROP_ADD_ARRAY, erase_xattr[i]);
-                if (!--call_count)
-                        break;
-        }
-
-        for (i = 0; i < priv->child_count; i++) {
-                if (erase_xattr[i]) {
-                        dict_unref (erase_xattr[i]);
-                }
-        }
-        GF_FREE (erase_xattr);
-
-        return 0;
+         afr_sh_erase_pending (frame, this, AFR_METADATA_TRANSACTION,
+                               afr_sh_metadata_erase_pending_cbk,
+                               afr_sh_metadata_finish);
+         return 0;
 }
 
 
 int
 afr_sh_metadata_sync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                          int32_t op_ret, int32_t op_errno)
+                          int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         afr_local_t     *local = NULL;
         afr_self_heal_t *sh = NULL;
@@ -281,9 +177,9 @@ afr_sh_metadata_sync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 afr_sh_metadata_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                              int32_t op_ret, int32_t op_errno,
-                             struct iatt *preop, struct iatt *postop)
+                             struct iatt *preop, struct iatt *postop, dict_t *xdata)
 {
-        afr_sh_metadata_sync_cbk (frame, cookie, this, op_ret, op_errno);
+        afr_sh_metadata_sync_cbk (frame, cookie, this, op_ret, op_errno, xdata);
 
         return 0;
 }
@@ -291,9 +187,9 @@ afr_sh_metadata_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 afr_sh_metadata_xattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                           int32_t op_ret, int32_t op_errno)
+                           int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
-        afr_sh_metadata_sync_cbk (frame, cookie, this, op_ret, op_errno);
+        afr_sh_metadata_sync_cbk (frame, cookie, this, op_ret, op_errno, xdata);
 
         return 0;
 }
@@ -361,7 +257,7 @@ afr_sh_metadata_sync (call_frame_t *frame, xlator_t *this, dict_t *xattr)
                                    (void *) (long) i,
                                    priv->children[i],
                                    priv->children[i]->fops->setattr,
-                                   &local->loc, &stbuf, valid);
+                                   &local->loc, &stbuf, valid, NULL);
 
                 call_count--;
 
@@ -372,7 +268,7 @@ afr_sh_metadata_sync (call_frame_t *frame, xlator_t *this, dict_t *xattr)
                                    (void *) (long) i,
                                    priv->children[i],
                                    priv->children[i]->fops->setxattr,
-                                   &local->loc, xattr, 0);
+                                   &local->loc, xattr, 0, NULL);
                 call_count--;
         }
 
@@ -381,9 +277,9 @@ afr_sh_metadata_sync (call_frame_t *frame, xlator_t *this, dict_t *xattr)
 
 
 int
-afr_sh_metadata_getxattr_cbk (call_frame_t *frame, void *cookie,
-                              xlator_t *this,
-                              int32_t op_ret, int32_t op_errno, dict_t *xattr)
+afr_sh_metadata_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                              int32_t op_ret, int32_t op_errno, dict_t *xattr,
+                              dict_t *xdata)
 {
         afr_local_t     *local = NULL;
         afr_self_heal_t *sh = NULL;
@@ -448,7 +344,7 @@ afr_sh_metadata_sync_prepare (call_frame_t *frame, xlator_t *this)
         STACK_WIND (frame, afr_sh_metadata_getxattr_cbk,
                     priv->children[source],
                     priv->children[source]->fops->getxattr,
-                    &local->loc, NULL);
+                    &local->loc, NULL, NULL);
 
         return 0;
 }
@@ -478,16 +374,7 @@ afr_sh_metadata_fix (call_frame_t *frame, xlator_t *this,
         nsources = afr_build_sources (this, sh->xattr, sh->buf,
                                       sh->pending_matrix, sh->sources,
                                       sh->success_children,
-                                      AFR_METADATA_TRANSACTION);
-        if (nsources == 0) {
-                gf_log (this->name, GF_LOG_TRACE,
-                        "No self-heal needed for %s",
-                        local->loc.path);
-
-                afr_sh_metadata_finish (frame, this);
-                goto out;
-        }
-
+                                      AFR_METADATA_TRANSACTION, NULL, _gf_false);
         if ((nsources == -1)
             && (priv->favorite_child != -1)
             && (sh->child_errno[priv->favorite_child] == 0)) {
@@ -509,7 +396,17 @@ afr_sh_metadata_fix (call_frame_t *frame, xlator_t *this,
                         "(possible split-brain). Please fix the file on "
                         "all backend volumes", local->loc.path);
 
-                local->govinda_gOvinda = 1;
+                sh->mdata_spb = _gf_true;
+
+                afr_sh_metadata_finish (frame, this);
+                goto out;
+        }
+
+        sh->mdata_spb = _gf_false;
+        if (nsources == 0) {
+                gf_log (this->name, GF_LOG_TRACE,
+                        "No self-heal needed for %s",
+                        local->loc.path);
 
                 afr_sh_metadata_finish (frame, this);
                 goto out;
@@ -548,7 +445,10 @@ afr_sh_metadata_fix (call_frame_t *frame, xlator_t *this,
                                         sh->fresh_children);
         }
 
-        afr_sh_metadata_sync_prepare (frame, this);
+        if (sh->do_metadata_self_heal && priv->metadata_self_heal)
+                afr_sh_metadata_sync_prepare (frame, this);
+        else
+                afr_sh_metadata_finish (frame, this);
 out:
         return;
 }
@@ -564,9 +464,9 @@ afr_sh_metadata_post_nonblocking_inodelk_cbk (call_frame_t *frame,
         int_lock = &local->internal_lock;
 
         if (int_lock->lock_op_ret < 0) {
-                gf_log (this->name, GF_LOG_ERROR, "Non Blocking metadata "
+                gf_log (this->name, GF_LOG_DEBUG, "Non Blocking metadata "
                         "inodelks failed for %s.", local->loc.path);
-                gf_log (this->name, GF_LOG_ERROR, "Metadata self-heal "
+                gf_log (this->name, GF_LOG_DEBUG, "Metadata self-heal "
                         "failed for %s.", local->loc.path);
                 afr_sh_metadata_done (frame, this);
         } else {
@@ -577,7 +477,8 @@ afr_sh_metadata_post_nonblocking_inodelk_cbk (call_frame_t *frame,
                 afr_sh_common_lookup (frame, this, &local->loc,
                                       afr_sh_metadata_fix, NULL,
                                       AFR_LOOKUP_FAIL_CONFLICTS |
-                                      AFR_LOOKUP_FAIL_MISSING_GFIDS);
+                                      AFR_LOOKUP_FAIL_MISSING_GFIDS,
+                                      NULL);
         }
 
         return 0;
@@ -597,7 +498,7 @@ afr_sh_metadata_lock (call_frame_t *frame, xlator_t *this)
 
         afr_set_lock_number (frame, this);
 
-        int_lock->lk_flock.l_start = 0;
+        int_lock->lk_flock.l_start = LLONG_MAX - 1;
         int_lock->lk_flock.l_len   = 0;
         int_lock->lk_flock.l_type  = F_WRLCK;
         int_lock->lock_cbk         = afr_sh_metadata_post_nonblocking_inodelk_cbk;
@@ -607,17 +508,35 @@ afr_sh_metadata_lock (call_frame_t *frame, xlator_t *this)
         return 0;
 }
 
+gf_boolean_t
+afr_can_start_metadata_self_heal (afr_self_heal_t *sh, afr_private_t *priv)
+{
+        if (sh->force_confirm_spb)
+                return _gf_true;
+        if (sh->do_metadata_self_heal && priv->metadata_self_heal)
+                return _gf_true;
+        return _gf_false;
+}
 
 int
 afr_self_heal_metadata (call_frame_t *frame, xlator_t *this)
 {
         afr_local_t   *local = NULL;
         afr_private_t *priv = this->private;
-
+        afr_self_heal_t *sh = &local->self_heal;
 
         local = frame->local;
+        sh = &local->self_heal;
 
-        if (local->self_heal.do_metadata_self_heal && priv->metadata_self_heal) {
+        /* Self-heal completion cbk changes inode split-brain status based on
+         * govinda_gOvinda, mdata_spb, data_spb value.
+         * Initialize mdata_spb with current split-brain status.
+         * If for some reason self-heal fails(locking phase etc), it makes sure
+         * we retain the split-brain status before this self-heal started.
+         */
+        sh->mdata_spb = afr_is_split_brain (this, sh->inode);
+
+        if (afr_can_start_metadata_self_heal (sh, priv)) {
                 afr_sh_metadata_lock (frame, this);
         } else {
                 afr_sh_metadata_done (frame, this);

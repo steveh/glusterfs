@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include <dlfcn.h>
@@ -259,12 +250,14 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
 	handle = dlopen (name, RTLD_NOW|RTLD_GLOBAL);
 	if (handle == NULL) {
 		gf_log ("rpc-transport", GF_LOG_ERROR, "%s", dlerror ());
-		gf_log ("rpc-transport", GF_LOG_ERROR,
+		gf_log ("rpc-transport", GF_LOG_WARNING,
 			"volume '%s': transport-type '%s' is not valid or "
 			"not found on this machine",
 			trans_name, type);
 		goto fail;
 	}
+
+        trans->dl_handle = handle;
 
 	trans->ops = dlsym (handle, "tops");
 	if (trans->ops == NULL) {
@@ -312,6 +305,7 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
 				"volume option validation failed");
 			goto fail;
 		}
+                vol_opt = NULL;
 	}
 
         trans->options = options;
@@ -326,26 +320,27 @@ rpc_transport_load (glusterfs_ctx_t *ctx, dict_t *options, char *trans_name)
 		goto fail;
 	}
 
-	return_trans = trans;
+        return_trans = trans;
 
-        if (name) {
-                GF_FREE (name);
-        }
+        GF_FREE (name);
+
+        GF_FREE (vol_opt);
 
 	return return_trans;
 
 fail:
         if (trans) {
-                if (trans->name) {
-                        GF_FREE (trans->name);
-                }
+                GF_FREE (trans->name);
+
+                if (trans->dl_handle)
+                        dlclose (trans->dl_handle);
 
                 GF_FREE (trans);
         }
 
-        if (name) {
-                GF_FREE (name);
-        }
+        GF_FREE (name);
+
+        GF_FREE (vol_opt);
 
         return NULL;
 }
@@ -432,8 +427,10 @@ rpc_transport_destroy (rpc_transport_t *this)
 
 	pthread_mutex_destroy (&this->lock);
 
-        if (this->name)
-                GF_FREE (this->name);
+        GF_FREE (this->name);
+
+        if (this->dl_handle)
+                dlclose (this->dl_handle);
 
 	GF_FREE (this);
 fail:
@@ -470,7 +467,7 @@ rpc_transport_unref (rpc_transport_t *this)
 
 	pthread_mutex_lock (&this->lock);
 	{
-		refcount = --this->refcount;
+                refcount = --this->refcount;
 	}
 	pthread_mutex_unlock (&this->lock);
 
@@ -478,7 +475,7 @@ rpc_transport_unref (rpc_transport_t *this)
                 if (this->mydata)
                         this->notify (this, this->mydata, RPC_TRANSPORT_CLEANUP,
                                       NULL);
-		rpc_transport_destroy (this);
+                rpc_transport_destroy (this);
 	}
 
 	ret = 0;
@@ -519,6 +516,20 @@ rpc_transport_register_notify (rpc_transport_t *trans,
 out:
         return ret;
 }
+
+
+inline int
+rpc_transport_unregister_notify (rpc_transport_t *trans)
+{
+        GF_VALIDATE_OR_GOTO ("rpc-transport", trans, out);
+
+        trans->notify = NULL;
+        trans->mydata = NULL;
+
+out:
+        return 0;
+}
+
 
 //give negative values to skip setting that value
 //this function asserts if both the values are negative.
@@ -580,7 +591,7 @@ rpc_transport_inet_options_build (dict_t **options, const char *hostname,
                         "failed to set remote-port with %d", port);
                 goto out;
         }
-        ret = dict_set_str (dict, "transport.address-family", "inet/inet6");
+        ret = dict_set_str (dict, "transport.address-family", "inet");
         if (ret) {
                 gf_log (THIS->name, GF_LOG_WARNING,
                         "failed to set addr-family with inet");
@@ -597,8 +608,7 @@ rpc_transport_inet_options_build (dict_t **options, const char *hostname,
         *options = dict;
 out:
         if (ret) {
-                if (host)
-                        GF_FREE (host);
+                GF_FREE (host);
                 if (dict)
                         dict_unref (dict);
         }

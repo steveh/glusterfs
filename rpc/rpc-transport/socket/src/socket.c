@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -44,84 +35,117 @@
 #include <errno.h>
 #include <netinet/tcp.h>
 #include <rpc/xdr.h>
+#include <sys/ioctl.h>
 #define GF_LOG_ERRNO(errno) ((errno == ENOTCONN) ? GF_LOG_DEBUG : GF_LOG_ERROR)
 #define SA(ptr) ((struct sockaddr *)ptr)
 
+#define SSL_ENABLED_OPT     "transport.socket.ssl-enabled"
+#define SSL_OWN_CERT_OPT    "transport.socket.ssl-own-cert"
+#define SSL_PRIVATE_KEY_OPT "transport.socket.ssl-private-key"
+#define SSL_CA_LIST_OPT     "transport.socket.ssl-ca-list"
+#define OWN_THREAD_OPT      "transport.socket.own-thread"
 
-#define __socket_proto_reset_pending(priv) do {                 \
-                memset (&priv->incoming.frag.vector, 0,         \
-                        sizeof (priv->incoming.frag.vector));   \
-                priv->incoming.frag.pending_vector =            \
-                        &priv->incoming.frag.vector;            \
-                priv->incoming.frag.pending_vector->iov_base =  \
-                        priv->incoming.frag.fragcurrent;        \
-                priv->incoming.pending_vector =                 \
-                        priv->incoming.frag.pending_vector;     \
-        } while (0);
+/* TBD: do automake substitutions etc. (ick) to set these. */
+#if !defined(DEFAULT_CERT_PATH)
+#define DEFAULT_CERT_PATH   "/etc/ssl/glusterfs.pem"
+#endif
+#if !defined(DEFAULT_KEY_PATH)
+#define DEFAULT_KEY_PATH    "/etc/ssl/glusterfs.key"
+#endif
+#if !defined(DEFAULT_CA_PATH)
+#define DEFAULT_CA_PATH     "/etc/ssl/glusterfs.ca"
+#endif
+
+#define POLL_MASK_INPUT  (POLLIN | POLLPRI)
+#define POLL_MASK_OUTPUT (POLLOUT)
+#define POLL_MASK_ERROR  (POLLERR | POLLHUP | POLLNVAL)
+
+typedef int SSL_unary_func (SSL *);
+typedef int SSL_trinary_func (SSL *, void *, int);
+
+#define __socket_proto_reset_pending(priv) do {                         \
+                struct gf_sock_incoming_frag *frag;                     \
+                frag = &priv->incoming.frag;                            \
+                                                                        \
+                memset (&frag->vector, 0, sizeof (frag->vector));       \
+                frag->pending_vector = &frag->vector;                   \
+                frag->pending_vector->iov_base = frag->fragcurrent;     \
+                priv->incoming.pending_vector =  frag->pending_vector;  \
+        } while (0)
 
 
 #define __socket_proto_update_pending(priv)                             \
         do {                                                            \
-                uint32_t remaining_fragsize = 0;                        \
-                if (priv->incoming.frag.pending_vector->iov_len == 0) { \
-                        remaining_fragsize = RPC_FRAGSIZE (priv->incoming.fraghdr) \
-                                - priv->incoming.frag.bytes_read;       \
+                uint32_t remaining;                                     \
+                struct gf_sock_incoming_frag *frag;                     \
+                frag = &priv->incoming.frag;                            \
+                if (frag->pending_vector->iov_len == 0) {               \
+                        remaining = (RPC_FRAGSIZE (priv->incoming.fraghdr) \
+                                     - frag->bytes_read);               \
                                                                         \
-                        priv->incoming.frag.pending_vector->iov_len =   \
-                                remaining_fragsize > priv->incoming.frag.remaining_size \
-                                ? priv->incoming.frag.remaining_size : remaining_fragsize; \
+                        frag->pending_vector->iov_len =                 \
+                                (remaining > frag->remaining_size)      \
+                                ? frag->remaining_size : remaining;     \
                                                                         \
-                        priv->incoming.frag.remaining_size -=           \
-                                priv->incoming.frag.pending_vector->iov_len; \
+                        frag->remaining_size -=                         \
+                                frag->pending_vector->iov_len;          \
                 }                                                       \
-        } while (0);
+        } while (0)
 
 #define __socket_proto_update_priv_after_read(priv, ret, bytes_read)    \
         {                                                               \
-                priv->incoming.frag.fragcurrent += bytes_read;          \
-                priv->incoming.frag.bytes_read += bytes_read;           \
+                struct gf_sock_incoming_frag *frag;                     \
+                frag = &priv->incoming.frag;                            \
                                                                         \
-                if ((ret > 0) || (priv->incoming.frag.remaining_size != 0)) { \
-                        if (priv->incoming.frag.remaining_size != 0 && ret == 0) {  \
+                frag->fragcurrent += bytes_read;                        \
+                frag->bytes_read += bytes_read;                         \
+                                                                        \
+                if ((ret > 0) || (frag->remaining_size != 0)) {         \
+                        if (frag->remaining_size != 0 && ret == 0) {    \
                                 __socket_proto_reset_pending (priv);    \
                         }                                               \
                                                                         \
-                        gf_log (this->name, GF_LOG_TRACE, "partial read on non-blocking socket"); \
+                        gf_log (this->name, GF_LOG_TRACE,               \
+                                "partial read on non-blocking socket"); \
                                                                         \
                         break;                                          \
                 }                                                       \
         }
 
-#define __socket_proto_init_pending(priv, size)                         \
+#define __socket_proto_init_pending(priv,size)                          \
         do {                                                            \
-                uint32_t remaining_fragsize = 0;                        \
-                remaining_fragsize = RPC_FRAGSIZE (priv->incoming.fraghdr) \
-                        - priv->incoming.frag.bytes_read;               \
+            uint32_t remaining = 0;                                     \
+            struct gf_sock_incoming_frag *frag;                         \
+            frag = &priv->incoming.frag;                                \
                                                                         \
-                __socket_proto_reset_pending (priv);                    \
+            remaining = (RPC_FRAGSIZE (priv->incoming.fraghdr)          \
+                         - frag->bytes_read);                           \
                                                                         \
-                priv->incoming.frag.pending_vector->iov_len =           \
-                        remaining_fragsize > size ? size : remaining_fragsize; \
+            __socket_proto_reset_pending (priv);                        \
                                                                         \
-                priv->incoming.frag.remaining_size =                    \
-                        size - priv->incoming.frag.pending_vector->iov_len; \
+            frag->pending_vector->iov_len =                             \
+                    (remaining > size) ? size : remaining;              \
                                                                         \
-        } while (0);
+            frag->remaining_size = (size - frag->pending_vector->iov_len); \
+                                                                        \
+            } while(0)
 
 
 /* This will be used in a switch case and breaks from the switch case if all
  * the pending data is not read.
  */
 #define __socket_proto_read(priv, ret)                                  \
-        {                                                               \
+                {                                                       \
                 size_t bytes_read = 0;                                  \
+                struct gf_sock_incoming *in;                            \
+                in = &priv->incoming;                                   \
                                                                         \
                 __socket_proto_update_pending (priv);                   \
                                                                         \
                 ret = __socket_readv (this,                             \
-                                      priv->incoming.pending_vector, 1, \
-                                      &priv->incoming.pending_vector,   \
-                                      &priv->incoming.pending_count,    \
+                                      in->pending_vector, 1,            \
+                                      &in->pending_vector,              \
+                                      &in->pending_count,               \
                                       &bytes_read);                     \
                 if (ret == -1) {                                        \
                         gf_log (this->name, GF_LOG_WARNING,             \
@@ -133,8 +157,155 @@
                 __socket_proto_update_priv_after_read (priv, ret, bytes_read); \
         }
 
-
 int socket_init (rpc_transport_t *this);
+
+void
+ssl_dump_error_stack (const char *caller)
+{
+	unsigned long  errnum = 0;
+	char           errbuf[120] = {0,};
+
+	/* OpenSSL docs explicitly give 120 as the error-string length. */
+
+	while ((errnum = ERR_get_error())) {
+		ERR_error_string(errnum,errbuf);
+		gf_log(caller,GF_LOG_ERROR,"  %s",errbuf);
+	}
+}
+
+int
+ssl_do (rpc_transport_t *this, void *buf, size_t len, SSL_trinary_func *func)
+{
+	int               r = (-1);
+	struct pollfd     pfd = {-1,};
+	socket_private_t *priv = NULL;
+
+	GF_VALIDATE_OR_GOTO(this->name,this->private,out);
+	priv = this->private;
+
+	for (;;) {
+		if (buf) {
+                        if (priv->connected == -1) {
+                                /*
+                                 * Fields in the SSL structure (especially
+                                 * the BIO pointers) are not valid at this
+                                 * point, so we'll segfault if we pass them
+                                 * to SSL_read/SSL_write.
+                                 */
+                                gf_log(this->name,GF_LOG_INFO,
+                                       "lost connection in %s", __func__);
+                                break;
+                        }
+			r = func(priv->ssl_ssl,buf,len);
+		}
+		else {
+                        /*
+                         * We actually need these functions to get to
+                         * priv->connected == 1.
+                         */
+			r = ((SSL_unary_func *)func)(priv->ssl_ssl);
+		}
+		switch (SSL_get_error(priv->ssl_ssl,r)) {
+		case SSL_ERROR_NONE:
+			return r;
+		case SSL_ERROR_WANT_READ:
+			pfd.fd = priv->sock;
+			pfd.events = POLLIN;
+			if (poll(&pfd,1,-1) < 0) {
+				gf_log(this->name,GF_LOG_ERROR,"poll error %d",
+				       errno);
+			}
+			break;
+		case SSL_ERROR_WANT_WRITE:
+			pfd.fd = priv->sock;
+			pfd.events = POLLOUT;
+			if (poll(&pfd,1,-1) < 0) {
+				gf_log(this->name,GF_LOG_ERROR,"poll error %d",
+				       errno);
+			}
+			break;
+		case SSL_ERROR_SYSCALL:
+			/* This is what we get when remote disconnects. */
+			gf_log(this->name,GF_LOG_DEBUG,
+			       "syscall error (probably remote disconnect)");
+			errno = ENODATA;
+			goto out;
+		default:
+			errno = EIO;
+			goto out;	/* "break" would just loop again */
+		}
+	}
+out:
+	return -1;
+}
+
+#define ssl_connect_one(t)   ssl_do((t),NULL,0,(SSL_trinary_func *)SSL_connect)
+#define ssl_accept_one(t)    ssl_do((t),NULL,0,(SSL_trinary_func *)SSL_accept)
+#define ssl_read_one(t,b,l)  ssl_do((t),(b),(l),(SSL_trinary_func *)SSL_read)
+#define ssl_write_one(t,b,l) ssl_do((t),(b),(l),(SSL_trinary_func *)SSL_write)
+
+int
+ssl_setup_connection (rpc_transport_t *this, int server)
+{
+	X509             *peer = NULL;
+	char              peer_CN[256] = "";
+	int               ret = -1;
+	socket_private_t *priv = NULL;
+
+	GF_VALIDATE_OR_GOTO(this->name,this->private,done);
+	priv = this->private;
+
+	priv->ssl_ssl = SSL_new(priv->ssl_ctx);
+	if (!priv->ssl_ssl) {
+		gf_log(this->name,GF_LOG_ERROR,"SSL_new failed");
+		ssl_dump_error_stack(this->name);
+		goto done;
+	}
+	priv->ssl_sbio = BIO_new_socket(priv->sock,BIO_NOCLOSE);
+	if (!priv->ssl_sbio) {
+		gf_log(this->name,GF_LOG_ERROR,"BIO_new_socket failed");
+		ssl_dump_error_stack(this->name);
+		goto free_ssl;
+	}
+	SSL_set_bio(priv->ssl_ssl,priv->ssl_sbio,priv->ssl_sbio);
+
+	if (server) {
+		ret = ssl_accept_one(this);
+	}
+	else {
+		ret = ssl_connect_one(this);
+	}
+
+	/* Make sure _the call_ succeeded. */
+	if (ret < 0) {
+		goto ssl_error;
+	}
+
+	/* Make sure _SSL verification_ succeeded, yielding an identity. */
+	if (SSL_get_verify_result(priv->ssl_ssl) != X509_V_OK) {
+		goto ssl_error;
+	}
+	peer = SSL_get_peer_certificate(priv->ssl_ssl);
+	if (!peer) {
+		goto ssl_error;
+	}
+
+	/* Finally, everything seems OK. */
+	X509_NAME_get_text_by_NID(X509_get_subject_name(peer),
+		NID_commonName, peer_CN, sizeof(peer_CN)-1);
+	peer_CN[sizeof(peer_CN)-1] = '\0';
+	gf_log(this->name,GF_LOG_INFO,"peer CN = %s", peer_CN);
+	return 0;
+
+	/* Error paths. */
+ssl_error:
+	gf_log(this->name,GF_LOG_ERROR,"SSL connect error");
+	ssl_dump_error_stack(this->name);
+free_ssl:
+	SSL_free(priv->ssl_ssl);
+done:
+	return ret;
+}
 
 /*
  * return value:
@@ -168,9 +339,22 @@ __socket_rwv (rpc_transport_t *this, struct iovec *vector, int count,
                 *bytes = 0;
         }
 
-        while (opcount) {
+        while (opcount > 0) {
+                if (opvector->iov_len == 0) {
+                        gf_log(this->name,GF_LOG_DEBUG,
+                               "would have passed zero length to read/write");
+                        ++opvector;
+                        --opcount;
+                        continue;
+                }
                 if (write) {
-                        ret = writev (sock, opvector, opcount);
+			if (priv->use_ssl) {
+				ret = ssl_write_one(this,
+					opvector->iov_base, opvector->iov_len);
+			}
+			else {
+				ret = writev (sock, opvector, opcount);
+			}
 
                         if (ret == 0 || (ret == -1 && errno == EAGAIN)) {
                                 /* done for now */
@@ -178,7 +362,18 @@ __socket_rwv (rpc_transport_t *this, struct iovec *vector, int count,
                         }
                         this->total_bytes_write += ret;
                 } else {
-                        ret = readv (sock, opvector, opcount);
+			if (priv->use_ssl) {
+				ret = ssl_read_one(this,
+					opvector->iov_base, opvector->iov_len);
+			}
+			else {
+				ret = readv (sock, opvector, opcount);
+			}
+			if (ret == 0) {
+				gf_log(this->name,GF_LOG_DEBUG,"EOF on socket");
+				errno = ENODATA;
+				ret = -1;
+			}
                         if (ret == -1 && errno == EAGAIN) {
                                 /* done for now */
                                 break;
@@ -202,6 +397,9 @@ __socket_rwv (rpc_transport_t *this, struct iovec *vector, int count,
                         gf_log (this->name, GF_LOG_WARNING,
                                 "%s failed (%s)", write ? "writev" : "readv",
                                 strerror (errno));
+			if (priv->use_ssl) {
+				ssl_dump_error_stack(this->name);
+			}
                         opcount = -1;
                         break;
                 }
@@ -213,6 +411,17 @@ __socket_rwv (rpc_transport_t *this, struct iovec *vector, int count,
                 moved = 0;
 
                 while (moved < ret) {
+                        if (!opcount) {
+                                gf_log(this->name,GF_LOG_DEBUG,
+                                       "ran out of iov, moved %d/%d",
+                                       moved, ret);
+                                goto ran_out;
+                        }
+                        if (!opvector[0].iov_len) {
+                                opvector++;
+                                opcount--;
+                                continue;
+                        }
                         if ((ret - moved) >= opvector[0].iov_len) {
                                 moved += opvector[0].iov_len;
                                 opvector++;
@@ -222,12 +431,10 @@ __socket_rwv (rpc_transport_t *this, struct iovec *vector, int count,
                                 opvector[0].iov_base += (ret - moved);
                                 moved += (ret - moved);
                         }
-                        while (opcount && !opvector[0].iov_len) {
-                                opvector++;
-                                opcount--;
-                        }
                 }
         }
+
+ran_out:
 
         if (pending_vector)
                 *pending_vector = opvector;
@@ -288,6 +495,20 @@ __socket_disconnect (rpc_transport_t *this)
                                 "shutdown() returned %d. %s",
                                 ret, strerror (errno));
                 }
+		if (priv->use_ssl) {
+			SSL_shutdown(priv->ssl_ssl);
+			SSL_clear(priv->ssl_ssl);
+			SSL_free(priv->ssl_ssl);
+		}
+		if (priv->own_thread) {
+			/*
+			 * Without this, reconnect (= disconnect + connect)
+			 * won't work except by accident.
+			 */
+			close(priv->sock);
+			priv->sock = -1;
+			++(priv->socket_gen);
+		}
         }
 
 out:
@@ -323,7 +544,7 @@ __socket_server_bind (rpc_transport_t *this)
                 memcpy (&unix_addr, SA (&this->myinfo.sockaddr),
                         this->myinfo.sockaddr_len);
                 reuse_check_sock = socket (AF_UNIX, SOCK_STREAM, 0);
-                if (reuse_check_sock > 0) {
+                if (reuse_check_sock >= 0) {
                         ret = connect (reuse_check_sock, SA (&unix_addr),
                                        this->myinfo.sockaddr_len);
                         if ((ret == -1) && (ECONNREFUSED == errno)) {
@@ -365,7 +586,6 @@ __socket_nonblock (int fd)
         return ret;
 }
 
-
 int
 __socket_nodelay (int fd)
 {
@@ -383,7 +603,7 @@ __socket_nodelay (int fd)
 
 
 static int
-__socket_keepalive (int fd, int keepalive_intvl, int keepalive_idle)
+__socket_keepalive (int fd, int family, int keepalive_intvl, int keepalive_idle)
 {
         int     on = 1;
         int     ret = -1;
@@ -412,18 +632,23 @@ __socket_keepalive (int fd, int keepalive_intvl, int keepalive_idle)
                 goto err;
         }
 #else
+        if (family != AF_INET)
+                goto done;
+
         ret = setsockopt (fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepalive_idle,
                           sizeof (keepalive_intvl));
         if (ret == -1) {
                 gf_log ("socket", GF_LOG_WARNING,
-                        "failed to set keep idle on socket %d", fd);
+                        "failed to set keep idle %d on socket %d, %s",
+                        keepalive_idle, fd, strerror(errno));
                 goto err;
         }
-        ret = setsockopt (fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepalive_intvl,
+        ret = setsockopt (fd, IPPROTO_TCP , TCP_KEEPINTVL, &keepalive_intvl,
                           sizeof (keepalive_intvl));
         if (ret == -1) {
                 gf_log ("socket", GF_LOG_WARNING,
-                        "failed to set keep alive interval on socket %d", fd);
+                        "failed to set keep interval %d on socket %d, %s",
+                        keepalive_intvl, fd, strerror(errno));
                 goto err;
         }
 #endif
@@ -476,9 +701,7 @@ __socket_reset (rpc_transport_t *this)
                 iobuf_unref (priv->incoming.iobuf);
         }
 
-        if (priv->incoming.request_info != NULL) {
-                GF_FREE (priv->incoming.request_info);
-        }
+        GF_FREE (priv->incoming.request_info);
 
         memset (&priv->incoming, 0, sizeof (priv->incoming));
 
@@ -621,9 +844,11 @@ out:
 
 
 int
-__socket_ioq_churn_entry (rpc_transport_t *this, struct ioq *entry)
+__socket_ioq_churn_entry (rpc_transport_t *this, struct ioq *entry, int direct)
 {
-        int ret = -1;
+        int               ret = -1;
+	socket_private_t *priv = NULL;
+	char              a_byte = 0;
 
         ret = __socket_writev (this, entry->pending_vector,
                                entry->pending_count,
@@ -634,6 +859,18 @@ __socket_ioq_churn_entry (rpc_transport_t *this, struct ioq *entry)
                 /* current entry was completely written */
                 GF_ASSERT (entry->pending_count == 0);
                 __socket_ioq_entry_free (entry);
+		priv = this->private;
+		if (priv->own_thread) {
+			/*
+			 * The pipe should only remain readable if there are
+			 * more entries after this, so drain the byte
+			 * representing this entry.
+			 */
+			if (!direct && read(priv->pipe[0],&a_byte,1) < 1) {
+				gf_log(this->name,GF_LOG_WARNING,
+				       "read error on pipe");
+			}
+		}
         }
 
         return ret;
@@ -656,13 +893,13 @@ __socket_ioq_churn (rpc_transport_t *this)
                 /* pick next entry */
                 entry = priv->ioq_next;
 
-                ret = __socket_ioq_churn_entry (this, entry);
+                ret = __socket_ioq_churn_entry (this, entry, 0);
 
                 if (ret != 0)
                         break;
         }
 
-        if (list_empty (&priv->ioq)) {
+        if (!priv->own_thread && list_empty (&priv->ioq)) {
                 /* all pending writes done, not interested in POLLOUT */
                 priv->idx = event_select_on (this->ctx->event_pool,
                                              priv->sock, priv->idx, -1, 0);
@@ -731,40 +968,42 @@ out:
 inline int
 __socket_read_simple_msg (rpc_transport_t *this)
 {
-        socket_private_t *priv           = NULL;
-        int               ret            = 0;
-        uint32_t          remaining_size = 0;
-        size_t            bytes_read     = 0;
+        int                           ret            = 0;
+        uint32_t                      remaining_size = 0;
+        size_t                        bytes_read     = 0;
+        socket_private_t             *priv           = NULL;
+        struct gf_sock_incoming      *in             = NULL;
+        struct gf_sock_incoming_frag *frag           = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
 
-        switch (priv->incoming.frag.simple_state) {
+        in = &priv->incoming;
+        frag = &in->frag;
+
+        switch (frag->simple_state) {
 
         case SP_STATE_SIMPLE_MSG_INIT:
-                remaining_size = RPC_FRAGSIZE (priv->incoming.fraghdr)
-                        - priv->incoming.frag.bytes_read;
+                remaining_size = RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read;
 
                 __socket_proto_init_pending (priv, remaining_size);
 
-                priv->incoming.frag.simple_state =
-                        SP_STATE_READING_SIMPLE_MSG;
+                frag->simple_state = SP_STATE_READING_SIMPLE_MSG;
 
                 /* fall through */
 
         case SP_STATE_READING_SIMPLE_MSG:
                 ret = 0;
 
-                remaining_size = RPC_FRAGSIZE (priv->incoming.fraghdr)
-                        - priv->incoming.frag.bytes_read;
+                remaining_size = RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read;
 
                 if (remaining_size > 0) {
                         ret = __socket_readv (this,
-                                              priv->incoming.pending_vector, 1,
-                                              &priv->incoming.pending_vector,
-                                              &priv->incoming.pending_count,
+                                              in->pending_vector, 1,
+                                              &in->pending_vector,
+                                              &in->pending_count,
                                               &bytes_read);
                 }
 
@@ -776,8 +1015,8 @@ __socket_read_simple_msg (rpc_transport_t *this)
                         break;
                 }
 
-                priv->incoming.frag.bytes_read += bytes_read;
-                priv->incoming.frag.fragcurrent += bytes_read;
+                frag->bytes_read += bytes_read;
+                frag->fragcurrent += bytes_read;
 
                 if (ret > 0) {
                         gf_log (this->name, GF_LOG_TRACE,
@@ -786,8 +1025,7 @@ __socket_read_simple_msg (rpc_transport_t *this)
                 }
 
                 if (ret == 0) {
-                        priv->incoming.frag.simple_state
-                                =  SP_STATE_SIMPLE_MSG_INIT;
+                        frag->simple_state =  SP_STATE_SIMPLE_MSG_INIT;
                 }
         }
 
@@ -823,16 +1061,26 @@ __socket_read_vectored_request (rpc_transport_t *this, rpcsvc_vector_sizer vecto
         struct iobuf     *iobuf                  = NULL;
         uint32_t          remaining_size         = 0;
         ssize_t           readsize               = 0;
+        size_t            size                   = 0;
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
+        sp_rpcfrag_request_state_t   *request    = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
 
-        switch (priv->incoming.frag.call_body.request.vector_state) {
+        /* used to reduce the indirection */
+        in = &priv->incoming;
+        frag = &in->frag;
+        request = &frag->call_body.request;
+
+        switch (request->vector_state) {
         case SP_STATE_VECTORED_REQUEST_INIT:
-                priv->incoming.frag.call_body.request.vector_sizer_state = 0;
-                addr = rpc_cred_addr (iobuf_ptr (priv->incoming.iobuf));
+                request->vector_sizer_state = 0;
+
+                addr = rpc_cred_addr (iobuf_ptr (in->iobuf));
 
                 /* also read verf flavour and verflen */
                 credlen = ntoh32 (*((uint32_t *)addr))
@@ -840,99 +1088,114 @@ __socket_read_vectored_request (rpc_transport_t *this, rpcsvc_vector_sizer vecto
 
                 __socket_proto_init_pending (priv, credlen);
 
-                priv->incoming.frag.call_body.request.vector_state =
-                        SP_STATE_READING_CREDBYTES;
+                request->vector_state = SP_STATE_READING_CREDBYTES;
 
                 /* fall through */
 
         case SP_STATE_READING_CREDBYTES:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.call_body.request.vector_state =
-                        SP_STATE_READ_CREDBYTES;
+                request->vector_state = SP_STATE_READ_CREDBYTES;
 
                 /* fall through */
 
         case SP_STATE_READ_CREDBYTES:
-                addr = rpc_verf_addr (priv->incoming.frag.fragcurrent);
+                addr = rpc_verf_addr (frag->fragcurrent);
                 verflen = ntoh32 (*((uint32_t *)addr));
 
                 if (verflen == 0) {
-                        priv->incoming.frag.call_body.request.vector_state
-                                = SP_STATE_READ_VERFBYTES;
+                        request->vector_state = SP_STATE_READ_VERFBYTES;
                         goto sp_state_read_verfbytes;
                 }
                 __socket_proto_init_pending (priv, verflen);
 
-                priv->incoming.frag.call_body.request.vector_state
-                        = SP_STATE_READING_VERFBYTES;
+                request->vector_state = SP_STATE_READING_VERFBYTES;
 
                 /* fall through */
 
         case SP_STATE_READING_VERFBYTES:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.call_body.request.vector_state =
-                        SP_STATE_READ_VERFBYTES;
+                request->vector_state = SP_STATE_READ_VERFBYTES;
 
                 /* fall through */
 
         case SP_STATE_READ_VERFBYTES:
 sp_state_read_verfbytes:
-                priv->incoming.frag.call_body.request.vector_sizer_state =
-                        vector_sizer (priv->incoming.frag.call_body.request.vector_sizer_state,
-                                      &readsize,
-                                      priv->incoming.frag.fragcurrent);
+		/* set the base_addr 'persistently' across multiple calls
+		   into the state machine */
+                in->proghdr_base_addr = frag->fragcurrent;
+
+                request->vector_sizer_state =
+                        vector_sizer (request->vector_sizer_state,
+                                      &readsize, in->proghdr_base_addr,
+                                      frag->fragcurrent);
                 __socket_proto_init_pending (priv, readsize);
-                priv->incoming.frag.call_body.request.vector_state
-                        = SP_STATE_READING_PROGHDR;
+
+                request->vector_state = SP_STATE_READING_PROGHDR;
 
                 /* fall through */
 
         case SP_STATE_READING_PROGHDR:
                 __socket_proto_read (priv, ret);
-sp_state_reading_proghdr:
-                priv->incoming.frag.call_body.request.vector_sizer_state =
-                        vector_sizer (priv->incoming.frag.call_body.request.vector_sizer_state,
-                                      &readsize,
-                                      priv->incoming.frag.fragcurrent);
+
+		request->vector_state =	SP_STATE_READ_PROGHDR;
+
+		/* fall through */
+
+	case SP_STATE_READ_PROGHDR:
+sp_state_read_proghdr:
+                request->vector_sizer_state =
+                        vector_sizer (request->vector_sizer_state,
+                                      &readsize, in->proghdr_base_addr,
+                                      frag->fragcurrent);
                 if (readsize == 0) {
-                        priv->incoming.frag.call_body.request.vector_state =
-                                SP_STATE_READ_PROGHDR;
-                } else {
-                        __socket_proto_init_pending (priv, readsize);
-                        __socket_proto_read (priv, ret);
-                        goto sp_state_reading_proghdr;
+                        request->vector_state = SP_STATE_READ_PROGHDR_XDATA;
+			goto sp_state_read_proghdr_xdata;
                 }
 
-        case SP_STATE_READ_PROGHDR:
-                if (priv->incoming.payload_vector.iov_base == NULL) {
-                        iobuf = iobuf_get (this->ctx->iobuf_pool);
+		__socket_proto_init_pending (priv, readsize);
+
+                request->vector_state =	SP_STATE_READING_PROGHDR_XDATA;
+
+		/* fall through */
+
+	case SP_STATE_READING_PROGHDR_XDATA:
+		__socket_proto_read (priv, ret);
+
+		request->vector_state =	SP_STATE_READ_PROGHDR;
+		/* check if the vector_sizer() has more to say */
+		goto sp_state_read_proghdr;
+
+        case SP_STATE_READ_PROGHDR_XDATA:
+sp_state_read_proghdr_xdata:
+                if (in->payload_vector.iov_base == NULL) {
+
+                        size = RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read;
+                        iobuf = iobuf_get2 (this->ctx->iobuf_pool, size);
                         if (!iobuf) {
                                 ret = -1;
                                 break;
                         }
 
-                        if (priv->incoming.iobref == NULL) {
-                                priv->incoming.iobref = iobref_new ();
-                                if (priv->incoming.iobref == NULL) {
+                        if (in->iobref == NULL) {
+                                in->iobref = iobref_new ();
+                                if (in->iobref == NULL) {
                                         ret = -1;
                                         iobuf_unref (iobuf);
                                         break;
                                 }
                         }
 
-                        iobref_add (priv->incoming.iobref, iobuf);
+                        iobref_add (in->iobref, iobuf);
                         iobuf_unref (iobuf);
 
-                        priv->incoming.payload_vector.iov_base
-                                = iobuf_ptr (iobuf);
+                        in->payload_vector.iov_base = iobuf_ptr (iobuf);
 
-                        priv->incoming.frag.fragcurrent = iobuf_ptr (iobuf);
+                        frag->fragcurrent = iobuf_ptr (iobuf);
                 }
 
-                priv->incoming.frag.call_body.request.vector_state =
-                        SP_STATE_READING_PROG;
+                request->vector_state = SP_STATE_READING_PROG;
 
                 /* fall through */
 
@@ -943,19 +1206,15 @@ sp_state_reading_proghdr:
 
                 ret = __socket_read_simple_msg (this);
 
-                remaining_size = RPC_FRAGSIZE (priv->incoming.fraghdr)
-                        - priv->incoming.frag.bytes_read;
+                remaining_size = RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read;
 
-                if ((ret == -1)
-                    || ((ret == 0)
-                        && (remaining_size == 0)
-                        && RPC_LASTFRAG (priv->incoming.fraghdr))) {
-                        priv->incoming.frag.call_body.request.vector_state
-                                = SP_STATE_VECTORED_REQUEST_INIT;
-                        priv->incoming.payload_vector.iov_len
-                                = (unsigned long)priv->incoming.frag.fragcurrent
-                                - (unsigned long)
-                                priv->incoming.payload_vector.iov_base;
+                if ((ret == -1) ||
+                    ((ret == 0) && (remaining_size == 0)
+                     && RPC_LASTFRAG (in->fraghdr))) {
+                        request->vector_state = SP_STATE_VECTORED_REQUEST_INIT;
+                        in->payload_vector.iov_len
+                                = ((unsigned long)frag->fragcurrent
+                                   - (unsigned long)in->payload_vector.iov_base);
                 }
                 break;
         }
@@ -973,46 +1232,53 @@ __socket_read_request (rpc_transport_t *this)
         int               ret                = -1;
         char             *buf                = NULL;
         rpcsvc_vector_sizer     vector_sizer = NULL;
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
+        sp_rpcfrag_request_state_t   *request    = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
 
-        switch (priv->incoming.frag.call_body.request.header_state) {
+        /* used to reduce the indirection */
+        in = &priv->incoming;
+        frag = &in->frag;
+        request = &frag->call_body.request;
+
+        switch (request->header_state) {
 
         case SP_STATE_REQUEST_HEADER_INIT:
 
                 __socket_proto_init_pending (priv, RPC_CALL_BODY_SIZE);
 
-                priv->incoming.frag.call_body.request.header_state
-                        = SP_STATE_READING_RPCHDR1;
+                request->header_state = SP_STATE_READING_RPCHDR1;
 
                 /* fall through */
 
         case SP_STATE_READING_RPCHDR1:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.call_body.request.header_state =
-                        SP_STATE_READ_RPCHDR1;
+                request->header_state = SP_STATE_READ_RPCHDR1;
 
                 /* fall through */
 
         case SP_STATE_READ_RPCHDR1:
-                buf = rpc_prognum_addr (iobuf_ptr (priv->incoming.iobuf));
+                buf = rpc_prognum_addr (iobuf_ptr (in->iobuf));
                 prognum = ntoh32 (*((uint32_t *)buf));
 
-                buf = rpc_progver_addr (iobuf_ptr (priv->incoming.iobuf));
+                buf = rpc_progver_addr (iobuf_ptr (in->iobuf));
                 progver = ntoh32 (*((uint32_t *)buf));
 
-                buf = rpc_procnum_addr (iobuf_ptr (priv->incoming.iobuf));
+                buf = rpc_procnum_addr (iobuf_ptr (in->iobuf));
                 procnum = ntoh32 (*((uint32_t *)buf));
 
                 if (this->listener) {
-                        /* this check is needed as rpcsvc and rpc-clnt actor structures are
-                         * not same */
-                        vector_sizer = rpcsvc_get_program_vector_sizer ((rpcsvc_t *)this->mydata,
-                                                                        prognum, progver, procnum);
+                        /* this check is needed as rpcsvc and rpc-clnt
+                         * actor structures are not same */
+                        vector_sizer =
+                                rpcsvc_get_program_vector_sizer ((rpcsvc_t *)this->mydata,
+                                                                 prognum, progver, procnum);
                 }
 
                 if (vector_sizer) {
@@ -1021,15 +1287,13 @@ __socket_read_request (rpc_transport_t *this)
                         ret = __socket_read_simple_request (this);
                 }
 
-                remaining_size = RPC_FRAGSIZE (priv->incoming.fraghdr)
-                        - priv->incoming.frag.bytes_read;
+                remaining_size = RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read;
 
                 if ((ret == -1)
                     || ((ret == 0)
                         && (remaining_size == 0)
-                        && (RPC_LASTFRAG (priv->incoming.fraghdr)))) {
-                        priv->incoming.frag.call_body.request.header_state =
-                                SP_STATE_REQUEST_HEADER_INIT;
+                        && (RPC_LASTFRAG (in->fraghdr)))) {
+                        request->header_state = SP_STATE_REQUEST_HEADER_INIT;
                 }
 
                 break;
@@ -1043,32 +1307,37 @@ out:
 inline int
 __socket_read_accepted_successful_reply (rpc_transport_t *this)
 {
-        socket_private_t *priv                     = NULL;
-        int               ret                      = 0;
-        struct iobuf     *iobuf                    = NULL;
-        uint32_t          gluster_read_rsp_hdr_len = 0;
-        gfs3_read_rsp     read_rsp                 = {0, };
+        socket_private_t *priv              = NULL;
+        int               ret               = 0;
+        struct iobuf     *iobuf             = NULL;
+        gfs3_read_rsp     read_rsp          = {0, };
+        ssize_t           size              = 0;
+        ssize_t           default_read_size = 0;
+        char             *proghdr_buf       = NULL;
+        XDR               xdr;
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
 
-        switch (priv->incoming.frag.call_body.reply.accepted_success_state) {
+        /* used to reduce the indirection */
+        in = &priv->incoming;
+        frag = &in->frag;
+
+        switch (frag->call_body.reply.accepted_success_state) {
 
         case SP_STATE_ACCEPTED_SUCCESS_REPLY_INIT:
-                gluster_read_rsp_hdr_len = xdr_sizeof ((xdrproc_t) xdr_gfs3_read_rsp,
-                                                       &read_rsp);
+                default_read_size = xdr_sizeof ((xdrproc_t) xdr_gfs3_read_rsp,
+                                                &read_rsp);
 
-                if (gluster_read_rsp_hdr_len == 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "xdr_sizeof on gfs3_read_rsp failed");
-                        ret = -1;
-                        goto out;
-                }
-                __socket_proto_init_pending (priv, gluster_read_rsp_hdr_len);
+                proghdr_buf = frag->fragcurrent;
 
-                priv->incoming.frag.call_body.reply.accepted_success_state
+                __socket_proto_init_pending (priv, default_read_size);
+
+                frag->call_body.reply.accepted_success_state
                         = SP_STATE_READING_PROC_HEADER;
 
                 /* fall through */
@@ -1076,34 +1345,70 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
         case SP_STATE_READING_PROC_HEADER:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.call_body.reply.accepted_success_state
-                        = SP_STATE_READ_PROC_HEADER;
+                /* there can be 'xdata' in read response, figure it out */
+                xdrmem_create (&xdr, proghdr_buf, default_read_size,
+                               XDR_DECODE);
 
-                if (priv->incoming.payload_vector.iov_base == NULL) {
-                        iobuf = iobuf_get (this->ctx->iobuf_pool);
+                /* This will fail if there is xdata sent from server, if not,
+                   well and good, we don't need to worry about  */
+                xdr_gfs3_read_rsp (&xdr, &read_rsp);
+
+                free (read_rsp.xdata.xdata_val);
+
+                /* need to round off to proper roof (%4), as XDR packing pads
+                   the end of opaque object with '0' */
+                size = roof (read_rsp.xdata.xdata_len, 4);
+
+                if (!size) {
+                        frag->call_body.reply.accepted_success_state
+                                = SP_STATE_READ_PROC_OPAQUE;
+                        goto read_proc_opaque;
+                }
+
+                __socket_proto_init_pending (priv, size);
+
+                frag->call_body.reply.accepted_success_state
+                        = SP_STATE_READING_PROC_OPAQUE;
+
+        case SP_STATE_READING_PROC_OPAQUE:
+                __socket_proto_read (priv, ret);
+
+                frag->call_body.reply.accepted_success_state
+                        = SP_STATE_READ_PROC_OPAQUE;
+
+        case SP_STATE_READ_PROC_OPAQUE:
+        read_proc_opaque:
+                if (in->payload_vector.iov_base == NULL) {
+
+                        size = (RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read);
+
+                        iobuf = iobuf_get2 (this->ctx->iobuf_pool, size);
                         if (iobuf == NULL) {
                                 ret = -1;
                                 goto out;
                         }
 
-                        if (priv->incoming.iobref == NULL) {
-                                priv->incoming.iobref = iobref_new ();
-                                if (priv->incoming.iobref == NULL) {
+                        if (in->iobref == NULL) {
+                                in->iobref = iobref_new ();
+                                if (in->iobref == NULL) {
                                         ret = -1;
                                         iobuf_unref (iobuf);
                                         goto out;
                                 }
                         }
 
-                        iobref_add (priv->incoming.iobref, iobuf);
+                        iobref_add (in->iobref, iobuf);
                         iobuf_unref (iobuf);
 
-                        priv->incoming.payload_vector.iov_base
-                                = iobuf_ptr (iobuf);
+                        in->payload_vector.iov_base = iobuf_ptr (iobuf);
+
+                        in->payload_vector.iov_len = size;
                 }
 
-                priv->incoming.frag.fragcurrent
-                        = priv->incoming.payload_vector.iov_base;
+                frag->fragcurrent = in->payload_vector.iov_base;
+
+                frag->call_body.reply.accepted_success_state
+                        = SP_STATE_READ_PROC_HEADER;
 
                 /* fall through */
 
@@ -1111,9 +1416,8 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
                 /* now read the entire remaining msg into new iobuf */
                 ret = __socket_read_simple_msg (this);
                 if ((ret == -1)
-                    || ((ret == 0)
-                        && RPC_LASTFRAG (priv->incoming.fraghdr))) {
-                        priv->incoming.frag.call_body.reply.accepted_success_state
+                    || ((ret == 0) && RPC_LASTFRAG (in->fraghdr))) {
+                        frag->call_body.reply.accepted_success_state
                                 = SP_STATE_ACCEPTED_SUCCESS_REPLY_INIT;
                 }
 
@@ -1135,19 +1439,24 @@ __socket_read_accepted_reply (rpc_transport_t *this)
         char             *buf            = NULL;
         uint32_t          verflen        = 0, len = 0;
         uint32_t          remaining_size = 0;
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
+        /* used to reduce the indirection */
+        in = &priv->incoming;
+        frag = &in->frag;
 
-        switch (priv->incoming.frag.call_body.reply.accepted_state) {
+        switch (frag->call_body.reply.accepted_state) {
 
         case SP_STATE_ACCEPTED_REPLY_INIT:
                 __socket_proto_init_pending (priv,
                                              RPC_AUTH_FLAVOUR_N_LENGTH_SIZE);
 
-                priv->incoming.frag.call_body.reply.accepted_state
+                frag->call_body.reply.accepted_state
                         = SP_STATE_READING_REPLY_VERFLEN;
 
                 /* fall through */
@@ -1155,13 +1464,13 @@ __socket_read_accepted_reply (rpc_transport_t *this)
         case SP_STATE_READING_REPLY_VERFLEN:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.call_body.reply.accepted_state
+                frag->call_body.reply.accepted_state
                         = SP_STATE_READ_REPLY_VERFLEN;
 
                 /* fall through */
 
         case SP_STATE_READ_REPLY_VERFLEN:
-                buf = rpc_reply_verflen_addr (priv->incoming.frag.fragcurrent);
+                buf = rpc_reply_verflen_addr (frag->fragcurrent);
 
                 verflen = ntoh32 (*((uint32_t *) buf));
 
@@ -1170,7 +1479,7 @@ __socket_read_accepted_reply (rpc_transport_t *this)
 
                 __socket_proto_init_pending (priv, len);
 
-                priv->incoming.frag.call_body.reply.accepted_state
+                frag->call_body.reply.accepted_state
                         = SP_STATE_READING_REPLY_VERFBYTES;
 
                 /* fall through */
@@ -1178,19 +1487,19 @@ __socket_read_accepted_reply (rpc_transport_t *this)
         case SP_STATE_READING_REPLY_VERFBYTES:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.call_body.reply.accepted_state
+                frag->call_body.reply.accepted_state
                         = SP_STATE_READ_REPLY_VERFBYTES;
 
-                buf = rpc_reply_accept_status_addr (priv->incoming.frag.fragcurrent);
+                buf = rpc_reply_accept_status_addr (frag->fragcurrent);
 
-                priv->incoming.frag.call_body.reply.accept_status
+                frag->call_body.reply.accept_status
                         = ntoh32 (*(uint32_t *) buf);
 
                 /* fall through */
 
         case SP_STATE_READ_REPLY_VERFBYTES:
 
-                if (priv->incoming.frag.call_body.reply.accept_status
+                if (frag->call_body.reply.accept_status
                     == SUCCESS) {
                         ret = __socket_read_accepted_successful_reply (this);
                 } else {
@@ -1200,14 +1509,13 @@ __socket_read_accepted_reply (rpc_transport_t *this)
                         ret = __socket_read_simple_msg (this);
                 }
 
-                remaining_size = RPC_FRAGSIZE (priv->incoming.fraghdr)
-                        - priv->incoming.frag.bytes_read;
+                remaining_size = RPC_FRAGSIZE (in->fraghdr)
+                        - frag->bytes_read;
 
                 if ((ret == -1)
-                    || ((ret == 0)
-                        && (remaining_size == 0)
-                        && (RPC_LASTFRAG (priv->incoming.fraghdr)))) {
-                        priv->incoming.frag.call_body.reply.accepted_state
+                    || ((ret == 0) && (remaining_size == 0)
+                        && (RPC_LASTFRAG (in->fraghdr)))) {
+                        frag->call_body.reply.accepted_state
                                 = SP_STATE_ACCEPTED_REPLY_INIT;
                 }
 
@@ -1236,18 +1544,22 @@ __socket_read_vectored_reply (rpc_transport_t *this)
         int               ret            = 0;
         char             *buf            = NULL;
         uint32_t          remaining_size = 0;
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
+        in = &priv->incoming;
+        frag = &in->frag;
 
-        switch (priv->incoming.frag.call_body.reply.status_state) {
+        switch (frag->call_body.reply.status_state) {
 
         case SP_STATE_ACCEPTED_REPLY_INIT:
                 __socket_proto_init_pending (priv, RPC_REPLY_STATUS_SIZE);
 
-                priv->incoming.frag.call_body.reply.status_state
+                frag->call_body.reply.status_state
                         = SP_STATE_READING_REPLY_STATUS;
 
                 /* fall through */
@@ -1255,37 +1567,33 @@ __socket_read_vectored_reply (rpc_transport_t *this)
         case SP_STATE_READING_REPLY_STATUS:
                 __socket_proto_read (priv, ret);
 
-                buf = rpc_reply_status_addr (priv->incoming.frag.fragcurrent);
+                buf = rpc_reply_status_addr (frag->fragcurrent);
 
-                priv->incoming.frag.call_body.reply.accept_status
+                frag->call_body.reply.accept_status
                         = ntoh32 (*((uint32_t *) buf));
 
-                priv->incoming.frag.call_body.reply.status_state
+                frag->call_body.reply.status_state
                         = SP_STATE_READ_REPLY_STATUS;
 
                 /* fall through */
 
         case SP_STATE_READ_REPLY_STATUS:
-                if (priv->incoming.frag.call_body.reply.accept_status
-                    == MSG_ACCEPTED) {
+                if (frag->call_body.reply.accept_status == MSG_ACCEPTED) {
                         ret = __socket_read_accepted_reply (this);
                 } else {
                         ret = __socket_read_denied_reply (this);
                 }
 
-                remaining_size = RPC_FRAGSIZE (priv->incoming.fraghdr)
-                        - priv->incoming.frag.bytes_read;
+                remaining_size = RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read;
 
                 if ((ret == -1)
-                    || ((ret == 0)
-                        && (remaining_size == 0)
-                        && (RPC_LASTFRAG (priv->incoming.fraghdr)))) {
-                        priv->incoming.frag.call_body.reply.status_state
+                    || ((ret == 0) && (remaining_size == 0)
+                        && (RPC_LASTFRAG (in->fraghdr)))) {
+                        frag->call_body.reply.status_state
                                 = SP_STATE_ACCEPTED_REPLY_INIT;
-                        priv->incoming.payload_vector.iov_len
-                                = (unsigned long)priv->incoming.frag.fragcurrent
-                                - (unsigned long)
-                                priv->incoming.payload_vector.iov_base;
+                        in->payload_vector.iov_len
+                                = (unsigned long)frag->fragcurrent
+                                - (unsigned long)in->payload_vector.iov_base;
                 }
                 break;
         }
@@ -1311,26 +1619,29 @@ __socket_read_reply (rpc_transport_t *this)
         int32_t             ret          = -1;
         rpc_request_info_t *request_info = NULL;
         char                map_xid      = 0;
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
+        in = &priv->incoming;
+        frag = &in->frag;
 
-        buf = rpc_xid_addr (iobuf_ptr (priv->incoming.iobuf));
+        buf = rpc_xid_addr (iobuf_ptr (in->iobuf));
 
-        if (priv->incoming.request_info == NULL) {
-                priv->incoming.request_info = GF_CALLOC (1,
-                                                         sizeof (*request_info),
-                                                         gf_common_mt_rpc_trans_reqinfo_t);
-                if (priv->incoming.request_info == NULL) {
+        if (in->request_info == NULL) {
+                in->request_info = GF_CALLOC (1, sizeof (*request_info),
+                                              gf_common_mt_rpc_trans_reqinfo_t);
+                if (in->request_info == NULL) {
                         goto out;
                 }
 
                 map_xid = 1;
         }
 
-        request_info = priv->incoming.request_info;
+        request_info = in->request_info;
 
         if (map_xid) {
                 request_info->xid = ntoh32 (*((uint32_t *) buf));
@@ -1342,7 +1653,7 @@ __socket_read_reply (rpc_transport_t *this)
                 {
                         ret = rpc_transport_notify (this,
                                                     RPC_TRANSPORT_MAP_XID_REQUEST,
-                                                    priv->incoming.request_info);
+                                                    in->request_info);
                 }
                 pthread_mutex_lock (&priv->lock);
 
@@ -1353,13 +1664,11 @@ __socket_read_reply (rpc_transport_t *this)
                 }
         }
 
-        if ((request_info->prognum == GLUSTER3_1_FOP_PROGRAM)
+        if ((request_info->prognum == GLUSTER_FOP_PROGRAM)
             && (request_info->procnum == GF_FOP_READ)) {
                 if (map_xid && request_info->rsp.rsp_payload_count != 0) {
-                        priv->incoming.iobref
-                                = iobref_ref (request_info->rsp.rsp_iobref);
-                        priv->incoming.payload_vector
-                                = *request_info->rsp.rsp_payload;
+                        in->iobref = iobref_ref (request_info->rsp.rsp_iobref);
+                        in->payload_vector = *request_info->rsp.rsp_payload;
                 }
 
                 ret = __socket_read_vectored_reply (this);
@@ -1379,35 +1688,40 @@ __socket_read_frag (rpc_transport_t *this)
         int32_t           ret            = 0;
         char             *buf            = NULL;
         uint32_t          remaining_size = 0;
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
+        /* used to reduce the indirection */
+        in = &priv->incoming;
+        frag = &in->frag;
 
-        switch (priv->incoming.frag.state) {
+        switch (frag->state) {
         case SP_STATE_NADA:
                 __socket_proto_init_pending (priv, RPC_MSGTYPE_SIZE);
 
-                priv->incoming.frag.state = SP_STATE_READING_MSGTYPE;
+                frag->state = SP_STATE_READING_MSGTYPE;
 
                 /* fall through */
 
         case SP_STATE_READING_MSGTYPE:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.state = SP_STATE_READ_MSGTYPE;
+                frag->state = SP_STATE_READ_MSGTYPE;
                 /* fall through */
 
         case SP_STATE_READ_MSGTYPE:
-                buf = rpc_msgtype_addr (iobuf_ptr (priv->incoming.iobuf));
-                priv->incoming.msg_type = ntoh32 (*((uint32_t *)buf));
+                buf = rpc_msgtype_addr (iobuf_ptr (in->iobuf));
+                in->msg_type = ntoh32 (*((uint32_t *)buf));
 
-                if (priv->incoming.msg_type == CALL) {
+                if (in->msg_type == CALL) {
                         ret = __socket_read_request (this);
-                } else if (priv->incoming.msg_type == REPLY) {
+                } else if (in->msg_type == REPLY) {
                         ret = __socket_read_reply (this);
-                } else if (priv->incoming.msg_type == GF_UNIVERSAL_ANSWER) {
+                } else if (in->msg_type == GF_UNIVERSAL_ANSWER) {
                         gf_log ("rpc", GF_LOG_ERROR,
                                 "older version of protocol/process trying to "
                                 "connect from %s. use newer version on that node",
@@ -1415,19 +1729,17 @@ __socket_read_frag (rpc_transport_t *this)
                 } else {
                         gf_log ("rpc", GF_LOG_ERROR,
                                 "wrong MSG-TYPE (%d) received from %s",
-                                priv->incoming.msg_type,
+                                in->msg_type,
                                 this->peerinfo.identifier);
                         ret = -1;
                 }
 
-                remaining_size = RPC_FRAGSIZE (priv->incoming.fraghdr)
-                        - priv->incoming.frag.bytes_read;
+                remaining_size = RPC_FRAGSIZE (in->fraghdr) - frag->bytes_read;
 
                 if ((ret == -1)
-                    || ((ret == 0)
-                        && (remaining_size == 0)
-                        && (RPC_LASTFRAG (priv->incoming.fraghdr)))) {
-                        priv->incoming.frag.state = SP_STATE_NADA;
+                    || ((ret == 0) && (remaining_size == 0)
+                        && (RPC_LASTFRAG (in->fraghdr)))) {
+                        frag->state = SP_STATE_NADA;
                 }
 
                 break;
@@ -1441,24 +1753,29 @@ out:
 inline
 void __socket_reset_priv (socket_private_t *priv)
 {
-        if (priv->incoming.iobref) {
-                iobref_unref (priv->incoming.iobref);
-                priv->incoming.iobref = NULL;
+        struct gf_sock_incoming      *in         = NULL;
+
+        /* used to reduce the indirection */
+        in = &priv->incoming;
+
+        if (in->iobref) {
+                iobref_unref (in->iobref);
+                in->iobref = NULL;
         }
 
-        if (priv->incoming.iobuf) {
-                iobuf_unref (priv->incoming.iobuf);
+        if (in->iobuf) {
+                iobuf_unref (in->iobuf);
         }
 
-        if (priv->incoming.request_info != NULL) {
-                GF_FREE (priv->incoming.request_info);
-                priv->incoming.request_info = NULL;
+        if (in->request_info != NULL) {
+                GF_FREE (in->request_info);
+                in->request_info = NULL;
         }
 
-        memset (&priv->incoming.payload_vector, 0,
-                sizeof (priv->incoming.payload_vector));
+        memset (&in->payload_vector, 0,
+                sizeof (in->payload_vector));
 
-        priv->incoming.iobuf = NULL;
+        in->iobuf = NULL;
 }
 
 
@@ -1471,34 +1788,37 @@ __socket_proto_state_machine (rpc_transport_t *this,
         struct iobuf     *iobuf  = NULL;
         struct iobref    *iobref = NULL;
         struct iovec      vector[2];
+        struct gf_sock_incoming      *in         = NULL;
+        struct gf_sock_incoming_frag *frag       = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
 
         priv = this->private;
-        while (priv->incoming.record_state != SP_STATE_COMPLETE) {
-                switch (priv->incoming.record_state) {
+        /* used to reduce the indirection */
+        in = &priv->incoming;
+        frag = &in->frag;
+
+        while (in->record_state != SP_STATE_COMPLETE) {
+                switch (in->record_state) {
 
                 case SP_STATE_NADA:
-                        priv->incoming.total_bytes_read = 0;
-                        priv->incoming.payload_vector.iov_len = 0;
+                        in->total_bytes_read = 0;
+                        in->payload_vector.iov_len = 0;
 
-                        priv->incoming.pending_vector = priv->incoming.vector;
-                        priv->incoming.pending_vector->iov_base =
-                                &priv->incoming.fraghdr;
+                        in->pending_vector = in->vector;
+                        in->pending_vector->iov_base =  &in->fraghdr;
 
-                        priv->incoming.pending_vector->iov_len  =
-                                sizeof (priv->incoming.fraghdr);
+                        in->pending_vector->iov_len  = sizeof (in->fraghdr);
 
-                        priv->incoming.record_state = SP_STATE_READING_FRAGHDR;
+                        in->record_state = SP_STATE_READING_FRAGHDR;
 
                         /* fall through */
 
                 case SP_STATE_READING_FRAGHDR:
-                        ret = __socket_readv (this,
-                                              priv->incoming.pending_vector, 1,
-                                              &priv->incoming.pending_vector,
-                                              &priv->incoming.pending_count,
+                        ret = __socket_readv (this, in->pending_vector, 1,
+                                              &in->pending_vector,
+                                              &in->pending_count,
                                               NULL);
                         if (ret == -1) {
                                 if (priv->read_fail_log == 1) {
@@ -1519,44 +1839,40 @@ __socket_proto_state_machine (rpc_transport_t *this,
                         }
 
                         if (ret == 0) {
-                                priv->incoming.record_state =
-                                        SP_STATE_READ_FRAGHDR;
+                                in->record_state = SP_STATE_READ_FRAGHDR;
                         }
                         /* fall through */
 
                 case SP_STATE_READ_FRAGHDR:
 
-                        priv->incoming.fraghdr = ntoh32 (priv->incoming.fraghdr);
-                        priv->incoming.record_state = SP_STATE_READING_FRAG;
-                        priv->incoming.total_bytes_read
-                                += RPC_FRAGSIZE(priv->incoming.fraghdr);
+                        in->fraghdr = ntoh32 (in->fraghdr);
+                        in->total_bytes_read += RPC_FRAGSIZE(in->fraghdr);
                         iobuf = iobuf_get2 (this->ctx->iobuf_pool,
-                                            priv->incoming.total_bytes_read +
-                                            sizeof (priv->incoming.fraghdr));
+                                            (in->total_bytes_read +
+                                             sizeof (in->fraghdr)));
                         if (!iobuf) {
                                 ret = -ENOMEM;
                                 goto out;
                         }
 
-                        priv->incoming.iobuf = iobuf;
-                        priv->incoming.iobuf_size = 0;
-                        priv->incoming.frag.fragcurrent = iobuf_ptr (iobuf);
+                        in->iobuf = iobuf;
+                        in->iobuf_size = 0;
+                        frag->fragcurrent = iobuf_ptr (iobuf);
+                        in->record_state = SP_STATE_READING_FRAG;
                         /* fall through */
 
                 case SP_STATE_READING_FRAG:
                         ret = __socket_read_frag (this);
 
-                        if ((ret == -1)
-                            || (priv->incoming.frag.bytes_read !=
-                                RPC_FRAGSIZE (priv->incoming.fraghdr))) {
+                        if ((ret == -1) ||
+                            (frag->bytes_read != RPC_FRAGSIZE (in->fraghdr))) {
                                 goto out;
                         }
 
-                        priv->incoming.frag.bytes_read = 0;
+                        frag->bytes_read = 0;
 
-                        if (!RPC_LASTFRAG (priv->incoming.fraghdr)) {
-                                priv->incoming.record_state =
-                                        SP_STATE_READING_FRAGHDR;
+                        if (!RPC_LASTFRAG (in->fraghdr)) {
+                                in->record_state = SP_STATE_READING_FRAGHDR;
                                 break;
                         }
 
@@ -1565,44 +1881,39 @@ __socket_proto_state_machine (rpc_transport_t *this,
                          */
                         if (pollin != NULL) {
                                 int count = 0;
-                                priv->incoming.iobuf_size
-                                        = priv->incoming.total_bytes_read
-                                        - priv->incoming.payload_vector.iov_len;
+                                in->iobuf_size = (in->total_bytes_read -
+                                                  in->payload_vector.iov_len);
 
                                 memset (vector, 0, sizeof (vector));
 
-                                if (priv->incoming.iobref == NULL) {
-                                        priv->incoming.iobref = iobref_new ();
-                                        if (priv->incoming.iobref == NULL) {
+                                if (in->iobref == NULL) {
+                                        in->iobref = iobref_new ();
+                                        if (in->iobref == NULL) {
                                                 ret = -1;
                                                 goto out;
                                         }
                                 }
 
-                                vector[count].iov_base
-                                        = iobuf_ptr (priv->incoming.iobuf);
-                                vector[count].iov_len
-                                        = priv->incoming.iobuf_size;
+                                vector[count].iov_base = iobuf_ptr (in->iobuf);
+                                vector[count].iov_len = in->iobuf_size;
 
-                                iobref = priv->incoming.iobref;
+                                iobref = in->iobref;
 
                                 count++;
 
-                                if (priv->incoming.payload_vector.iov_base
-                                    != NULL) {
-                                        vector[count]
-                                                = priv->incoming.payload_vector;
+                                if (in->payload_vector.iov_base != NULL) {
+                                        vector[count] = in->payload_vector;
                                         count++;
                                 }
 
                                 *pollin = rpc_transport_pollin_alloc (this,
                                                                       vector,
                                                                       count,
-                                                                      priv->incoming.iobuf,
+                                                                      in->iobuf,
                                                                       iobref,
-                                                                      priv->incoming.request_info);
-                                iobuf_unref (priv->incoming.iobuf);
-                                priv->incoming.iobuf = NULL;
+                                                                      in->request_info);
+                                iobuf_unref (in->iobuf);
+                                in->iobuf = NULL;
 
                                 if (*pollin == NULL) {
                                         gf_log (this->name, GF_LOG_WARNING,
@@ -1610,12 +1921,12 @@ __socket_proto_state_machine (rpc_transport_t *this,
                                         ret = -1;
                                         goto out;
                                 }
-                                if (priv->incoming.msg_type == REPLY)
+                                if (in->msg_type == REPLY)
                                         (*pollin)->is_reply = 1;
 
-                                priv->incoming.request_info = NULL;
+                                in->request_info = NULL;
                         }
-                        priv->incoming.record_state = SP_STATE_COMPLETE;
+                        in->record_state = SP_STATE_COMPLETE;
                         break;
 
                 case SP_STATE_COMPLETE:
@@ -1627,8 +1938,8 @@ __socket_proto_state_machine (rpc_transport_t *this,
                 }
         }
 
-        if (priv->incoming.record_state == SP_STATE_COMPLETE) {
-                priv->incoming.record_state = SP_STATE_NADA;
+        if (in->record_state == SP_STATE_COMPLETE) {
+                in->record_state = SP_STATE_NADA;
                 __socket_reset_priv (priv);
         }
 
@@ -1674,7 +1985,6 @@ socket_event_poll_in (rpc_transport_t *this)
         if (pollin != NULL) {
                 ret = rpc_transport_notify (this, RPC_TRANSPORT_MSG_RECEIVED,
                                             pollin);
-
                 rpc_transport_pollin_destroy (pollin);
         }
 
@@ -1697,8 +2007,10 @@ socket_connect_finish (rpc_transport_t *this)
 
         pthread_mutex_lock (&priv->lock);
         {
-                if (priv->connected)
+                if (priv->connected != 0)
                         goto unlock;
+
+                get_transport_identifiers (this);
 
                 ret = __socket_connect_finish (priv->sock);
 
@@ -1740,7 +2052,6 @@ socket_connect_finish (rpc_transport_t *this)
                         priv->connected = 1;
                         priv->connect_finish_log = 0;
                         event = RPC_TRANSPORT_CONNECT;
-                        get_transport_identifiers (this);
                 }
         }
 unlock:
@@ -1759,9 +2070,9 @@ int
 socket_event_handler (int fd, int idx, void *data,
                       int poll_in, int poll_out, int poll_err)
 {
-        rpc_transport_t      *this = NULL;
+        rpc_transport_t  *this = NULL;
         socket_private_t *priv = NULL;
-        int               ret = 0;
+	int               ret = -1;
 
         this = data;
         GF_VALIDATE_OR_GOTO ("socket", this, out);
@@ -1771,16 +2082,13 @@ socket_event_handler (int fd, int idx, void *data,
         THIS = this->xl;
         priv = this->private;
 
-
         pthread_mutex_lock (&priv->lock);
         {
                 priv->idx = idx;
         }
         pthread_mutex_unlock (&priv->lock);
 
-        if (!priv->connected) {
-                ret = socket_connect_finish (this);
-        }
+	ret = (priv->connected == 1) ? 0 : socket_connect_finish(this);
 
         if (!ret && poll_out) {
                 ret = socket_event_poll_out (this);
@@ -1796,11 +2104,140 @@ socket_event_handler (int fd, int idx, void *data,
                         "disconnecting now");
                 socket_event_poll_err (this);
                 rpc_transport_unref (this);
-        }
+	}
 
 out:
-        return 0;
+	return ret;
 }
+
+
+void *
+socket_poller (void *ctx)
+{
+        rpc_transport_t  *this = ctx;
+        socket_private_t *priv = this->private;
+	struct pollfd     pfd[2] = {{0,},};
+	gf_boolean_t      to_write = _gf_false;
+	int               ret = 0;
+	int               orig_gen;
+
+        if (priv->use_ssl) {
+                if (ssl_setup_connection(this,priv->connected) < 0) {
+                        gf_log (this->name,GF_LOG_ERROR, "%s setup failed",
+                                priv->connected ? "server" : "client");
+                        goto err;
+                }
+        }
+
+        if (!priv->bio) {
+                ret = __socket_nonblock (priv->sock);
+                if (ret == -1) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "NBIO on %d failed (%s)",
+                                priv->sock, strerror (errno));
+                        goto err;
+                }
+        }
+
+	orig_gen = ++(priv->socket_gen);
+
+        if (priv->connected == 0) {
+		THIS = this->xl;
+                ret = socket_connect_finish (this);
+                if (ret != 0) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "asynchronous socket_connect_finish failed");
+                }
+        }
+
+        ret = rpc_transport_notify (this->listener,
+                                    RPC_TRANSPORT_ACCEPT, this);
+        if (ret != 0) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "asynchronous rpc_transport_notify failed");
+        }
+
+	for (;;) {
+		if (priv->socket_gen != orig_gen) {
+			gf_log(this->name,GF_LOG_DEBUG,
+			       "redundant poller exiting");
+			return NULL;
+		}
+		pthread_mutex_lock(&priv->lock);
+		to_write = !list_empty(&priv->ioq);
+		pthread_mutex_unlock(&priv->lock);
+		pfd[0].fd = priv->pipe[0];
+		pfd[0].events = POLL_MASK_ERROR;
+		pfd[0].revents = 0;
+		pfd[1].fd = priv->sock;
+		pfd[1].events = POLL_MASK_INPUT | POLL_MASK_ERROR;
+		pfd[1].revents = 0;
+		if (to_write) {
+			pfd[1].events |= POLL_MASK_OUTPUT;
+		}
+		else {
+			pfd[0].events |= POLL_MASK_INPUT;
+		}
+		if (poll(pfd,2,-1) < 0) {
+			gf_log(this->name,GF_LOG_ERROR,"poll failed");
+			break;
+		}
+		if (pfd[0].revents & POLL_MASK_ERROR) {
+			gf_log(this->name,GF_LOG_ERROR,
+			       "poll error on pipe");
+			break;
+		}
+		/* Only glusterd actually seems to need this. */
+		THIS = this->xl;
+		if (pfd[1].revents & POLL_MASK_INPUT) {
+			ret = socket_event_poll_in(this);
+			if (ret >= 0) {
+				/* Suppress errors while making progress. */
+				pfd[1].revents &= ~POLL_MASK_ERROR;
+			}
+			else if (errno == ENOTCONN) {
+				ret = 0;
+			}
+		}
+		else if (pfd[1].revents & POLL_MASK_OUTPUT) {
+			ret = socket_event_poll_out(this);
+			if (ret >= 0) {
+				/* Suppress errors while making progress. */
+				pfd[1].revents &= ~POLL_MASK_ERROR;
+			}
+			else if (errno == ENOTCONN) {
+				ret = 0;
+			}
+		}
+		else {
+			/*
+			 * This usually means that we left poll() because
+			 * somebody pushed a byte onto our pipe.  That wakeup
+			 * is why the pipe is there, but once awake we can do
+			 * all the checking we need on the next iteration.
+			 */
+			ret = 0;
+		}
+		if (pfd[1].revents & POLL_MASK_ERROR) {
+			gf_log(this->name,GF_LOG_ERROR,
+			       "poll error on socket");
+			break;
+		}
+		if (ret < 0) {
+			gf_log(this->name,GF_LOG_ERROR,
+			       "error in polling loop");
+			break;
+		}
+	}
+
+err:
+	/* All (and only) I/O errors should come here. */
+	__socket_disconnect (this);
+        rpc_transport_notify (this->listener, RPC_TRANSPORT_DISCONNECT, this);
+	rpc_transport_unref (this);
+	return NULL;
+}
+
 
 
 int
@@ -1841,19 +2278,6 @@ socket_server_event_handler (int fd, int idx, void *data,
                                 goto unlock;
                         }
 
-                        if (!priv->bio) {
-                                ret = __socket_nonblock (new_sock);
-
-                                if (ret == -1) {
-                                        gf_log (this->name, GF_LOG_WARNING,
-                                                "NBIO on %d failed (%s)",
-                                                new_sock, strerror (errno));
-
-                                        close (new_sock);
-                                        goto unlock;
-                                }
-                        }
-
                         if (priv->nodelay) {
                                 ret = __socket_nodelay (new_sock);
                                 if (ret == -1) {
@@ -1866,6 +2290,7 @@ socket_server_event_handler (int fd, int idx, void *data,
 
                         if (priv->keepalive) {
                                 ret = __socket_keepalive (new_sock,
+                                                          new_sockaddr.ss_family,
                                                           priv->keepaliveintvl,
                                                           priv->keepaliveidle);
                                 if (ret == -1)
@@ -1900,7 +2325,11 @@ socket_server_event_handler (int fd, int idx, void *data,
                         }
 
                         get_transport_identifiers (new_trans);
-                        socket_init (new_trans);
+                        ret = socket_init(new_trans);
+                        if (ret != 0) {
+                                close(new_sock);
+                                goto unlock;
+                        }
                         new_trans->ops = this->ops;
                         new_trans->init = this->init;
                         new_trans->fini = this->fini;
@@ -1911,20 +2340,66 @@ socket_server_event_handler (int fd, int idx, void *data,
                         new_trans->listener = this;
                         new_priv = new_trans->private;
 
+			new_priv->use_ssl = priv->use_ssl;
+			new_priv->sock = new_sock;
+			new_priv->own_thread = priv->own_thread;
+
+                        new_priv->ssl_ctx = priv->ssl_ctx;
+			if (priv->use_ssl && !priv->own_thread) {
+				if (ssl_setup_connection(new_trans,1) < 0) {
+					gf_log(this->name,GF_LOG_ERROR,
+					       "server setup failed");
+					close(new_sock);
+					goto unlock;
+				}
+			}
+
+                        if (!priv->bio && !priv->own_thread) {
+                                ret = __socket_nonblock (new_sock);
+
+                                if (ret == -1) {
+                                        gf_log (this->name, GF_LOG_WARNING,
+                                                "NBIO on %d failed (%s)",
+                                                new_sock, strerror (errno));
+
+                                        close (new_sock);
+                                        goto unlock;
+                                }
+                        }
+
                         pthread_mutex_lock (&new_priv->lock);
                         {
-                                new_priv->sock = new_sock;
+                                /*
+                                 * In the own_thread case, this is used to
+                                 * indicate that we're initializing a server
+                                 * connection.
+                                 */
                                 new_priv->connected = 1;
                                 rpc_transport_ref (new_trans);
 
-                                new_priv->idx =
-                                        event_register (ctx->event_pool,
-                                                        new_sock,
-                                                        socket_event_handler,
-                                                        new_trans, 1, 0);
+				if (new_priv->own_thread) {
+					if (pipe(new_priv->pipe) < 0) {
+						gf_log(this->name,GF_LOG_ERROR,
+						       "could not create pipe");
+					}
+					if (pthread_create(&new_priv->thread,
+							NULL, socket_poller,
+							new_trans) != 0) {
+						gf_log(this->name,GF_LOG_ERROR,
+						       "could not create poll thread");
+					}
+				}
+				else {
+					new_priv->idx =
+						event_register (ctx->event_pool,
+								new_sock,
+								socket_event_handler,
+								new_trans,
+								1, 0);
+					if (new_priv->idx == -1)
+						ret = -1;
+				}
 
-                                if (new_priv->idx == -1)
-                                        ret = -1;
                         }
                         pthread_mutex_unlock (&new_priv->lock);
                         if (ret == -1) {
@@ -1933,8 +2408,10 @@ socket_server_event_handler (int fd, int idx, void *data,
                                 goto unlock;
                         }
 
-                        ret = rpc_transport_notify (this, RPC_TRANSPORT_ACCEPT,
-                                                    new_trans);
+                        if (!priv->own_thread) {
+                                ret = rpc_transport_notify (this,
+                                        RPC_TRANSPORT_ACCEPT, new_trans);
+                        }
                 }
         }
 unlock:
@@ -2014,6 +2491,20 @@ socket_connect (rpc_transport_t *this, int port)
         if (port > 0) {
                 sock_union.sin.sin_port = htons (port);
         }
+        if (ntohs(sock_union.sin.sin_port) == GF_DEFAULT_SOCKET_LISTEN_PORT) {
+                if (priv->use_ssl) {
+                        gf_log(this->name,GF_LOG_DEBUG,
+                               "disabling SSL for portmapper connection");
+                        priv->use_ssl = _gf_false;
+                }
+        }
+        else {
+                if (priv->ssl_enabled && !priv->use_ssl) {
+                        gf_log(this->name,GF_LOG_DEBUG,
+                               "re-enabling SSL for I/O connection");
+                        priv->use_ssl = _gf_true;
+                }
+        }
         pthread_mutex_lock (&priv->lock);
         {
                 if (priv->sock != -1) {
@@ -2037,49 +2528,41 @@ socket_connect (rpc_transport_t *this, int port)
                 /* Cant help if setting socket options fails. We can continue
                  * working nonetheless.
                  */
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting receive window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
-                }
-
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting send window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
-                }
-
-
-                if (priv->nodelay) {
-                        ret = __socket_nodelay (priv->sock);
-                        if (ret == -1) {
+                if (priv->windowsize != 0) {
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
                                 gf_log (this->name, GF_LOG_ERROR,
-                                        "setsockopt() failed for NODELAY (%s)",
+                                        "setting receive window "
+                                        "size failed: %d: %d: %s",
+                                        priv->sock, priv->windowsize,
+                                        strerror (errno));
+                        }
+
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "setting send window size "
+                                        "failed: %d: %d: %s",
+                                        priv->sock, priv->windowsize,
                                         strerror (errno));
                         }
                 }
 
-                if (!priv->bio) {
-                        ret = __socket_nonblock (priv->sock);
+                if (priv->nodelay) {
+                        ret = __socket_nodelay (priv->sock);
 
                         if (ret == -1) {
                                 gf_log (this->name, GF_LOG_ERROR,
-                                        "NBIO on %d failed (%s)",
+                                        "NODELAY on %d failed (%s)",
                                         priv->sock, strerror (errno));
-                                close (priv->sock);
-                                priv->sock = -1;
-                                goto unlock;
                         }
                 }
 
                 if (priv->keepalive) {
                         ret = __socket_keepalive (priv->sock,
+                                                  sa_family,
                                                   priv->keepaliveintvl,
                                                   priv->keepaliveidle);
                         if (ret == -1)
@@ -2104,7 +2587,7 @@ socket_connect (rpc_transport_t *this, int port)
                 ret = connect (priv->sock, SA (&this->peerinfo.sockaddr),
                                this->peerinfo.sockaddr_len);
 
-                if (ret == -1 && errno != EINPROGRESS) {
+                if (ret == -1 && ((errno != EINPROGRESS) && (errno != ENOENT))) {
                         gf_log (this->name, GF_LOG_ERROR,
                                 "connection attempt failed (%s)",
                                 strerror (errno));
@@ -2113,17 +2596,60 @@ socket_connect (rpc_transport_t *this, int port)
                         goto unlock;
                 }
 
-                priv->connected = 0;
+		if (priv->use_ssl && !priv->own_thread) {
+			ret = ssl_setup_connection(this,0);
+			if (ret < 0) {
+				gf_log(this->name,GF_LOG_ERROR,
+					"client setup failed");
+				close(priv->sock);
+				priv->sock = -1;
+				goto unlock;
+			}
+		}
 
+                if (!priv->bio && !priv->own_thread) {
+                        ret = __socket_nonblock (priv->sock);
+
+                        if (ret == -1) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "NBIO on %d failed (%s)",
+                                        priv->sock, strerror (errno));
+                                close (priv->sock);
+                                priv->sock = -1;
+                                goto unlock;
+                        }
+                }
+
+                /*
+                 * In the own_thread case, this is used to indicate that we're
+                 * initializing a client connection.
+                 */
+                priv->connected = 0;
                 rpc_transport_ref (this);
 
-                priv->idx = event_register (ctx->event_pool, priv->sock,
-                                            socket_event_handler, this, 1, 1);
-                if (priv->idx == -1) {
-                        gf_log (this->name, GF_LOG_WARNING,
-                                "failed to register the event");
-                        ret = -1;
-                }
+		if (priv->own_thread) {
+			if (pipe(priv->pipe) < 0) {
+				gf_log(this->name,GF_LOG_ERROR,
+				       "could not create pipe");
+			}
+
+                        this->listener = this;
+			if (pthread_create(&priv->thread,NULL,
+					socket_poller, this) != 0) {
+				gf_log(this->name,GF_LOG_ERROR,
+				       "could not create poll thread");
+			}
+		}
+		else {
+			priv->idx = event_register (ctx->event_pool, priv->sock,
+						    socket_event_handler,
+						    this, 1, 1);
+			if (priv->idx == -1) {
+				gf_log ("", GF_LOG_WARNING,
+					"failed to register the event");
+				ret = -1;
+			}
+		}
         }
 unlock:
         pthread_mutex_unlock (&priv->lock);
@@ -2193,22 +2719,26 @@ socket_listen (rpc_transport_t *this)
                 /* Cant help if setting socket options fails. We can continue
                  * working nonetheless.
                  */
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting receive window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
-                }
+                if (priv->windowsize != 0) {
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "setting receive window size "
+                                        "failed: %d: %d: %s", priv->sock,
+                                        priv->windowsize,
+                                        strerror (errno));
+                        }
 
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting send window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "setting send window size failed:"
+                                        " %d: %d: %s", priv->sock,
+                                        priv->windowsize,
+                                        strerror (errno));
+                        }
                 }
 
                 if (priv->nodelay) {
@@ -2289,6 +2819,7 @@ socket_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
         char              need_append = 1;
         struct ioq       *entry = NULL;
         glusterfs_ctx_t  *ctx = NULL;
+	char              a_byte = 'j';
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -2314,21 +2845,31 @@ socket_submit_request (rpc_transport_t *this, rpc_transport_req_t *req)
                         goto unlock;
 
                 if (list_empty (&priv->ioq)) {
-                        ret = __socket_ioq_churn_entry (this, entry);
+                        ret = __socket_ioq_churn_entry (this, entry, 1);
 
-                        if (ret == 0)
+                        if (ret == 0) {
                                 need_append = 0;
-
-                        if (ret > 0)
+			}
+                        if (ret > 0) {
                                 need_poll_out = 1;
+			}
                 }
 
                 if (need_append) {
                         list_add_tail (&entry->list, &priv->ioq);
+			if (priv->own_thread) {
+				/*
+				 * Make sure the polling thread wakes up, by
+				 * writing a byte to represent this entry.
+				 */
+				if (write(priv->pipe[1],&a_byte,1) < 1) {
+					gf_log(this->name,GF_LOG_WARNING,
+					       "write error on pipe");
+				}
+			}
                         ret = 0;
                 }
-
-                if (need_poll_out) {
+                if (!priv->own_thread && need_poll_out) {
                         /* first entry to wait. continue writing on POLLOUT */
                         priv->idx = event_select_on (ctx->event_pool,
                                                      priv->sock,
@@ -2352,6 +2893,7 @@ socket_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
         char              need_append = 1;
         struct ioq       *entry = NULL;
         glusterfs_ctx_t  *ctx = NULL;
+	char              a_byte = 'd';
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -2370,33 +2912,44 @@ socket_submit_reply (rpc_transport_t *this, rpc_transport_reply_t *reply)
                         }
                         goto unlock;
                 }
+
                 priv->submit_log = 0;
                 entry = __socket_ioq_new (this, &reply->msg);
                 if (!entry)
                         goto unlock;
+
                 if (list_empty (&priv->ioq)) {
-                        ret = __socket_ioq_churn_entry (this, entry);
+                        ret = __socket_ioq_churn_entry (this, entry, 1);
 
-                        if (ret == 0)
+                        if (ret == 0) {
                                 need_append = 0;
-
-                        if (ret > 0)
+			}
+                        if (ret > 0) {
                                 need_poll_out = 1;
+			}
                 }
 
                 if (need_append) {
                         list_add_tail (&entry->list, &priv->ioq);
+			if (priv->own_thread) {
+				/*
+				 * Make sure the polling thread wakes up, by
+				 * writing a byte to represent this entry.
+				 */
+				if (write(priv->pipe[1],&a_byte,1) < 1) {
+					gf_log(this->name,GF_LOG_WARNING,
+					       "write error on pipe");
+				}
+			}
                         ret = 0;
                 }
-
-                if (need_poll_out) {
+                if (!priv->own_thread && need_poll_out) {
                         /* first entry to wait. continue writing on POLLOUT */
                         priv->idx = event_select_on (ctx->event_pool,
                                                      priv->sock,
                                                      priv->idx, -1, 1);
                 }
         }
-
 unlock:
         pthread_mutex_unlock (&priv->lock);
 
@@ -2499,10 +3052,11 @@ struct rpc_transport_ops tops = {
 int
 reconfigure (rpc_transport_t *this, dict_t *options)
 {
-        socket_private_t *priv = NULL;
-        gf_boolean_t      tmp_bool = _gf_false;
-        char             *optstr = NULL;
-        int               ret = 0;
+        socket_private_t *priv          = NULL;
+        gf_boolean_t      tmp_bool      = _gf_false;
+        char             *optstr        = NULL;
+        int               ret           = 0;
+        uint64_t          windowsize    = 0;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -2530,6 +3084,19 @@ reconfigure (rpc_transport_t *this, dict_t *options)
         }
         else
                 priv->keepalive = 1;
+
+        optstr = NULL;
+        if (dict_get_str (this->options, "tcp-window-size",
+                          &optstr) == 0) {
+                if (gf_string2bytesize (optstr, &windowsize) != 0) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "invalid number format: %s", optstr);
+                        goto out;
+                }
+        }
+
+        priv->windowsize = (int)windowsize;
+
         ret = 0;
 out:
         return ret;
@@ -2545,6 +3112,7 @@ socket_init (rpc_transport_t *this)
         char             *optstr = NULL;
         uint32_t          keepalive = 0;
         uint32_t          backlog = 0;
+	int               session_id = 0;
 
         if (this->private) {
                 gf_log_callingfn (this->name, GF_LOG_ERROR,
@@ -2609,9 +3177,8 @@ socket_init (rpc_transport_t *this)
                 }
         }
 
-
         optstr = NULL;
-        if (dict_get_str (this->options, "transport.window-size",
+        if (dict_get_str (this->options, "tcp-window-size",
                           &optstr) == 0) {
                 if (gf_string2bytesize (optstr, &windowsize) != 0) {
                         gf_log (this->name, GF_LOG_ERROR,
@@ -2620,8 +3187,9 @@ socket_init (rpc_transport_t *this)
                 }
         }
 
-        optstr = NULL;
+        priv->windowsize = (int)windowsize;
 
+        optstr = NULL;
         /* Enable Keep-alive by default. */
         priv->keepalive = 1;
         priv->keepaliveintvl = 2;
@@ -2674,10 +3242,129 @@ socket_init (rpc_transport_t *this)
         }
 
         priv->windowsize = (int)windowsize;
+
+        priv->ssl_enabled = _gf_false;
+	if (dict_get_str(this->options,SSL_ENABLED_OPT,&optstr) == 0) {
+                if (gf_string2boolean (optstr, &priv->ssl_enabled) != 0) {
+                        gf_log (this->name, GF_LOG_ERROR,
+				"invalid value given for ssl-enabled boolean");
+		}
+	}
+
+        priv->ssl_own_cert = DEFAULT_CERT_PATH;
+	if (dict_get_str(this->options,SSL_OWN_CERT_OPT,&optstr) == 0) {
+                if (!priv->ssl_enabled) {
+                        gf_log(this->name,GF_LOG_WARNING,
+                               "%s specified without %s (ignored)",
+                               SSL_OWN_CERT_OPT, SSL_ENABLED_OPT);
+                }
+                priv->ssl_own_cert = optstr;
+	}
+        priv->ssl_own_cert = gf_strdup(priv->ssl_own_cert);
+
+        priv->ssl_private_key = DEFAULT_KEY_PATH;
+	if (dict_get_str(this->options,SSL_PRIVATE_KEY_OPT,&optstr) == 0) {
+                if (!priv->ssl_enabled) {
+                        gf_log(this->name,GF_LOG_WARNING,
+                               "%s specified without %s (ignored)",
+                               SSL_PRIVATE_KEY_OPT, SSL_ENABLED_OPT);
+                }
+                priv->ssl_private_key = optstr;
+	}
+        priv->ssl_private_key = gf_strdup(priv->ssl_private_key);
+
+        priv->ssl_ca_list = DEFAULT_CA_PATH;
+	if (dict_get_str(this->options,SSL_CA_LIST_OPT,&optstr) == 0) {
+                if (!priv->ssl_enabled) {
+                        gf_log(this->name,GF_LOG_WARNING,
+                               "%s specified without %s (ignored)",
+                               SSL_CA_LIST_OPT, SSL_ENABLED_OPT);
+                }
+                priv->ssl_ca_list = optstr;
+	}
+        priv->ssl_ca_list = gf_strdup(priv->ssl_ca_list);
+
+        gf_log(this->name,GF_LOG_INFO,"SSL support is %s",
+               priv->ssl_enabled ? "ENABLED" : "NOT enabled");
+        /*
+         * This might get overridden temporarily in socket_connect (q.v.)
+         * if we're using the glusterd portmapper.
+         */
+        priv->use_ssl = priv->ssl_enabled;
+
+	priv->own_thread = priv->use_ssl;
+	if (dict_get_str(this->options,OWN_THREAD_OPT,&optstr) == 0) {
+                if (gf_string2boolean (optstr, &priv->own_thread) != 0) {
+                        gf_log (this->name, GF_LOG_ERROR,
+				"invalid value given for own-thread boolean");
+		}
+	}
+	gf_log(this->name,GF_LOG_INFO,"using %s polling thread",
+	       priv->own_thread ? "private" : "system");
+
+	if (priv->use_ssl) {
+		SSL_library_init();
+		SSL_load_error_strings();
+		priv->ssl_meth = (SSL_METHOD *)TLSv1_method();
+		priv->ssl_ctx = SSL_CTX_new(priv->ssl_meth);
+
+                if (SSL_CTX_set_cipher_list(priv->ssl_ctx,
+                                            "HIGH:-SSLv2") == 0) {
+                        gf_log(this->name,GF_LOG_ERROR,
+                               "failed to find any valid ciphers");
+                        goto err;
+                }
+
+		if (!SSL_CTX_use_certificate_chain_file(priv->ssl_ctx,
+							priv->ssl_own_cert)) {
+			gf_log(this->name,GF_LOG_ERROR,
+			       "could not load our cert");
+			goto err;
+		}
+
+		if (!SSL_CTX_use_PrivateKey_file(priv->ssl_ctx,
+						 priv->ssl_private_key,
+						 SSL_FILETYPE_PEM)) {
+			gf_log(this->name,GF_LOG_ERROR,
+			       "could not load private key");
+			goto err;
+		}
+
+		if (!SSL_CTX_load_verify_locations(priv->ssl_ctx,
+						   priv->ssl_ca_list,0)) {
+			gf_log(this->name,GF_LOG_ERROR,
+			       "could not load CA list");
+			goto err;
+		}
+
+#if (OPENSSL_VERSION_NUMBER < 0x00905100L)
+		SSL_CTX_set_verify_depth(ctx,1);
+#endif
+
+		priv->ssl_session_id = ++session_id;
+		SSL_CTX_set_session_id_context(priv->ssl_ctx,
+					       (void *)&priv->ssl_session_id,
+					       sizeof(priv->ssl_session_id));
+
+		SSL_CTX_set_verify(priv->ssl_ctx,SSL_VERIFY_PEER,0);
+	}
+
 out:
         this->private = priv;
-
         return 0;
+
+err:
+        if (priv->ssl_own_cert) {
+                GF_FREE(priv->ssl_own_cert);
+        }
+        if (priv->ssl_private_key) {
+                GF_FREE(priv->ssl_private_key);
+        }
+        if (priv->ssl_ca_list) {
+                GF_FREE(priv->ssl_ca_list);
+        }
+        GF_FREE(priv);
+        return -1;
 }
 
 
@@ -2703,6 +3390,15 @@ fini (rpc_transport_t *this)
                         "transport %p destroyed", this);
 
                 pthread_mutex_destroy (&priv->lock);
+		if (priv->ssl_private_key) {
+			GF_FREE(priv->ssl_private_key);
+		}
+		if (priv->ssl_own_cert) {
+			GF_FREE(priv->ssl_own_cert);
+		}
+		if (priv->ssl_ca_list) {
+			GF_FREE(priv->ssl_ca_list);
+		}
                 GF_FREE (priv);
         }
 
@@ -2747,18 +3443,17 @@ struct volume_options options[] = {
         },
         { .key   = { "transport.address-family",
                      "address-family" },
-          .value = {"inet", "inet6", "inet/inet6", "inet6/inet",
-                    "unix", "inet-sdp" },
+          .value = {"inet", "inet6", "unix", "inet-sdp" },
           .type  = GF_OPTION_TYPE_STR
         },
 
         { .key   = {"non-blocking-io"},
           .type  = GF_OPTION_TYPE_BOOL
         },
-        { .key   = {"transport.window-size"},
+        { .key   = {"tcp-window-size"},
           .type  = GF_OPTION_TYPE_SIZET,
           .min   = GF_MIN_SOCKET_WINDOW_SIZE,
-          .max   = GF_MAX_SOCKET_WINDOW_SIZE,
+          .max   = GF_MAX_SOCKET_WINDOW_SIZE
         },
         { .key   = {"transport.socket.nodelay"},
           .type  = GF_OPTION_TYPE_BOOL
@@ -2781,5 +3476,20 @@ struct volume_options options[] = {
         { .key   = {"transport.socket.read-fail-log"},
           .type  = GF_OPTION_TYPE_BOOL
         },
+        { .key   = {SSL_ENABLED_OPT},
+          .type  = GF_OPTION_TYPE_BOOL
+        },
+	{ .key   = {SSL_OWN_CERT_OPT},
+	  .type  = GF_OPTION_TYPE_STR
+	},
+	{ .key   = {SSL_PRIVATE_KEY_OPT},
+	  .type  = GF_OPTION_TYPE_STR
+	},
+	{ .key   = {SSL_CA_LIST_OPT},
+	  .type  = GF_OPTION_TYPE_STR
+	},
+	{ .key   = {OWN_THREAD_OPT},
+	  .type  = GF_OPTION_TYPE_BOOL
+	},
         { .key = {NULL} }
 };

@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -63,7 +53,7 @@ trash_local_wipe (trash_local_t *local)
         if (local->newfd)
                 fd_unref (local->newfd);
 
-        GF_FREE (local);
+        mem_put (local);
 out:
         return;
 }
@@ -170,8 +160,7 @@ trash_unlink_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 out:
         GF_FREE (cookie);
-        if (tmp_str)
-                GF_FREE (tmp_str);
+        GF_FREE (tmp_str);
 
         return 0;
 }
@@ -442,8 +431,7 @@ trash_rename_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 out:
         GF_FREE (cookie); /* strdup (dir_name) was sent here :) */
-        if (tmp_str)
-                GF_FREE (tmp_str);
+        GF_FREE (tmp_str);
 
         return 0;
 }
@@ -504,9 +492,7 @@ trash_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc,
         trash_elim_pattern_t  *trav  = NULL;
         trash_private_t *priv = NULL;
         trash_local_t   *local = NULL;
-        struct tm       *tm = NULL;
-        char             timestr[256] = {0,};
-        time_t           utime = 0;
+        char             timestr[64] = {0,};
         int32_t          match = 0;
 
         priv = this->private;
@@ -533,8 +519,7 @@ trash_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc,
                 return 0;
         }
 
-        local = GF_CALLOC (1, sizeof (trash_local_t), 
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
                 TRASH_STACK_UNWIND (rename, frame, -1, ENOMEM,
@@ -554,9 +539,8 @@ trash_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc,
         {
                 /* append timestamp to file name */
                 /* TODO: can we make it optional? */
-                utime = time (NULL);
-                tm    = localtime (&utime);
-                strftime (timestr, 256, ".%Y-%m-%d-%H%M%S", tm);
+                gf_time_ftm (timestr, sizeof timestr, time (NULL),
+                             gf_timefmt_F_HMS);
                 strcat (local->newpath, timestr);
         }
 
@@ -575,9 +559,7 @@ trash_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
         trash_elim_pattern_t  *trav  = NULL;
         trash_private_t *priv = NULL;
         trash_local_t   *local = NULL;
-        struct tm       *tm = NULL;
-        char             timestr[256] = {0,};
-        time_t           utime = 0;
+        char             timestr[64] = {0,};
         int32_t          match = 0;
 
         priv = this->private;
@@ -610,8 +592,7 @@ trash_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
                 return 0;
         }
 
-        local = GF_CALLOC (1, sizeof (trash_local_t),
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_DEBUG, "out of memory");
                 TRASH_STACK_UNWIND (unlink, frame, -1, ENOMEM, NULL, NULL);
@@ -627,9 +608,8 @@ trash_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
         {
                 /* append timestamp to file name */
                 /* TODO: can we make it optional? */
-                utime = time (NULL);
-                tm    = localtime (&utime);
-                strftime (timestr, 256, ".%Y-%m-%d-%H%M%S", tm);
+                gf_time_fmt (timestr, sizeof timestr, time (NULL),
+                             gf_timefmt_F_HMS);
                 strcat (local->newpath, timestr);
         }
 
@@ -690,7 +670,7 @@ trash_truncate_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         local->fsize = stbuf->ia_size;
         STACK_WIND (frame, trash_truncate_writev_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->writev,
-                    local->newfd, vector, count, local->cur_offset, iobuf);
+                    local->newfd, vector, count, local->cur_offset, 0, iobuf);
 
 out:
         return 0;
@@ -723,7 +703,7 @@ trash_truncate_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 STACK_WIND (frame, trash_truncate_readv_cbk,
                             FIRST_CHILD(this), FIRST_CHILD(this)->fops->readv,
                             local->fd, (size_t)GF_BLOCK_READV_SIZE,
-                            local->cur_offset);
+                            local->cur_offset, 0);
                 goto out;
         }
 
@@ -763,7 +743,7 @@ trash_truncate_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         STACK_WIND (frame, trash_truncate_readv_cbk,
                     FIRST_CHILD (this), FIRST_CHILD (this)->fops->readv,
-                    local->fd, (size_t)GF_BLOCK_READV_SIZE, local->cur_offset);
+                    local->fd, (size_t)GF_BLOCK_READV_SIZE, local->cur_offset, 0);
 
 out:
         return 0;
@@ -932,8 +912,7 @@ trash_truncate_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 out:
         GF_FREE (cookie); /* strdup (dir_name) was sent here :) */
-        if (tmp_str)
-                GF_FREE (tmp_str);
+        GF_FREE (tmp_str);
 
         return 0;
 }
@@ -945,10 +924,8 @@ trash_truncate_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         trash_private_t     *priv  = NULL;
         trash_local_t       *local = NULL;
-        struct tm           *tm = NULL;
-        char                 timestr[256] = {0,};
+        char                 timestr[64] = {0,};
         char                 loc_newname[PATH_MAX] = {0,};
-        time_t               utime = 0;
         int32_t              flags = 0;
 
         priv = this->private;
@@ -980,9 +957,8 @@ trash_truncate_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         strcat (local->newpath, local->loc.path);
 
         {
-                utime = time (NULL);
-                tm    = localtime (&utime);
-                strftime (timestr, 256, ".%Y-%m-%d-%H%M%S", tm);
+                gf_time_fmt (timestr, sizeof timestr, time (NULL),
+                             gf_timefmt_F_HMS);
                 strcat (local->newpath, timestr);
         }
         strcpy (loc_newname,local->loc.name);
@@ -1044,8 +1020,7 @@ trash_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         LOCK_INIT (&frame->lock);
 
-        local = GF_CALLOC (1, sizeof (trash_local_t), 
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_DEBUG, "out of memory");
                 TRASH_STACK_UNWIND (truncate, frame, -1, ENOMEM, NULL, NULL);
@@ -1110,7 +1085,7 @@ trash_ftruncate_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 STACK_WIND (frame, trash_ftruncate_readv_cbk,
                             FIRST_CHILD(this), FIRST_CHILD(this)->fops->readv,
                             local->fd, (size_t)GF_BLOCK_READV_SIZE,
-                            local->cur_offset);
+                            local->cur_offset, 0);
                 return 0;
         }
 
@@ -1142,7 +1117,7 @@ trash_ftruncate_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         STACK_WIND (frame, trash_ftruncate_writev_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->writev,
-                    local->newfd, vector, count, local->cur_offset, NULL);
+                    local->newfd, vector, count, local->cur_offset, 0, NULL);
 
         return 0;
 }
@@ -1194,7 +1169,7 @@ trash_ftruncate_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         STACK_WIND (frame, trash_ftruncate_readv_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->readv, local->fd,
-                    (size_t)GF_BLOCK_READV_SIZE, local->cur_offset);
+                    (size_t)GF_BLOCK_READV_SIZE, local->cur_offset, 0);
 
         return 0;
 }
@@ -1299,8 +1274,7 @@ trash_ftruncate_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 out:
         GF_FREE (cookie); /* strdup (dir_name) was sent here :) */
-        if (tmp_str)
-                GF_FREE (tmp_str);
+        GF_FREE (tmp_str);
 
         return 0;
 }
@@ -1349,11 +1323,9 @@ trash_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset)
         trash_private_t       *priv = NULL;
         trash_local_t         *local = NULL;
         dentry_t              *dir_entry = NULL;
-        struct tm             *tm = NULL;
         char                  *pathbuf = NULL;
         inode_t               *newinode = NULL;
-        time_t                 utime = 0;
-        char                   timestr[256];
+        char                   timestr[64];
         int32_t                retval = 0;
         int32_t                match = 0;
 
@@ -1385,18 +1357,14 @@ trash_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset)
                 return 0;
         }
 
-        local = GF_CALLOC (1, sizeof (trash_local_t), 
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_DEBUG, "out of memory");
                 TRASH_STACK_UNWIND (ftruncate, frame, -1, ENOMEM, NULL, NULL);
                 return 0;
         }
 
-        utime = time (NULL);
-        tm    = localtime (&utime);
-        strftime (timestr, 256, ".%Y-%m-%d-%H%M%S", tm);
-
+        gf_time_fmt (timestr, sizeof timestr, time (NULL), gf_timefmt_F_HMS);
         strcpy (local->newpath, priv->trash_dir);
         strcat (local->newpath, pathbuf);
         strcat (local->newpath, timestr);
@@ -1522,6 +1490,14 @@ init (xlator_t *this)
                         _priv->max_trash_file_size);
         }
 
+        this->local_pool = mem_pool_new (trash_local_t, 64);
+        if (!this->local_pool) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to create local_t's memory pool");
+                return -1;
+        }
+
+
         this->private = (void *)_priv;
         return 0;
 }
@@ -1532,8 +1508,7 @@ fini (xlator_t *this)
         trash_private_t *priv = NULL;
 
         priv = this->private;
-        if (priv)
-                GF_FREE (priv);
+        GF_FREE (priv);
 
         return;
 }

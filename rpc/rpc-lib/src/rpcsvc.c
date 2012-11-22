@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -34,6 +25,9 @@
 #include "iobuf.h"
 #include "globals.h"
 #include "xdr-common.h"
+#include "xdr-generic.h"
+#include "rpc-common-xdr.h"
+#include "syncop.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -47,6 +41,8 @@
 #include <stdio.h>
 
 #include "xdr-rpcclnt.h"
+
+#define ACL_PROGRAM 100227
 
 struct rpcsvc_program gluster_dump_prog;
 
@@ -168,7 +164,11 @@ rpcsvc_program_actor (rpcsvc_request_t *req)
 
         if (!found) {
                 if (err != PROG_MISMATCH) {
-                        gf_log (GF_RPCSVC, GF_LOG_WARNING,
+                        /* log in DEBUG when nfs clients try to see if
+                         * ACL requests are accepted by nfs server
+                         */
+                        gf_log (GF_RPCSVC, (req->prognum == ACL_PROGRAM) ?
+                                GF_LOG_DEBUG : GF_LOG_WARNING,
                                 "RPC program not available (req %u %u)",
                                 req->prognum, req->progver);
                         err = PROG_UNAVAIL;
@@ -206,6 +206,8 @@ rpcsvc_program_actor (rpcsvc_request_t *req)
                 actor = NULL;
                 goto err;
         }
+
+	req->synctask = program->synctask;
 
         err = SUCCESS;
         gf_log (GF_RPCSVC, GF_LOG_TRACE, "Actor found: %s - %s",
@@ -305,7 +307,9 @@ rpcsvc_request_init (rpcsvc_t *svc, rpc_transport_t *trans,
         req->msg[0] = progmsg;
         req->iobref = iobref_ref (msg->iobref);
         if (msg->vectored) {
-                for (i = 1; i < msg->count; i++) {
+                /* msg->vector[2] is defined in structure. prevent a
+                   out of bound access */
+                for (i = 1; i < min (msg->count, 2); i++) {
                         req->msg[i] = msg->vector[i];
                 }
         }
@@ -430,14 +434,30 @@ err:
 
 
 int
+rpcsvc_synctask_cbk (int ret, call_frame_t *frame, void *opaque)
+{
+	rpcsvc_request_t  *req = NULL;
+
+	req = opaque;
+
+        if (ret == RPCSVC_ACTOR_ERROR)
+                rpcsvc_error_reply (req);
+
+	return 0;
+}
+
+
+int
 rpcsvc_handle_rpc_call (rpcsvc_t *svc, rpc_transport_t *trans,
                         rpc_transport_pollin_t *msg)
 {
         rpcsvc_actor_t          *actor = NULL;
+	rpcsvc_actor            actor_fn = NULL;
         rpcsvc_request_t        *req = NULL;
         int                     ret = -1;
         uint16_t                port = 0;
         gf_boolean_t            is_unix = _gf_false;
+        gf_boolean_t            unprivileged = _gf_false;
 
         if (!trans || !svc)
                 return -1;
@@ -467,13 +487,8 @@ rpcsvc_handle_rpc_call (rpcsvc_t *svc, rpc_transport_t *trans,
 
                 gf_log ("rpcsvc", GF_LOG_TRACE, "Client port: %d", (int)port);
 
-                if ((port > 1024) && (0 == svc->allow_insecure)) {
-                        /* Non-privileged user, fail request */
-                        gf_log ("glusterd", GF_LOG_ERROR,
-                                "Request received from non-"
-                                "privileged port. Failing request");
-                        return -1;
-                }
+                if (port > 1024)
+                        unprivileged = _gf_true;
         }
 
         req = rpcsvc_request_create (svc, trans, msg);
@@ -487,25 +502,37 @@ rpcsvc_handle_rpc_call (rpcsvc_t *svc, rpc_transport_t *trans,
         if (!actor)
                 goto err_reply;
 
-        if (actor && (req->rpc_err == SUCCESS)) {
+        if (0 == svc->allow_insecure && unprivileged && !actor->unprivileged) {
+                        /* Non-privileged user, fail request */
+                        gf_log ("glusterd", GF_LOG_ERROR,
+                                "Request received from non-"
+                                "privileged port. Failing request");
+                        rpcsvc_request_destroy (req);
+                        return -1;
+        }
+
+        if (req->rpc_err == SUCCESS) {
                 /* Before going to xlator code, set the THIS properly */
                 THIS = svc->mydata;
 
-                if (req->count == 2) {
-                        if (actor->vector_actor) {
-                                ret = actor->vector_actor (req, &req->msg[1], 1,
-                                                           req->iobref);
-                        } else {
-                                rpcsvc_request_seterr (req, PROC_UNAVAIL);
-                                /* LOG TODO: print more info about procnum,
-                                   prognum etc, also print transport info */
-                                gf_log (GF_RPCSVC, GF_LOG_ERROR,
-                                        "No vectored handler present");
-                                ret = RPCSVC_ACTOR_ERROR;
-                        }
-                } else if (actor->actor) {
-                        ret = actor->actor (req);
-                }
+		actor_fn = actor->actor;
+
+		if (!actor_fn) {
+			rpcsvc_request_seterr (req, PROC_UNAVAIL);
+			/* LOG TODO: print more info about procnum,
+			   prognum etc, also print transport info */
+			gf_log (GF_RPCSVC, GF_LOG_ERROR,
+				"No vectored handler present");
+			ret = RPCSVC_ACTOR_ERROR;
+			goto err_reply;
+		}
+
+		if (req->synctask)
+			ret = synctask_new (THIS->ctx->env,
+					    (synctask_fn_t) actor_fn,
+					    rpcsvc_synctask_cbk, NULL, req);
+		else
+			ret = actor_fn (req);
         }
 
 err_reply:
@@ -538,6 +565,9 @@ rpcsvc_handle_disconnect (rpcsvc_t *svc, rpc_transport_t *trans)
 
         pthread_mutex_lock (&svc->rpclock);
         {
+                if (!svc->notify_count)
+                        goto unlock;
+
                 wrappers = GF_CALLOC (svc->notify_count, sizeof (*wrapper),
                                       gf_common_mt_rpcsvc_wrapper_t);
                 if (!wrappers) {
@@ -761,23 +791,12 @@ rpcsvc_callback_build_record (rpcsvc_t *rpc, int prognum, int progver,
         char                    *record      = NULL;
         struct iovec             recordhdr   = {0, };
         size_t                   pagesize    = 0;
+        size_t                   xdr_size    = 0;
         int                      ret         = -1;
 
         if ((!rpc) || (!recbuf)) {
                 goto out;
         }
-
-        /* First, try to get a pointer into the buffer which the RPC
-         * layer can use.
-         */
-        request_iob = iobuf_get (rpc->ctx->iobuf_pool);
-        if (!request_iob) {
-                goto out;
-        }
-
-        pagesize = iobuf_pagesize (request_iob);
-
-        record = iobuf_ptr (request_iob);  /* Now we have it. */
 
         /* Fill the rpc structure and XDR it into the buffer got above. */
         ret = rpcsvc_fill_callback (prognum, progver, procnum, payload, xid,
@@ -787,6 +806,20 @@ rpcsvc_callback_build_record (rpcsvc_t *rpc, int prognum, int progver,
                         "xid (%"PRIu64")", xid);
                 goto out;
         }
+
+        /* First, try to get a pointer into the buffer which the RPC
+         * layer can use.
+         */
+        xdr_size = xdr_sizeof ((xdrproc_t)xdr_callmsg, &request);
+
+        request_iob = iobuf_get2 (rpc->ctx->iobuf_pool, (xdr_size + payload));
+        if (!request_iob) {
+                goto out;
+        }
+
+        pagesize = iobuf_pagesize (request_iob);
+
+        record = iobuf_ptr (request_iob);  /* Now we have it. */
 
         recordhdr = rpcsvc_callback_build_header (record, pagesize, &request,
                                                   payload);
@@ -931,13 +964,14 @@ out:
  */
 struct iobuf *
 rpcsvc_record_build_record (rpcsvc_request_t *req, size_t payload,
-                            struct iovec *recbuf)
+                            size_t hdrlen, struct iovec *recbuf)
 {
         struct rpc_msg          reply;
         struct iobuf            *replyiob = NULL;
         char                    *record = NULL;
         struct iovec            recordhdr = {0, };
         size_t                  pagesize = 0;
+        size_t                  xdr_size = 0;
         rpcsvc_t                *svc = NULL;
         int                     ret = -1;
 
@@ -945,18 +979,24 @@ rpcsvc_record_build_record (rpcsvc_request_t *req, size_t payload,
                 return NULL;
 
         svc = req->svc;
-        replyiob = iobuf_get (svc->ctx->iobuf_pool);
-        pagesize = iobuf_pagesize (replyiob);
-        if (!replyiob) {
-                goto err_exit;
-        }
-
-        record = iobuf_ptr (replyiob);  /* Now we have it. */
 
         /* Fill the rpc structure and XDR it into the buffer got above. */
         ret = rpcsvc_fill_reply (req, &reply);
         if (ret)
                 goto err_exit;
+
+        xdr_size = xdr_sizeof ((xdrproc_t)xdr_replymsg, &reply);
+
+        /* Payload would include 'readv' size etc too, where as
+           that comes as another payload iobuf */
+        replyiob = iobuf_get2 (svc->ctx->iobuf_pool, (xdr_size + hdrlen));
+        if (!replyiob) {
+                goto err_exit;
+        }
+
+        pagesize = iobuf_pagesize (replyiob);
+
+        record = iobuf_ptr (replyiob);  /* Now we have it. */
 
         recordhdr = rpcsvc_record_build_header (record, pagesize, reply,
                                                 payload);
@@ -1012,6 +1052,7 @@ rpcsvc_submit_generic (rpcsvc_request_t *req, struct iovec *proghdr,
         struct iovec            recordhdr  = {0, };
         rpc_transport_t        *trans      = NULL;
         size_t                  msglen     = 0;
+        size_t                  hdrlen     = 0;
         char                    new_iobref = 0;
 
         if ((!req) || (!req->trans))
@@ -1030,7 +1071,7 @@ rpcsvc_submit_generic (rpcsvc_request_t *req, struct iovec *proghdr,
         gf_log (GF_RPCSVC, GF_LOG_TRACE, "Tx message: %zu", msglen);
 
         /* Build the buffer containing the encoded RPC reply. */
-        replyiob = rpcsvc_record_build_record (req, msglen, &recordhdr);
+        replyiob = rpcsvc_record_build_record (req, msglen, hdrlen, &recordhdr);
         if (!replyiob) {
                 gf_log (GF_RPCSVC, GF_LOG_ERROR,"Reply record creation failed");
                 goto disconnect_exit;
@@ -1090,7 +1131,7 @@ rpcsvc_error_reply (rpcsvc_request_t *req)
         if (!req)
                 return -1;
 
-        gf_log_callingfn ("", GF_LOG_WARNING, "sending a RPC error reply");
+        gf_log_callingfn ("", GF_LOG_DEBUG, "sending a RPC error reply");
 
         /* At this point the req should already have been filled with the
          * appropriate RPC error numbers.
@@ -1247,18 +1288,34 @@ rpcsvc_submit_message (rpcsvc_request_t *req, struct iovec *proghdr,
 
 
 int
-rpcsvc_program_unregister (rpcsvc_t *svc, rpcsvc_program_t *prog)
+rpcsvc_program_unregister (rpcsvc_t *svc, rpcsvc_program_t *program)
 {
         int                     ret = -1;
-
-        if (!svc || !prog) {
+        rpcsvc_program_t        *prog = NULL;
+        if (!svc || !program) {
                 goto out;
         }
 
-        ret = rpcsvc_program_unregister_portmap (prog);
+        ret = rpcsvc_program_unregister_portmap (program);
         if (ret == -1) {
                 gf_log (GF_RPCSVC, GF_LOG_ERROR, "portmap unregistration of"
                         " program failed");
+                goto out;
+        }
+
+        pthread_mutex_lock (&svc->rpclock);
+        {
+                list_for_each_entry (prog, &svc->programs, program) {
+                        if ((prog->prognum == program->prognum)
+                            && (prog->progver == program->progver)) {
+                                break;
+                        }
+                }
+        }
+        pthread_mutex_unlock (&svc->rpclock);
+
+        if (prog == NULL) {
+                ret = -1;
                 goto out;
         }
 
@@ -1268,7 +1325,7 @@ rpcsvc_program_unregister (rpcsvc_t *svc, rpcsvc_program_t *prog)
 
         pthread_mutex_lock (&svc->rpclock);
         {
-                list_del (&prog->program);
+                list_del_init (&prog->program);
         }
         pthread_mutex_unlock (&svc->rpclock);
 
@@ -1276,8 +1333,8 @@ rpcsvc_program_unregister (rpcsvc_t *svc, rpcsvc_program_t *prog)
 out:
         if (ret == -1) {
                 gf_log (GF_RPCSVC, GF_LOG_ERROR, "Program unregistration failed"
-                        ": %s, Num: %d, Ver: %d, Port: %d", prog->progname,
-                        prog->prognum, prog->progver, prog->progport);
+                        ": %s, Num: %d, Ver: %d, Port: %d", program->progname,
+                        program->prognum, program->progver, program->progport);
         }
 
         return ret;
@@ -1466,6 +1523,7 @@ rpcsvc_create_listeners (rpcsvc_t *svc, dict_t *options, char *name)
                 }
 
                 GF_FREE (transport_name);
+                transport_name = NULL;
                 count++;
         }
 
@@ -1477,17 +1535,13 @@ rpcsvc_create_listeners (rpcsvc_t *svc, dict_t *options, char *name)
         transport_type = NULL;
 
 out:
-        if (str != NULL) {
-                GF_FREE (str);
-        }
+        GF_FREE (str);
 
-        if (transport_type != NULL) {
-                GF_FREE (transport_type);
-        }
+        GF_FREE (transport_type);
 
-        if (tmp != NULL) {
-                GF_FREE (tmp);
-        }
+        GF_FREE (tmp);
+
+        GF_FREE (transport_name);
 
         return count;
 }
@@ -1682,7 +1736,7 @@ fail:
         iov.iov_base = rsp_buf;
         iov.iov_len  = dump_rsp_len;
 
-        ret = xdr_serialize_dump_rsp (iov, &rsp);
+        ret = xdr_serialize_generic (iov, &rsp, (xdrproc_t)xdr_gf_dump_rsp);
         if (ret < 0) {
                 if (req)
                         req->rpc_err = GARBAGE_ARGS;
@@ -1775,8 +1829,7 @@ rpcsvc_transport_unix_options_build (dict_t **options, char *filepath)
         *options = dict;
 out:
         if (ret) {
-                if (fpath)
-                        GF_FREE (fpath);
+                GF_FREE (fpath);
                 if (dict)
                         dict_unref (dict);
         }
@@ -1786,10 +1839,11 @@ out:
 /* The global RPC service initializer.
  */
 rpcsvc_t *
-rpcsvc_init (xlator_t *xl, glusterfs_ctx_t *ctx, dict_t *options)
+rpcsvc_init (xlator_t *xl, glusterfs_ctx_t *ctx, dict_t *options,
+             uint32_t poolcount)
 {
         rpcsvc_t          *svc              = NULL;
-        int                ret              = -1, poolcount = 0;
+        int                ret              = -1;
 
         if ((!ctx) || (!options))
                 return NULL;
@@ -1810,7 +1864,8 @@ rpcsvc_init (xlator_t *xl, glusterfs_ctx_t *ctx, dict_t *options)
                 goto free_svc;
         }
 
-        poolcount   = RPCSVC_POOLCOUNT_MULT * svc->memfactor;
+        if (!poolcount)
+                poolcount = RPCSVC_POOLCOUNT_MULT * svc->memfactor;
 
         gf_log (GF_RPCSVC, GF_LOG_TRACE, "rx pool: %d", poolcount);
         svc->rxpool = mem_pool_new (rpcsvc_request_t, poolcount);
@@ -1858,6 +1913,7 @@ rpcsvc_transport_peer_check_search (dict_t *options, char *pattern, char *clstr)
         int                     ret = -1;
         char                    *addrtok = NULL;
         char                    *addrstr = NULL;
+        char                    *dup_addrstr = NULL;
         char                    *svptr = NULL;
 
         if ((!options) || (!clstr))
@@ -1877,7 +1933,8 @@ rpcsvc_transport_peer_check_search (dict_t *options, char *pattern, char *clstr)
                 goto err;
         }
 
-        addrtok = strtok_r (addrstr, ",", &svptr);
+        dup_addrstr = gf_strdup (addrstr);
+        addrtok = strtok_r (dup_addrstr, ",", &svptr);
         while (addrtok) {
 
                 /* CASEFOLD not present on Solaris */
@@ -1894,6 +1951,7 @@ rpcsvc_transport_peer_check_search (dict_t *options, char *pattern, char *clstr)
 
         ret = -1;
 err:
+        GF_FREE (dup_addrstr);
 
         return ret;
 }
@@ -2136,18 +2194,30 @@ rpcsvc_transport_peer_check_addr (dict_t *options, char *volname,
         int     aret = RPCSVC_AUTH_DONTCARE;
         int     rjret = RPCSVC_AUTH_REJECT;
         char    clstr[RPCSVC_PEER_STRLEN];
-        struct sockaddr_storage sastorage = {0,};
+        char   *tmp   = NULL;
+        union gf_sock_union sock_union;
 
         if (!trans)
                 return ret;
 
         ret = rpcsvc_transport_peeraddr (trans, clstr, RPCSVC_PEER_STRLEN,
-                                         &sastorage, sizeof (sastorage));
+                                         &sock_union.storage,
+                                         sizeof (sock_union.storage));
         if (ret != 0) {
                 gf_log (GF_RPCSVC, GF_LOG_ERROR, "Failed to get remote addr: "
                         "%s", gai_strerror (ret));
                 ret = RPCSVC_AUTH_REJECT;
                 goto err;
+        }
+
+        switch (sock_union.sa.sa_family) {
+
+        case AF_INET:
+        case AF_INET6:
+                tmp = strrchr (clstr, ':');
+                if (tmp)
+                        *tmp = '\0';
+                break;
         }
 
         aret = rpcsvc_transport_peer_check_allow (options, volname, clstr);
@@ -2228,8 +2298,7 @@ rpcsvc_transport_check_volume_general (dict_t *options, rpc_transport_t *trans)
         addrchk = rpcsvc_transport_peer_check_addr (options, NULL, trans);
 
         if (namelookup)
-                ret = rpcsvc_combine_gen_spec_addr_checks (addrchk,
-                                                               namechk);
+                ret = rpcsvc_combine_gen_spec_addr_checks (addrchk, namechk);
         else
                 ret = addrchk;
 
@@ -2259,10 +2328,9 @@ int
 rpcsvc_transport_privport_check (rpcsvc_t *svc, char *volname,
                                  rpc_transport_t *trans)
 {
-        struct sockaddr_storage sastorage = {0,};
-        struct sockaddr_in     *sa = NULL;
+        union gf_sock_union     sock_union;
         int                     ret = RPCSVC_AUTH_REJECT;
-        socklen_t               sasize = sizeof (sa);
+        socklen_t               sinsize = sizeof (&sock_union.sin);
         char                    *srchstr = NULL;
         char                    *valstr = NULL;
         int                     globalinsecure = RPCSVC_AUTH_REJECT;
@@ -2270,12 +2338,13 @@ rpcsvc_transport_privport_check (rpcsvc_t *svc, char *volname,
         uint16_t                port = 0;
         gf_boolean_t            insecure = _gf_false;
 
+        memset (&sock_union, 0, sizeof (sock_union));
+
         if ((!svc) || (!volname) || (!trans))
                 return ret;
 
-        sa = (struct sockaddr_in*) &sastorage;
-        ret = rpcsvc_transport_peeraddr (trans, NULL, 0, &sastorage,
-                                         sasize);
+        ret = rpcsvc_transport_peeraddr (trans, NULL, 0, &sock_union.storage,
+                                         sinsize);
         if (ret != 0) {
                 gf_log (GF_RPCSVC, GF_LOG_ERROR, "Failed to get peer addr: %s",
                         gai_strerror (ret));
@@ -2283,7 +2352,7 @@ rpcsvc_transport_privport_check (rpcsvc_t *svc, char *volname,
                 goto err;
         }
 
-        port = ntohs (sa->sin_port);
+        port = ntohs (sock_union.sin.sin_port);
         gf_log (GF_RPCSVC, GF_LOG_TRACE, "Client port: %d", (int)port);
         /* If the port is already a privileged one, dont bother with checking
          * options.
@@ -2344,6 +2413,8 @@ rpcsvc_transport_privport_check (rpcsvc_t *svc, char *volname,
                         " allowed");
 
 err:
+        GF_FREE (srchstr);
+
         return ret;
 }
 
@@ -2365,22 +2436,22 @@ rpcsvc_volume_allowed (dict_t *options, char *volname)
                 goto out;
         }
 
-        if (!dict_get (options, srchstr)) {
-                GF_FREE (srchstr);
-                srchstr = globalrule;
-                ret = dict_get_str (options, srchstr, &addrstr);
-        } else
+        if (!dict_get (options, srchstr))
+                ret = dict_get_str (options, globalrule, &addrstr);
+        else
                 ret = dict_get_str (options, srchstr, &addrstr);
 
 out:
+        GF_FREE (srchstr);
+
         return addrstr;
 }
 
 
 rpcsvc_actor_t gluster_dump_actors[] = {
-        [GF_DUMP_NULL] = {"NULL", GF_DUMP_NULL, NULL, NULL, NULL },
-        [GF_DUMP_DUMP] = {"DUMP", GF_DUMP_DUMP, rpcsvc_dump, NULL, NULL },
-        [GF_DUMP_MAXVALUE] = {"MAXVALUE", GF_DUMP_MAXVALUE, NULL, NULL, NULL },
+        [GF_DUMP_NULL] = {"NULL", GF_DUMP_NULL, NULL, NULL, 0},
+        [GF_DUMP_DUMP] = {"DUMP", GF_DUMP_DUMP, rpcsvc_dump, NULL, 0},
+        [GF_DUMP_MAXVALUE] = {"MAXVALUE", GF_DUMP_MAXVALUE, NULL, NULL, 0},
 };
 
 

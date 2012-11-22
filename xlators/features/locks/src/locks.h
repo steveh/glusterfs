@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef __POSIX_LOCKS_H__
 #define __POSIX_LOCKS_H__
 
@@ -29,6 +19,8 @@
 #include "stack.h"
 #include "call-stub.h"
 #include "locks-mem-types.h"
+
+#include "lkowner.h"
 
 #define POSIX_LOCKS "posix-locks"
 struct __pl_fd;
@@ -55,14 +47,15 @@ struct __posix_lock {
            across nodes */
 
         void              *transport;     /* to identify client node */
+        gf_lkowner_t       owner;
         pid_t              client_pid;    /* pid of client process */
-        uint64_t           owner;         /* lock owner from fuse */
 };
 typedef struct __posix_lock posix_lock_t;
 
 struct __pl_inode_lock {
         struct list_head   list;
         struct list_head   blocked_locks; /* list_head pointing to blocked_inodelks */
+        int                ref;
 
         short              fl_type;
         off_t              fl_start;
@@ -83,8 +76,8 @@ struct __pl_inode_lock {
            across nodes */
 
         void              *transport;     /* to identify client node */
+        gf_lkowner_t       owner;
         pid_t              client_pid;    /* pid of client process */
-        uint64_t           owner;
 };
 typedef struct __pl_inode_lock pl_inode_lock_t;
 
@@ -120,9 +113,9 @@ struct __entry_lock {
         struct timeval     blkd_time;   /*time at which lock was queued into blkd list*/
         struct timeval     granted_time; /*time at which lock was queued into active list*/
 
-        void      *trans;
+        void             *trans;
+        gf_lkowner_t      owner;
         pid_t             client_pid;    /* pid of client process */
-        uint64_t          owner;
 };
 typedef struct __entry_lock pl_entry_lock_t;
 
@@ -162,6 +155,14 @@ typedef struct {
         gf_boolean_t   entrylk_count_req;
         gf_boolean_t   inodelk_count_req;
         gf_boolean_t   posixlk_count_req;
+        gf_boolean_t   parent_entrylk_req;
+
+        /* used by {f,}truncate */
+        loc_t  loc;
+        fd_t  *fd;
+        off_t  offset;
+        dict_t *xdata;
+        enum {TRUNCATE, FTRUNCATE} op;
 } pl_local_t;
 
 typedef struct {

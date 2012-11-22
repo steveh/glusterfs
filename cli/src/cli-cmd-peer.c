@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2010-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -72,12 +62,14 @@ cli_cmd_peer_probe_cbk (struct cli_state *state, struct cli_cmd_word *word,
         if (ret)
                 goto out;
 
-        ret = valid_internet_address ((char *) words[2]);
+        ret = valid_internet_address ((char *) words[2], _gf_false);
         if (ret == 1) {
                 ret = 0;
         } else {
+                cli_out ("%s is an invalid address", words[2]);
                 cli_usage_out (word->pattern);
                 parse_error = 1;
+                ret = -1;
                 goto out;
         }
 /*        if (words[3]) {
@@ -96,6 +88,9 @@ out:
                 if ((sent == 0) && (parse_error == 0))
                         cli_out ("Peer probe failed");
         }
+
+        CLI_STACK_DESTROY (frame);
+
         return ret;
 }
 
@@ -161,6 +156,8 @@ out:
                         cli_out ("Peer detach failed");
         }
 
+        CLI_STACK_DESTROY (frame);
+
         return ret;
 }
 
@@ -196,6 +193,9 @@ out:
                 if ((sent == 0) && (parse_error == 0))
                         cli_out ("Peer status failed");
         }
+
+        CLI_STACK_DESTROY (frame);
+
         return ret;
 }
 

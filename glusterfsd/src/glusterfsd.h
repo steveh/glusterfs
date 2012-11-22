@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef __GLUSTERFSD_H__
 #define __GLUSTERFSD_H__
 
@@ -40,11 +30,16 @@
 #define ARGP_LOG_LEVEL_CRITICAL_OPTION    "CRITICAL"
 #define ARGP_LOG_LEVEL_ERROR_OPTION       "ERROR"
 #define ARGP_LOG_LEVEL_WARNING_OPTION     "WARNING"
-#define ARGP_LOG_LEVEL_INFO_OPTION      "INFO"
+#define ARGP_LOG_LEVEL_INFO_OPTION        "INFO"
 #define ARGP_LOG_LEVEL_DEBUG_OPTION       "DEBUG"
 
 #define ENABLE_NO_DAEMON_MODE     1
 #define ENABLE_DEBUG_MODE         1
+
+#define GF_MEMPOOL_COUNT_OF_DICT_T        4096
+/* Considering 4 key/value pairs in a dictionary on an average */
+#define GF_MEMPOOL_COUNT_OF_DATA_T        (GF_MEMPOOL_COUNT_OF_DICT_T * 4)
+#define GF_MEMPOOL_COUNT_OF_DATA_PAIR_T   (GF_MEMPOOL_COUNT_OF_DICT_T * 4)
 
 enum argp_option_keys {
         ARGP_VOLFILE_SERVER_KEY           = 's',
@@ -58,6 +53,7 @@ enum argp_option_keys {
         ARGP_NO_DAEMON_KEY                = 'N',
         ARGP_RUN_ID_KEY                   = 'r',
         ARGP_DEBUG_KEY                    = 133,
+        ARGP_NEGATIVE_TIMEOUT_KEY         = 134,
         ARGP_ENTRY_TIMEOUT_KEY            = 135,
         ARGP_ATTRIBUTE_TIMEOUT_KEY        = 136,
         ARGP_VOLUME_NAME_KEY              = 137,
@@ -80,13 +76,21 @@ enum argp_option_keys {
         ARGP_ACL_KEY                      = 154,
         ARGP_WORM_KEY                     = 155,
         ARGP_USER_MAP_ROOT_KEY            = 156,
+        ARGP_MEM_ACCOUNTING_KEY           = 157,
+        ARGP_SELINUX_KEY                  = 158,
+	ARGP_FOPEN_KEEP_CACHE_KEY	  = 159,
+	ARGP_GID_TIMEOUT_KEY		  = 160,
+	ARGP_FUSE_BACKGROUND_QLEN_KEY     = 161,
+	ARGP_FUSE_CONGESTION_THRESHOLD_KEY = 162,
+        ARGP_INODE32_KEY                  = 163,
+	ARGP_FUSE_MOUNTOPTS_KEY		  = 164,
 };
 
 struct _gfd_vol_top_priv_t {
         rpcsvc_request_t        *req;
         gd1_mgmt_brick_op_req   xlator_req;
-        int32_t                 blk_count;
-        int32_t                 blk_size;
+        uint32_t                blk_count;
+        uint32_t                blk_size;
         double                  throughput;
         double                  time;
         int32_t                 ret;
@@ -100,4 +104,6 @@ void cleanup_and_exit (int signum);
 
 void *glusterfs_volume_top_read_perf (void *args);
 void *glusterfs_volume_top_write_perf (void *args);
+
+extern glusterfs_ctx_t *glusterfsd_ctx;
 #endif /* __GLUSTERFSD_H__ */

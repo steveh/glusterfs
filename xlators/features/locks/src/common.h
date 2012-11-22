@@ -1,29 +1,37 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef __COMMON_H__
 #define __COMMON_H__
+
+#include "lkowner.h"
+/*dump locks format strings */
+#define RANGE_FMT               "type=%s, whence=%hd, start=%llu, len=%llu"
+#define ENTRY_FMT               "type=%s on basename=%s"
+#define DUMP_GEN_FMT            "pid = %llu, owner=%s, transport=%p, "
+#define GRNTD_AT                "granted at %s"
+#define BLKD_AT                 "blocked at %s"
+#define DUMP_BLKD_FMT           DUMP_GEN_FMT", "BLKD_AT
+#define DUMP_GRNTD_FMT          DUMP_GEN_FMT", "GRNTD_AT
+#define DUMP_BLKD_GRNTD_FMT     DUMP_GEN_FMT", "BLKD_AT", "GRNTD_AT
+#define ENTRY_BLKD_FMT          ENTRY_FMT", "DUMP_BLKD_FMT
+#define ENTRY_GRNTD_FMT         ENTRY_FMT", "DUMP_GRNTD_FMT
+#define ENTRY_BLKD_GRNTD_FMT    ENTRY_FMT", "DUMP_BLKD_GRNTD_FMT
+
+#define RANGE_BLKD_FMT          RANGE_FMT", "DUMP_BLKD_FMT
+#define RANGE_GRNTD_FMT         RANGE_FMT", "DUMP_GRNTD_FMT
+#define RANGE_BLKD_GRNTD_FMT    RANGE_FMT", "DUMP_BLKD_GRNTD_FMT
 
 #define SET_FLOCK_PID(flock, lock) ((flock)->l_pid = lock->client_pid)
 posix_lock_t *
 new_posix_lock (struct gf_flock *flock, void *transport, pid_t client_pid,
-                uint64_t owner, fd_t *fd);
+                gf_lkowner_t *owner, fd_t *fd);
 
 pl_inode_t *
 pl_inode_get (xlator_t *this, inode_t *inode);
@@ -61,7 +69,7 @@ void
 __delete_inode_lock (pl_inode_lock_t *lock);
 
 void
-__destroy_inode_lock (pl_inode_lock_t *lock);
+__pl_inodelk_unref (pl_inode_lock_t *lock);
 
 void
 grant_blocked_entry_locks (xlator_t *this, pl_inode_t *pl_inode,
@@ -70,8 +78,12 @@ grant_blocked_entry_locks (xlator_t *this, pl_inode_t *pl_inode,
 void pl_update_refkeeper (xlator_t *this, inode_t *inode);
 
 int32_t
+__get_inodelk_count (xlator_t *this, pl_inode_t *pl_inode);
+int32_t
 get_inodelk_count (xlator_t *this, inode_t *inode);
 
+int32_t
+__get_entrylk_count (xlator_t *this, pl_inode_t *pl_inode);
 int32_t
 get_entrylk_count (xlator_t *this, inode_t *inode);
 
@@ -131,4 +143,6 @@ pl_verify_reservelk (xlator_t *this, pl_inode_t *pl_inode,
                      posix_lock_t *lock, int can_block);
 int
 pl_reserve_unlock (xlator_t *this, pl_inode_t *pl_inode, posix_lock_t *reqlock);
+uint32_t
+check_entrylk_on_basename (xlator_t *this, inode_t *parent, char *basename);
 #endif /* __COMMON_H__ */

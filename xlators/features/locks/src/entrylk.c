@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -35,7 +25,8 @@
 
 static pl_entry_lock_t *
 new_entrylk_lock (pl_inode_t *pinode, const char *basename, entrylk_type type,
-                  void *trans, pid_t client_pid, uint64_t owner, const char *volume)
+                  void *trans, pid_t client_pid, gf_lkowner_t *owner,
+                  const char *volume)
 
 {
         pl_entry_lock_t *newlock = NULL;
@@ -46,12 +37,12 @@ new_entrylk_lock (pl_inode_t *pinode, const char *basename, entrylk_type type,
                 goto out;
         }
 
-        newlock->basename       = basename ? gf_strdup (basename) : NULL;
-        newlock->type           = type;
-        newlock->trans          = trans;
-        newlock->volume         = volume;
-        newlock->client_pid     = client_pid;
-        newlock->owner          = owner;
+        newlock->basename   = basename ? gf_strdup (basename) : NULL;
+        newlock->type       = type;
+        newlock->trans      = trans;
+        newlock->volume     = volume;
+        newlock->client_pid = client_pid;
+        newlock->owner      = *owner;
 
         INIT_LIST_HEAD (&newlock->domain_list);
         INIT_LIST_HEAD (&newlock->blocked_locks);
@@ -81,11 +72,11 @@ names_conflict (const char *n1, const char *n2)
 }
 
 
-static int
+static inline int
 __same_entrylk_owner (pl_entry_lock_t *l1, pl_entry_lock_t *l2)
 {
 
-        return ((l1->owner == l2->owner) &&
+        return (is_same_lkowner (&l1->owner, &l2->owner) &&
                 (l1->trans  == l2->trans));
 }
 
@@ -320,15 +311,13 @@ __lock_name (pl_inode_t *pinode, const char *basename, entrylk_type type,
         pl_entry_lock_t *conf       = NULL;
         void            *trans      = NULL;
         pid_t            client_pid = 0;
-        uint64_t         owner      = 0;
-
-        int ret = -EINVAL;
+        int              ret        = -EINVAL;
 
         trans = frame->root->trans;
         client_pid = frame->root->pid;
-        owner      = frame->root->lk_owner;
 
-        lock = new_entrylk_lock (pinode, basename, type, trans, client_pid, owner, dom->domain);
+        lock = new_entrylk_lock (pinode, basename, type, trans, client_pid,
+                                 &frame->root->lk_owner, dom->domain);
         if (!lock) {
                 ret = -ENOMEM;
                 goto out;
@@ -342,8 +331,7 @@ __lock_name (pl_inode_t *pinode, const char *basename, entrylk_type type,
         if (conf) {
                 ret = -EAGAIN;
                 if (nonblock){
-                        if (lock->basename)
-                                GF_FREE ((char *)lock->basename);
+                        GF_FREE ((char *)lock->basename);
                         GF_FREE (lock);
                         goto out;
 
@@ -362,8 +350,7 @@ __lock_name (pl_inode_t *pinode, const char *basename, entrylk_type type,
         if ( __blocked_lock_conflict (dom, basename, type) && !(__owner_has_lock (dom, lock))) {
                 ret = -EAGAIN;
                 if (nonblock) {
-                        if (lock->basename)
-                                GF_FREE ((char *) lock->basename);
+                        GF_FREE ((char *) lock->basename);
                         GF_FREE (lock);
                         goto out;
 
@@ -442,6 +429,32 @@ out:
         return ret_lock;
 }
 
+uint32_t
+check_entrylk_on_basename (xlator_t *this, inode_t *parent, char *basename)
+{
+        uint32_t        entrylk = 0;
+        pl_inode_t      *pinode = 0;
+        pl_dom_list_t   *dom = NULL;
+        pl_entry_lock_t *conf       = NULL;
+
+        pinode = pl_inode_get (this, parent);
+        if (!pinode)
+                goto out;
+        pthread_mutex_lock (&pinode->mutex);
+        {
+                list_for_each_entry (dom, &pinode->dom_list, inode_list) {
+                        conf = __lock_grantable (dom, basename, ENTRYLK_WRLCK);
+                        if (conf && conf->basename) {
+                                entrylk = 1;
+                                break;
+                        }
+                }
+        }
+        pthread_mutex_unlock (&pinode->mutex);
+
+out:
+        return entrylk;
+}
 
 void
 __grant_blocked_entry_locks (xlator_t *this, pl_inode_t *pl_inode,
@@ -474,8 +487,7 @@ __grant_blocked_entry_locks (xlator_t *this, pl_inode_t *pl_inode,
                 } else {
                         gf_log (this->name, GF_LOG_DEBUG,
                                 "should never happen");
-                        if (bl->basename)
-                                GF_FREE ((char *)bl->basename);
+                        GF_FREE ((char *)bl->basename);
                         GF_FREE (bl);
                 }
         }
@@ -506,7 +518,7 @@ grant_blocked_entry_locks (xlator_t *this, pl_inode_t *pl_inode,
                                    lock->basename, ENTRYLK_LOCK, lock->type,
                                    0, 0);
 
-                STACK_UNWIND_STRICT (entrylk, lock->frame, 0, 0);
+                STACK_UNWIND_STRICT (entrylk, lock->frame, 0, 0, NULL);
 
         }
 
@@ -574,10 +586,9 @@ release_entry_locks_for_transport (xlator_t *this, pl_inode_t *pinode,
         list_for_each_entry_safe (lock, tmp, &released, blocked_locks) {
                 list_del_init (&lock->blocked_locks);
 
-                STACK_UNWIND_STRICT (entrylk, lock->frame, -1, EAGAIN);
+                STACK_UNWIND_STRICT (entrylk, lock->frame, -1, EAGAIN, NULL);
 
-                if (lock->basename)
-                        GF_FREE ((char *)lock->basename);
+                GF_FREE ((char *)lock->basename);
                 GF_FREE (lock);
 
         }
@@ -585,10 +596,9 @@ release_entry_locks_for_transport (xlator_t *this, pl_inode_t *pinode,
         list_for_each_entry_safe (lock, tmp, &granted, blocked_locks) {
                 list_del_init (&lock->blocked_locks);
 
-                STACK_UNWIND_STRICT (entrylk, lock->frame, 0, 0);
+                STACK_UNWIND_STRICT (entrylk, lock->frame, 0, 0, NULL);
 
-                if (lock->basename)
-                        GF_FREE ((char *)lock->basename);
+                GF_FREE ((char *)lock->basename);
                 GF_FREE (lock);
         }
 
@@ -601,7 +611,6 @@ pl_common_entrylk (call_frame_t *frame, xlator_t *this,
                    const char *volume, inode_t *inode, const char *basename,
                    entrylk_cmd cmd, entrylk_type type, loc_t *loc, fd_t *fd)
 {
-        uint64_t owner    = 0;
         int32_t  op_ret   = -1;
         int32_t  op_errno = 0;
 
@@ -628,10 +637,9 @@ pl_common_entrylk (call_frame_t *frame, xlator_t *this,
 
         entrylk_trace_in (this, frame, volume, fd, loc, basename, cmd, type);
 
-        owner     = frame->root->lk_owner;
         transport = frame->root->trans;
 
-        if (owner == 0) {
+        if (frame->root->lk_owner.len == 0) {
                 /*
                   this is a special case that means release
                   all locks from this transport
@@ -713,7 +721,7 @@ out:
                 entrylk_trace_out (this, frame, volume, fd, loc, basename,
                                    cmd, type, op_ret, op_errno);
 
-                STACK_UNWIND_STRICT (entrylk, frame, op_ret, op_errno);
+                STACK_UNWIND_STRICT (entrylk, frame, op_ret, op_errno, NULL);
         } else {
                 entrylk_trace_block (this, frame, volume, fd, loc, basename,
                                      cmd, type);
@@ -759,7 +767,7 @@ pl_fentrylk (call_frame_t *frame, xlator_t *this,
 }
 
 
-static int32_t
+int32_t
 __get_entrylk_count (xlator_t *this, pl_inode_t *pl_inode)
 {
         int32_t            count = 0;
@@ -768,24 +776,10 @@ __get_entrylk_count (xlator_t *this, pl_inode_t *pl_inode)
 
         list_for_each_entry (dom, &pl_inode->dom_list, inode_list) {
                 list_for_each_entry (lock, &dom->entrylk_list, domain_list) {
-
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                " XATTR DEBUG"
-                                " domain: %s  %s on %s state = Active",
-                                dom->domain,
-                                lock->type == ENTRYLK_RDLCK ? "ENTRYLK_RDLCK" :
-                                "ENTRYLK_WRLCK", lock->basename);
                         count++;
                 }
 
                 list_for_each_entry (lock, &dom->blocked_entrylks, blocked_locks) {
-
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                " XATTR DEBUG"
-                                " domain: %s  %s on %s state = Blocked",
-                                dom->domain,
-                                lock->type == ENTRYLK_RDLCK ? "ENTRYLK_RDLCK" :
-                                "ENTRYLK_WRLCK", lock->basename);
                         count++;
                 }
 

@@ -1,25 +1,17 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "common-utils.h"
 #include "xlator.h"
 #include "client.h"
+#include "lkowner.h"
 
 static void
 __insert_and_merge (clnt_fd_ctx_t *fdctx, client_posix_lock_t *lock);
@@ -36,11 +28,11 @@ __dump_client_lock (client_posix_lock_t *lock)
 
         gf_log (this->name, GF_LOG_INFO,
                 "{fd=%p}"
-                "{%s lk-owner:%"PRIu64" %"PRId64" - %"PRId64"}"
+                "{%s lk-owner:%s %"PRId64" - %"PRId64"}"
                 "{start=%"PRId64" end=%"PRId64"}",
                 lock->fd,
                 lock->fl_type == F_WRLCK ? "Write-Lock" : "Read-Lock",
-                lock->owner,
+                lkowner_utoa (&lock->owner),
                 lock->user_flock.l_start,
                 lock->user_flock.l_len,
                 lock->fl_start,
@@ -133,12 +125,6 @@ add_locks (client_posix_lock_t *l1, client_posix_lock_t *l2)
 	return sum;
 }
 
-/* Return true if the locks have the same owner */
-static int
-same_owner (client_posix_lock_t *l1, client_posix_lock_t *l2)
-{
-        return ((l1->owner == l2->owner));
-}
 
 /* Return true if the locks overlap, false otherwise */
 static int
@@ -285,11 +271,11 @@ __insert_and_merge (clnt_fd_ctx_t *fdctx, client_posix_lock_t *lock)
                 if (!locks_overlap (conf, lock))
                         continue;
 
-                if (same_owner (conf, lock)) {
+                if (is_same_lkowner (&conf->owner, &lock->owner)) {
                         if (conf->fl_type == lock->fl_type) {
                                 sum = add_locks (lock, conf);
 
-                                sum->fd         = lock->fd;
+                                sum->fd = lock->fd;
 
                                 __delete_client_lock (conf);
                                 __destroy_client_lock (conf);
@@ -301,8 +287,8 @@ __insert_and_merge (clnt_fd_ctx_t *fdctx, client_posix_lock_t *lock)
                         } else {
                                 sum = add_locks (lock, conf);
 
-                                sum->fd         = conf->fd;
-                                sum->owner      = conf->owner;
+                                sum->fd = conf->fd;
+                                sum->owner = conf->owner;
 
                                 v = subtract_locks (sum, lock);
 
@@ -365,9 +351,9 @@ destroy_client_lock (client_posix_lock_t *lock)
 }
 
 int32_t
-delete_granted_locks_owner (fd_t *fd, uint64_t owner)
+delete_granted_locks_owner (fd_t *fd, gf_lkowner_t *owner)
 {
-        clnt_fd_ctx_t     *fdctx = NULL;
+        clnt_fd_ctx_t       *fdctx = NULL;
         client_posix_lock_t *lock  = NULL;
         client_posix_lock_t *tmp   = NULL;
         xlator_t            *this  = NULL;
@@ -389,7 +375,7 @@ delete_granted_locks_owner (fd_t *fd, uint64_t owner)
         pthread_mutex_lock (&fdctx->mutex);
         {
                 list_for_each_entry_safe (lock, tmp, &fdctx->lock_list, list) {
-                        if (lock->owner == owner) {
+                        if (!is_same_lkowner (&lock->owner, owner)) {
                                 list_del_init (&lock->list);
                                 list_add_tail (&lock->list, &delete_list);
                                 count++;
@@ -486,7 +472,7 @@ client_cmd_to_gf_cmd (int32_t cmd, int32_t *gf_cmd)
 }
 
 static client_posix_lock_t *
-new_client_lock (struct gf_flock *flock, uint64_t owner,
+new_client_lock (struct gf_flock *flock, gf_lkowner_t *owner,
                  int32_t cmd, fd_t *fd)
 {
         client_posix_lock_t *new_lock = NULL;
@@ -509,7 +495,8 @@ new_client_lock (struct gf_flock *flock, uint64_t owner,
 	else
 		new_lock->fl_end = flock->l_start + flock->l_len - 1;
 
-        new_lock->owner = owner;
+        new_lock->owner = *owner;
+
         new_lock->cmd = cmd; /* Not really useful */
 
 out:
@@ -527,8 +514,8 @@ client_save_number_fds (clnt_conf_t *conf, int count)
 }
 
 int
-client_add_lock_for_recovery (fd_t *fd, struct gf_flock *flock, uint64_t owner,
-                              int32_t cmd)
+client_add_lock_for_recovery (fd_t *fd, struct gf_flock *flock,
+                              gf_lkowner_t *owner, int32_t cmd)
 {
         clnt_fd_ctx_t       *fdctx = NULL;
         xlator_t            *this  = NULL;
@@ -572,13 +559,13 @@ construct_reserve_unlock (struct gf_flock *lock, call_frame_t *frame,
 {
         GF_ASSERT (lock);
         GF_ASSERT (frame);
-        GF_ASSERT (frame->root->lk_owner);
 
         lock->l_type = F_UNLCK;
         lock->l_start = 0;
         lock->l_whence = SEEK_SET;
         lock->l_len = 0; /* Whole file */
         lock->l_pid = (uint64_t)(unsigned long)frame->root;
+        lock->l_owner = client_lock->owner;
 
         frame->root->lk_owner = client_lock->owner;
 
@@ -612,6 +599,7 @@ decrement_reopen_fd_count (xlator_t *this, clnt_conf_t *conf)
         if (fd_count == 0) {
                 gf_log (this->name, GF_LOG_INFO,
                         "last fd open'd/lock-self-heal'd - notifying CHILD-UP");
+                client_set_lk_version (this);
                 client_notify_parents_child_up (this);
         }
 
@@ -624,7 +612,7 @@ client_remove_reserve_lock_cbk (call_frame_t *frame,
                                 xlator_t *this,
                                 int32_t op_ret,
                                 int32_t op_errno,
-                                struct gf_flock *lock)
+                                struct gf_flock *lock, dict_t *xdata)
 {
         clnt_local_t *local = NULL;
         clnt_conf_t  *conf  = NULL;
@@ -670,7 +658,7 @@ client_remove_reserve_lock (xlator_t *this, call_frame_t *frame,
 
         STACK_WIND (frame, client_remove_reserve_lock_cbk,
                     this, this->fops->lk,
-                    lock->fd, F_RESLK_UNLCK, &unlock);
+                    lock->fd, F_RESLK_UNLCK, &unlock, NULL);
 }
 
 static client_posix_lock_t *
@@ -702,7 +690,7 @@ client_reserve_lock_cbk (call_frame_t *frame,
                          xlator_t *this,
                          int32_t op_ret,
                          int32_t op_errno,
-                         struct gf_flock *lock)
+                         struct gf_flock *lock, dict_t *xdata)
 {
 
         clnt_local_t *local = NULL;
@@ -758,7 +746,7 @@ client_recovery_lock_cbk (call_frame_t *frame,
                           xlator_t *this,
                           int32_t op_ret,
                           int32_t op_errno,
-                          struct gf_flock *lock)
+                          struct gf_flock *lock, dict_t *xdata)
 {
         clnt_local_t *local = NULL;
         clnt_fd_ctx_t *fdctx = NULL;
@@ -798,7 +786,7 @@ client_recovery_lock_cbk (call_frame_t *frame,
 
                 STACK_WIND (frame, client_reserve_lock_cbk,
                             this, this->fops->lk,
-                            next_lock->fd, F_RESLK_LCK, &reserve_flock);
+                            next_lock->fd, F_RESLK_LCK, &reserve_flock, NULL);
                 goto out;
 
         }
@@ -827,7 +815,6 @@ static int
 client_send_recovery_lock (call_frame_t *frame, xlator_t *this,
                            client_posix_lock_t *lock)
 {
-
         frame->root->lk_owner = lock->owner;
 
         /* Send all locks as F_SETLK to prevent the frame
@@ -836,7 +823,7 @@ client_send_recovery_lock (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, client_recovery_lock_cbk,
                     this, this->fops->lk,
                     lock->fd, F_SETLK,
-                    &(lock->user_flock));
+                    &(lock->user_flock), NULL);
 
         return 0;
 }
@@ -868,7 +855,7 @@ client_attempt_lock_recovery (xlator_t *this, clnt_fd_ctx_t *fdctx)
         struct gf_flock reserve_flock;
         int ret = 0;
 
-        local = GF_CALLOC (1, sizeof (*local), gf_client_mt_clnt_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 ret = -ENOMEM;
                 goto out;
@@ -900,7 +887,7 @@ client_attempt_lock_recovery (xlator_t *this, clnt_fd_ctx_t *fdctx)
 
         STACK_WIND (frame, client_reserve_lock_cbk,
                     this, this->fops->lk,
-                    lock->fd, F_RESLK_LCK, &reserve_flock);
+                    lock->fd, F_RESLK_LCK, &reserve_flock, NULL);
 
 out:
         return ret;

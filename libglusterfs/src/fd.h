@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _FD_H
@@ -30,9 +21,12 @@
 #include <unistd.h>
 #include "glusterfs.h"
 #include "locking.h"
+#include "fd-lk.h"
+#include "common-utils.h"
 
 struct _inode;
 struct _dict;
+struct fd_lk_ctx;
 
 struct _fd_ctx {
         union {
@@ -45,12 +39,8 @@ struct _fd_ctx {
         };
 };
 
-/* If this structure changes, please have mercy on the booster maintainer
- * and update the fd_t struct in booster/src/booster-fd.h.
- * See the comment there to know why.
- */
 struct _fd {
-        pid_t             pid;
+        uint64_t          pid;
 	int32_t           flags;
         int32_t           refcount;
         struct list_head  inode_list;
@@ -59,6 +49,8 @@ struct _fd {
                                    'struct _fd_ctx' array (_ctx).*/
 	struct _fd_ctx   *_ctx;
         int               xl_count; /* Number of xl referred in this fd */
+        struct fd_lk_ctx *lk_ctx;
+        gf_boolean_t      anonymous; /* geo-rep anonymous fd */
 };
 typedef struct _fd fd_t;
 
@@ -117,6 +109,10 @@ gf_fd_fdtable_destroy (fdtable_t *fdtable);
 
 
 fd_t *
+__fd_ref (fd_t *fd);
+
+
+fd_t *
 fd_ref (fd_t *fd);
 
 
@@ -127,9 +123,21 @@ fd_unref (fd_t *fd);
 fd_t *
 fd_create (struct _inode *inode, pid_t pid);
 
+fd_t *
+fd_create_uint64 (struct _inode *inode, uint64_t pid);
 
 fd_t *
 fd_lookup (struct _inode *inode, pid_t pid);
+
+fd_t *
+fd_lookup_uint64 (struct _inode *inode, uint64_t pid);
+
+fd_t *
+fd_anonymous (inode_t *inode);
+
+
+gf_boolean_t
+fd_is_anonymous (fd_t *fd);
 
 
 uint8_t
@@ -151,7 +159,6 @@ fd_ctx_get (fd_t *fd, xlator_t *xlator, uint64_t *value);
 int
 fd_ctx_del (fd_t *fd, xlator_t *xlator, uint64_t *value);
 
-
 int
 __fd_ctx_set (fd_t *fd, xlator_t *xlator, uint64_t value);
 
@@ -160,13 +167,14 @@ int
 __fd_ctx_get (fd_t *fd, xlator_t *xlator, uint64_t *value);
 
 
-int
-__fd_ctx_del (fd_t *fd, xlator_t *xlator, uint64_t *value);
-
-fd_t *
-_fd_ref (fd_t *fd);
-
 void
 fd_ctx_dump (fd_t *fd, char *prefix);
+
+fdentry_t *
+gf_fd_fdtable_copy_all_fds (fdtable_t *fdtable, uint32_t *count);
+
+
+void
+gf_fdptr_put (fdtable_t *fdtable, fd_t *fd);
 
 #endif /* _FD_H */

@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -25,6 +16,32 @@
 #include "client.h"
 #include "fd.h"
 
+
+int
+client_fd_lk_list_empty (fd_lk_ctx_t *lk_ctx, gf_boolean_t try_lock)
+{
+        int  ret = 1;
+
+        if (!lk_ctx) {
+                ret = -1;
+                goto out;
+        }
+
+        if (try_lock) {
+                ret = TRY_LOCK (&lk_ctx->lock);
+                if (ret != 0) {
+                        ret = -1;
+                        goto out;
+                }
+        } else {
+                LOCK (&lk_ctx->lock);
+        }
+
+        ret = list_empty (&lk_ctx->lk_list);
+        UNLOCK (&lk_ctx->lock);
+out:
+        return ret;
+}
 
 clnt_fd_ctx_t *
 this_fd_del_ctx (fd_t *file, xlator_t *this)
@@ -106,6 +123,7 @@ client_local_wipe (clnt_local_t *local)
 {
         if (local) {
                 loc_wipe (&local->loc);
+                loc_wipe (&local->loc2);
 
                 if (local->fd) {
                         fd_unref (local->fd);
@@ -115,7 +133,9 @@ client_local_wipe (clnt_local_t *local)
                         iobref_unref (local->iobref);
                 }
 
-                 GF_FREE (local);
+                GF_FREE (local->name);
+
+                mem_put (local);
         }
 
         return 0;
@@ -154,14 +174,20 @@ out:
 }
 
 int
-unserialize_rsp_direntp (struct gfs3_readdirp_rsp *rsp, gf_dirent_t *entries)
+unserialize_rsp_direntp (xlator_t *this, fd_t *fd,
+                         struct gfs3_readdirp_rsp *rsp, gf_dirent_t *entries)
 {
         struct gfs3_dirplist *trav      = NULL;
+        char                 *buf       = NULL;
 	gf_dirent_t          *entry     = NULL;
+        inode_table_t        *itable    = NULL;
         int                   entry_len = 0;
         int                   ret       = -1;
 
         trav = rsp->reply;
+
+        if (fd)
+                itable = fd->inode->table;
 
         while (trav) {
                 entry_len = gf_dirent_size (trav->name);
@@ -177,6 +203,30 @@ unserialize_rsp_direntp (struct gfs3_readdirp_rsp *rsp, gf_dirent_t *entries)
                 gf_stat_to_iatt (&trav->stat, &entry->d_stat);
 
                 strcpy (entry->d_name, trav->name);
+
+                if (trav->dict.dict_val) {
+                        /* Dictionary is sent along with response */
+                        buf = memdup (trav->dict.dict_val, trav->dict.dict_len);
+                        if (!buf)
+                                goto out;
+
+                        entry->dict = dict_new ();
+
+                        ret = dict_unserialize (buf, trav->dict.dict_len,
+                                                &entry->dict);
+                        if (ret < 0) {
+                                gf_log (THIS->name, GF_LOG_WARNING,
+                                        "failed to unserialize xattr dict");
+                                errno = EINVAL;
+                                goto out;
+                        }
+                        entry->dict->extra_free = buf;
+                        buf = NULL;
+                }
+
+                entry->inode = inode_find (itable, entry->d_stat.ia_gfid);
+                if (!entry->inode)
+                        entry->inode = inode_new (itable);
 
 		list_add_tail (&entry->list, &entries->list);
 
@@ -199,6 +249,7 @@ clnt_readdirp_rsp_cleanup (gfs3_readdirp_rsp *rsp)
         while (trav) {
                 trav = trav->nextentry;
                 /* on client, the rpc lib allocates this */
+                free (prev->dict.dict_val);
                 free (prev->name);
                 free (prev);
                 prev = trav;

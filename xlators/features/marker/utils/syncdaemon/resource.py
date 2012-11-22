@@ -3,6 +3,7 @@ import os
 import sys
 import stat
 import time
+import fcntl
 import errno
 import struct
 import socket
@@ -11,13 +12,14 @@ import tempfile
 import threading
 import subprocess
 from errno import EEXIST, ENOENT, ENODATA, ENOTDIR, ELOOP, EISDIR
+from select import error as selecterror
 
 from gconf import gconf
 import repce
 from repce import RepceServer, RepceClient
-from master import GMaster
+from  master import gmaster_builder
 import syncdutils
-from syncdutils import GsyncdError, select
+from syncdutils import GsyncdError, select, privileged, boolify
 
 UrlRX  = re.compile('\A(\w+)://([^ *?[]*)\Z')
 HostRX = re.compile('[a-z\d](?:[a-z\d.-]*[a-z\d])?', re.I)
@@ -108,7 +110,7 @@ Xattr = _MetaXattr()
 
 class Popen(subprocess.Popen):
     """customized subclass of subprocess.Popen with a ring
-    buffer for children error ouput"""
+    buffer for children error output"""
 
     @classmethod
     def init_errhandler(cls):
@@ -116,23 +118,45 @@ class Popen(subprocess.Popen):
         cls.errstore = {}
         def tailer():
             while True:
-                for po in select([po.stderr for po in cls.errstore], [], []):
+                errstore = cls.errstore.copy()
+                try:
+                    poe, _ ,_ = select([po.stderr for po in errstore], [], [], 1)
+                except ValueError, selecterror:
+                    continue
+                for po in errstore:
+                    if po.stderr not in poe:
+                        continue
                     po.lock.acquire()
                     try:
-                        la = cls.errstore.get(po)
-                        if la == None:
+                        if po.on_death_row:
                             continue
-                        l = os.read(po.stderr.fileno(), 1024)
+                        la = errstore[po]
+                        try:
+                            fd = po.stderr.fileno()
+                        except ValueError:  # file is already closed
+                            continue
+                        l = os.read(fd, 1024)
+                        if not l:
+                            continue
                         tots = len(l)
                         for lx in la:
                             tots += len(lx)
                         while tots > 1<<20 and la:
                             tots -= len(la.pop(0))
+                        la.append(l)
                     finally:
                         po.lock.release()
         t = syncdutils.Thread(target = tailer)
         t.start()
         cls.errhandler = t
+
+    @classmethod
+    def fork(cls):
+        """fork wrapper that restarts errhandler thread in child"""
+        pid = os.fork()
+        if not pid:
+            cls.init_errhandler()
+        return pid
 
     def __init__(self, args, *a, **kw):
         """customizations for subprocess.Popen instantiation
@@ -145,6 +169,7 @@ class Popen(subprocess.Popen):
         if 'close_fds' not in kw:
             kw['close_fds'] = True
         self.lock = threading.Lock()
+        self.on_death_row = False
         try:
             sup(self, args, *a, **kw)
         except:
@@ -153,20 +178,32 @@ class Popen(subprocess.Popen):
                 raise
             raise GsyncdError("""execution of "%s" failed with %s (%s)""" % \
                               (args[0], errno.errorcode[ex.errno], os.strerror(ex.errno)))
-        if kw['stderr'] == subprocess.PIPE:
+        if kw.get('stderr') == subprocess.PIPE:
             assert(getattr(self, 'errhandler', None))
             self.errstore[self] = []
 
-    def errfail(self):
-        """fail nicely if child did not terminate with success"""
-        filling = None
+    def errlog(self):
+        """make a log about child's failure event"""
+        filling = ""
         if self.elines:
             filling = ", saying:"
-        logging.error("""command "%s" returned with %d%s""" % \
-                      (" ".join(self.args), self.returncode, filling))
+        logging.error("""command "%s" returned with %s%s""" % \
+                      (" ".join(self.args), repr(self.returncode), filling))
+        lp = ''
+        def logerr(l):
+            logging.error(self.args[0] + "> " + l)
         for l in self.elines:
-            for ll in l.rstrip().split("\n"):
-                logging.error(self.args[0] + "> " + ll.rstrip())
+            ls = l.split('\n')
+            ls[0] = lp + ls[0]
+            lp = ls.pop()
+            for ll in ls:
+                logerr(ll)
+        if lp:
+            logerr(lp)
+
+    def errfail(self):
+        """fail nicely if child did not terminate with success"""
+        self.errlog()
         syncdutils.finalize(exval = 1)
 
     def terminate_geterr(self, fail_on_err = True):
@@ -176,15 +213,19 @@ class Popen(subprocess.Popen):
         """
         self.lock.acquire()
         try:
-            elines = self.errstore.pop(self)
+            self.on_death_row = True
         finally:
             self.lock.release()
+        elines = self.errstore.pop(self)
         if self.poll() == None:
             self.terminate()
-            if sp.poll() == None:
+            if self.poll() == None:
                 time.sleep(0.1)
-            sp.kill()
+                self.kill()
+                self.wait()
         while True:
+            if not select([self.stderr],[],[],0.1)[0]:
+                break
             b = os.read(self.stderr.fileno(), 1024)
             if b:
                 elines.append(b)
@@ -204,7 +245,7 @@ class Server(object):
     and classmethods and is used directly, without instantiation.)
     """
 
-    GX_NSPACE = "trusted.glusterfs"
+    GX_NSPACE = (privileged() and "trusted" or "system") + ".glusterfs"
     NTV_FMTSTR = "!" + "B"*19 + "II"
     FRGN_XTRA_FMT = "I"
     FRGN_FMTSTR = NTV_FMTSTR + FRGN_XTRA_FMT
@@ -330,10 +371,36 @@ class Server(object):
                 raise
 
     @classmethod
+    def xtime_vec(cls, path, *uuids):
+        """vectored version of @xtime
+
+        accepts a list of uuids and returns a dictionary
+        with uuid as key(s) and xtime as value(s)
+        """
+        xt = {}
+        for uuid in uuids:
+            xtu = cls.xtime(path, uuid)
+            if xtu == ENODATA:
+                xtu = None
+            if isinstance(xtu, int):
+                return xtu
+            xt[uuid] = xtu
+        return xt
+
+    @classmethod
     @_pathguard
     def set_xtime(cls, path, uuid, mark):
         """set @mark as xtime for @uuid on @path"""
         Xattr.lsetxattr(path, '.'.join([cls.GX_NSPACE, uuid, 'xtime']), struct.pack('!II', *mark))
+
+    @classmethod
+    def set_xtime_vec(cls, path, mark_dct):
+        """vectored (or dictered) version of set_xtime
+
+        ignore values that match @ignore
+        """
+        for u,t in mark_dct.items():
+            cls.set_xtime(path, u, t)
 
     @staticmethod
     @_pathguard
@@ -405,6 +472,10 @@ class SlaveLocal(object):
         stop servicing if a timeout is configured and got no
         keep-alime in that inteval
         """
+
+        if boolify(gconf.use_rsync_xattrs) and not privileged():
+            raise GsyncdError("using rsync for extended attributes is not supported")
+
         repce = RepceServer(self.server, sys.stdin, sys.stdout, int(gconf.sync_jobs))
         t = syncdutils.Thread(target=lambda: (repce.service_loop(),
                                               syncdutils.finalize()))
@@ -431,12 +502,13 @@ class SlaveRemote(object):
         communicate throuh its stdio.
         """
         slave = opts.get('slave', self.url)
+        extra_opts = []
         so = getattr(gconf, 'session_owner', None)
         if so:
-            so_args = ['--session-owner', so]
-        else:
-            so_args = []
-        po = Popen(rargs + gconf.remote_gsyncd.split() + so_args + \
+            extra_opts += ['--session-owner', so]
+        if boolify(gconf.use_rsync_xattrs):
+            extra_opts.append('--use-rsync-xattrs')
+        po = Popen(rargs + gconf.remote_gsyncd.split() + extra_opts + \
                    ['-N', '--listen', '--timeout', str(gconf.timeout), slave],
                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         gconf.transport = po
@@ -464,8 +536,15 @@ class SlaveRemote(object):
         if not files:
             raise GsyncdError("no files to sync")
         logging.debug("files: " + ", ".join(files))
-        argv = gconf.rsync_command.split() + gconf.rsync_extra.split() + ['-aR'] + files + list(args)
-        po = Popen(argv, stderr=subprocess.PIPE)
+        argv = gconf.rsync_command.split() + \
+               ['-aR0', '--files-from=-', '--super', '--numeric-ids', '--no-implied-dirs'] + \
+               gconf.rsync_options.split() + (boolify(gconf.use_rsync_xattrs) and ['--xattrs'] or []) + \
+               ['.'] + list(args)
+        po = Popen(argv, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        for f in files:
+            po.stdin.write(f)
+            po.stdin.write('\0')
+        po.stdin.close()
         po.wait()
         po.terminate_geterr(fail_on_err = False)
         return po
@@ -575,6 +654,7 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
                     if x[0] > now:
                         logging.debug("volinfo[%s] expires: %d (%d sec later)" % \
                                       (d['uuid'], x[0], x[0] - now))
+                        d['timeout'] = x[0]
                         dict_list.append(d)
                     else:
                         try:
@@ -610,6 +690,7 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
 
         def __init__(self, params):
             self.params = params
+            self.mntpt = None
 
         @classmethod
         def get_glusterprog(cls):
@@ -628,7 +709,7 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
         def make_mount_argv(self, *a):
             raise NotImplementedError
 
-        def cleanup_mntpt(self):
+        def cleanup_mntpt(self, *a):
             pass
 
         def handle_mounter(self, po):
@@ -641,24 +722,75 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
             change into the mount, and lazy unmount the
             filesystem.
             """
-            mounted = False
-            try:
-                po = Popen(self.make_mount_argv(*a), **self.mountkw)
+
+            mpi, mpo = os.pipe()
+            mh = Popen.fork()
+            if mh:
+                os.close(mpi)
+                fcntl.fcntl(mpo, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
+                d = None
+                margv = self.make_mount_argv(*a)
+                if self.mntpt:
+                    # mntpt is determined pre-mount
+                    d = self.mntpt
+                    os.write(mpo, d + '\0')
+                po = Popen(margv, **self.mountkw)
                 self.handle_mounter(po)
                 po.terminate_geterr()
-                d = self.mntpt
-                mounted = True
                 logging.debug('auxiliary glusterfs mount in place')
-                os.chdir(d)
-                self.umount_l(d).terminate_geterr()
-                mounted = False
-            finally:
-                try:
-                    if mounted:
-                        self.umount_l(d).terminate_geterr(fail_on_err = False)
-                    self.cleanup_mntpt()
-                except:
+                if not d:
+                    # mntpt is determined during mount
+                    d = self.mntpt
+                    os.write(mpo, d + '\0')
+                os.write(mpo, 'M')
+                t = syncdutils.Thread(target=lambda: os.chdir(d))
+                t.start()
+                tlim = gconf.starttime + int(gconf.connection_timeout)
+                while True:
+                    if not t.isAlive():
+                        break
+                    if time.time() >= tlim:
+                        syncdutils.finalize(exval = 1)
+                    time.sleep(1)
+                os.close(mpo)
+                _, rv = syncdutils.waitpid(mh, 0)
+                if rv:
+                    rv = (os.WIFEXITED(rv) and os.WEXITSTATUS(rv) or 0) - \
+                         (os.WIFSIGNALED(rv) and os.WTERMSIG(rv) or 0)
                     logging.warn('stale mount possibly left behind on ' + d)
+                    raise GsyncdError("cleaning up temp mountpoint %s failed with status %d" % \
+                                      (d, rv))
+            else:
+                rv = 0
+                try:
+                    os.setsid()
+                    os.close(mpo)
+                    mntdata = ''
+                    while True:
+                        c = os.read(mpi, 1)
+                        if not c:
+                            break
+                        mntdata += c
+                    if mntdata:
+                        mounted = False
+                        if mntdata[-1] == 'M':
+                            mntdata = mntdata[:-1]
+                            assert(mntdata)
+                            mounted = True
+                        assert(mntdata[-1] == '\0')
+                        mntpt = mntdata[:-1]
+                        assert(mntpt)
+                        if mounted:
+                            po = self.umount_l(mntpt)
+                            po.terminate_geterr(fail_on_err = False)
+                            if po.returncode != 0:
+                                po.errlog()
+                                rv = po.returncode
+                        self.cleanup_mntpt(mntpt)
+                except:
+                    logging.exception('mount cleanup failure:')
+                    rv = 200
+                os._exit(rv)
             logging.debug('auxiliary glusterfs mount prepared')
 
     class DirectMounter(Mounter):
@@ -675,8 +807,10 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
             self.mntpt = tempfile.mkdtemp(prefix = 'gsyncd-aux-mount-')
             return [self.get_glusterprog()] + ['--' + p for p in self.params] + [self.mntpt]
 
-        def cleanup_mntpt(self):
-            os.rmdir(self.mntpt)
+        def cleanup_mntpt(self, mntpt = None):
+            if not mntpt:
+                mntpt = self.mntpt
+            os.rmdir(mntpt)
 
     class MountbrokerMounter(Mounter):
         """mounter backend using the mountbroker gluster service"""
@@ -715,10 +849,8 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
         """
 
         label = getattr(gconf, 'mountbroker', None)
-        if not label:
-            uid = os.geteuid()
-            if uid != 0:
-                label = syncdutils.getusername(uid)
+        if not label and not privileged():
+            label = syncdutils.getusername()
         mounter = label and self.MountbrokerMounter or self.DirectMounter
         params = gconf.gluster_params.split() + \
                    (gconf.gluster_log_level and ['log-level=' + gconf.gluster_log_level] or []) + \
@@ -739,7 +871,7 @@ class GLUSTER(AbstractUrl, SlaveLocal, SlaveRemote):
         - else do that's what's inherited
         """
         if args:
-            GMaster(self, args[0]).crawl_loop()
+            gmaster_builder()(self, args[0]).crawl_loop()
         else:
             sup(self, *args)
 
@@ -834,4 +966,5 @@ class SSH(AbstractUrl, SlaveRemote):
             return 'should'
 
     def rsync(self, files):
-        return sup(self, files, '-ze', " ".join(gconf.ssh_command.split() + gconf.ssh_ctl_args), self.slaveurl)
+        return sup(self, files, '-e', " ".join(gconf.ssh_command.split() + gconf.ssh_ctl_args),
+                   *(gconf.rsync_ssh_options.split() + [self.slaveurl]))

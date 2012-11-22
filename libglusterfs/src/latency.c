@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -157,7 +148,8 @@ gf_proc_dump_latency_info (xlator_t *xl)
         gf_proc_dump_add_section (key_prefix);
 
         for (i = 0; i < GF_FOP_MAXVALUE; i++) {
-                gf_proc_dump_build_key (key, key_prefix, gf_fop_list[i]);
+                gf_proc_dump_build_key (key, key_prefix,
+                                        (char *)gf_fop_list[i]);
 
                 gf_proc_dump_write (key, "%.03f,%"PRId64",%.03f",
                                     xl->latencies[i].mean,
@@ -168,12 +160,8 @@ gf_proc_dump_latency_info (xlator_t *xl)
 
 
 void
-gf_latency_toggle (int signum)
+gf_latency_toggle (int signum, glusterfs_ctx_t *ctx)
 {
-        glusterfs_ctx_t *ctx = NULL;
-
-        ctx = glusterfs_ctx_get ();
-
         if (ctx) {
                 ctx->measure_latency = !ctx->measure_latency;
                 gf_log ("[core]", GF_LOG_INFO,

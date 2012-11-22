@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
-
 
 #ifndef _GLUSTERFS3_H
 #define _GLUSTERFS3_H
@@ -53,6 +43,8 @@
 #define GF_O_CLOEXEC      02000000
 
 #define GF_O_LARGEFILE     0100000
+
+#define GF_O_FMODE_EXEC        040
 
 #define XLATE_BIT(from, to, bit)    do {                \
                 if (from & bit)                         \
@@ -112,6 +104,7 @@ gf_flags_from_flags (uint32_t flags)
         XLATE_BIT (flags, gf_flags, O_CLOEXEC);
 #endif
         XLATE_BIT (flags, gf_flags, O_LARGEFILE);
+        XLATE_BIT (flags, gf_flags, O_FMODE_EXEC);
 
         return gf_flags;
 }
@@ -142,6 +135,7 @@ gf_flags_to_flags (uint32_t gf_flags)
         UNXLATE_BIT (gf_flags, flags, O_CLOEXEC);
 #endif
         UNXLATE_BIT (gf_flags, flags, O_LARGEFILE);
+        UNXLATE_BIT (gf_flags, flags, O_FMODE_EXEC);
 
         return flags;
 }
@@ -197,7 +191,11 @@ gf_proto_flock_to_flock (struct gf_proto_flock *gf_proto_flock, struct gf_flock 
 	gf_flock->l_start    = gf_proto_flock->start;
 	gf_flock->l_len      = gf_proto_flock->len;
 	gf_flock->l_pid      = gf_proto_flock->pid;
-	gf_flock->l_owner    = gf_proto_flock->owner;
+        gf_flock->l_owner.len = gf_proto_flock->lk_owner.lk_owner_len;
+        if (gf_flock->l_owner.len &&
+            (gf_flock->l_owner.len < GF_MAX_LOCK_OWNER_LEN))
+                memcpy (gf_flock->l_owner.data, gf_proto_flock->lk_owner.lk_owner_val,
+                        gf_flock->l_owner.len);
 }
 
 
@@ -212,7 +210,9 @@ gf_proto_flock_from_flock (struct gf_proto_flock *gf_proto_flock, struct gf_floc
 	gf_proto_flock->start    =  (gf_flock->l_start);
 	gf_proto_flock->len      =  (gf_flock->l_len);
 	gf_proto_flock->pid      =  (gf_flock->l_pid);
-	gf_proto_flock->owner    =  (gf_flock->l_owner);
+	gf_proto_flock->lk_owner.lk_owner_len =  gf_flock->l_owner.len;
+        if (gf_flock->l_owner.len)
+                gf_proto_flock->lk_owner.lk_owner_val = gf_flock->l_owner.data;
 }
 
 static inline void

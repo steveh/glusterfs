@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include <libgen.h>
@@ -92,6 +83,11 @@ afr_xattr_req_prepare (xlator_t *this, dict_t *xattr_req, const char *path)
                                 path, priv->pending_key[i]);
                 /* 3 = data+metadata+entry */
         }
+        ret = dict_set_int32 (xattr_req, GF_GFIDLESS_LOOKUP, 1);
+        if (ret) {
+                gf_log (this->name, GF_LOG_DEBUG, "%s: failed to set gfidless "
+                        "lookup", path);
+        }
 }
 
 int
@@ -121,6 +117,13 @@ afr_lookup_xattr_req_prepare (afr_local_t *local, xlator_t *this,
                 gf_log (this->name, GF_LOG_WARNING,
                         "%s: Unable to set dict value for %s",
                         loc->path, GLUSTERFS_ENTRYLK_COUNT);
+        }
+
+        ret = dict_set_uint32 (local->xattr_req, GLUSTERFS_PARENT_ENTRYLK, 0);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "%s: Unable to set dict value for %s",
+                        loc->path, GLUSTERFS_PARENT_ENTRYLK);
         }
 
         ret = dict_get_ptr (local->xattr_req, "gfid-req", gfid_req);
@@ -225,8 +228,7 @@ afr_inode_ctx_get_from_addr (uint64_t addr, int32_t child_count)
         ret = 0;
 out:
         if (ret && ctx) {
-                if (ctx->fresh_children)
-                        GF_FREE (ctx->fresh_children);
+                GF_FREE (ctx->fresh_children);
                 GF_FREE (ctx);
                 ctx = NULL;
         }
@@ -325,7 +327,6 @@ afr_inode_ctx_set_read_child (afr_inode_ctx_t *ctx, int32_t read_child)
         uint64_t        remaining_mask = 0;
         uint64_t        mask         = 0;
 
-        GF_ASSERT (read_child >= 0);
         remaining_mask = (~AFR_ICTX_READ_CHILD_MASK & ctx->masks);
         mask = (AFR_ICTX_READ_CHILD_MASK & read_child);
         ctx->masks = remaining_mask | mask;
@@ -347,19 +348,23 @@ afr_inode_ctx_set_read_ctx (afr_inode_ctx_t *ctx, int32_t read_child,
 }
 
 void
-afr_inode_ctx_rm_stale_children (afr_inode_ctx_t *ctx, int32_t read_child,
-                                 int32_t *stale_children, int32_t child_count)
+afr_inode_ctx_rm_stale_children (afr_inode_ctx_t *ctx, int32_t *stale_children,
+                                 int32_t child_count)
 {
         int             i            = 0;
+        int32_t         read_child   = -1;
 
         GF_ASSERT (stale_children);
-        afr_inode_ctx_set_read_child (ctx, read_child);
         for (i = 0; i < child_count; i++) {
-                if ((ctx->fresh_children[i] == -1) || (stale_children[i] == -1))
+                if (stale_children[i] == -1)
                         break;
                 afr_children_rm_child (ctx->fresh_children,
                                        stale_children[i], child_count);
         }
+        read_child = (int32_t)(ctx->masks & AFR_ICTX_READ_CHILD_MASK);
+        if (!afr_is_child_present (ctx->fresh_children, child_count,
+                                   read_child))
+                afr_inode_ctx_set_read_child (ctx, ctx->fresh_children[0]);
 }
 
 void
@@ -421,9 +426,8 @@ afr_inode_set_ctx (xlator_t *this, inode_t *inode, afr_inode_params_t *params)
                                                     priv->child_count);
                         break;
                 case AFR_INODE_RM_STALE_CHILDREN:
-                        read_child = params->u.read_ctx.read_child;
                         stale_children = params->u.read_ctx.children;
-                        afr_inode_ctx_rm_stale_children (ctx, read_child,
+                        afr_inode_ctx_rm_stale_children (ctx,
                                                          stale_children,
                                                          priv->child_count);
                         break;
@@ -488,16 +492,14 @@ afr_inode_set_read_ctx (xlator_t *this, inode_t *inode, int32_t read_child,
 }
 
 void
-afr_inode_rm_stale_children (xlator_t *this, inode_t *inode, int32_t read_child,
+afr_inode_rm_stale_children (xlator_t *this, inode_t *inode,
                              int32_t *stale_children)
 {
         afr_inode_params_t params = {0};
 
-        GF_ASSERT (read_child >= 0);
         GF_ASSERT (stale_children);
 
         params.op = AFR_INODE_RM_STALE_CHILDREN;
-        params.u.read_ctx.read_child     = read_child;
         params.u.read_ctx.children = stale_children;
         afr_inode_set_ctx (this, inode, &params);
 }
@@ -543,6 +545,10 @@ afr_is_read_child (int32_t *success_children, int32_t *sources,
         gf_boolean_t             success_child = _gf_false;
         gf_boolean_t             source        = _gf_false;
 
+        if (child < 0) {
+                return _gf_false;
+        }
+
         GF_ASSERT (success_children);
         GF_ASSERT (child_count > 0);
 
@@ -559,28 +565,68 @@ out:
         return (success_child && source);
 }
 
+int32_t
+afr_hash_child (int32_t *success_children, int32_t child_count,
+                unsigned int hmode, uuid_t gfid)
+{
+        uuid_t  gfid_copy = {0,};
+        pid_t pid;
+
+        if (!hmode) {
+                return -1;
+        }
+
+        if (gfid) {
+               uuid_copy(gfid_copy,gfid);
+        }
+        if (hmode > 1) {
+                /*
+                 * Why getpid?  Because it's one of the cheapest calls
+                 * available - faster than gethostname etc. - and returns a
+                 * constant-length value that's sure to be shorter than a UUID.
+                 * It's still very unlikely to be the same across clients, so
+                 * it still provides good mixing.  We're not trying for
+                 * perfection here.  All we need is a low probability that
+                 * multiple clients won't converge on the same subvolume.
+                 */
+                pid = getpid();
+                memcpy (gfid_copy, &pid, sizeof(pid));
+        }
+
+        return SuperFastHash((char *)gfid_copy,
+                             sizeof(gfid_copy)) % child_count;
+}
+
 /* If sources is NULL the xattrs are assumed to be of source for all
  * success_children.
  */
 int
-afr_select_read_child_from_policy (int32_t *success_children, int32_t child_count,
-                                   int32_t prev_read_child,
-                                   int32_t config_read_child, int32_t *sources)
+afr_select_read_child_from_policy (int32_t *success_children,
+                                   int32_t child_count, int32_t prev_read_child,
+                                   int32_t config_read_child, int32_t *sources,
+                                   unsigned int hmode, uuid_t gfid)
 {
         int32_t                  read_child   = -1;
         int                      i            = 0;
 
         GF_ASSERT (success_children);
 
+        read_child = config_read_child;
+        if (afr_is_read_child (success_children, sources, child_count,
+                               read_child))
+                goto out;
+
         read_child = prev_read_child;
         if (afr_is_read_child (success_children, sources, child_count,
                                read_child))
                 goto out;
 
-        read_child = config_read_child;
+        read_child = afr_hash_child (success_children, child_count,
+                                     hmode, gfid);
         if (afr_is_read_child (success_children, sources, child_count,
-                               read_child))
+                               read_child)) {
                 goto out;
+        }
 
         for (i = 0; i < child_count; i++) {
                 read_child = success_children[i];
@@ -601,7 +647,7 @@ out:
 void
 afr_set_read_ctx_from_policy (xlator_t *this, inode_t *inode,
                               int32_t *fresh_children, int32_t prev_read_child,
-                              int32_t config_read_child)
+                              int32_t config_read_child, uuid_t gfid)
 {
         int                      read_child = -1;
         afr_private_t            *priv = NULL;
@@ -611,7 +657,8 @@ afr_set_read_ctx_from_policy (xlator_t *this, inode_t *inode,
                                                         priv->child_count,
                                                         prev_read_child,
                                                         config_read_child,
-                                                        NULL);
+                                                        NULL,
+                                                        priv->hash_mode, gfid);
         if (read_child >= 0)
                 afr_inode_set_read_ctx (this, inode, read_child,
                                         fresh_children);
@@ -667,8 +714,11 @@ afr_get_call_child (xlator_t *this, unsigned char *child_up, int32_t read_child,
         GF_ASSERT (call_child);
         GF_ASSERT (last_index);
         GF_ASSERT (fresh_children);
-        GF_ASSERT (read_child >= 0);
 
+        if (read_child < 0) {
+                ret = -EIO;
+                goto out;
+        }
         priv = this->private;
         *call_child = -1;
         *last_index = -1;
@@ -721,17 +771,13 @@ afr_local_sh_cleanup (afr_local_t *local, xlator_t *this)
 {
         afr_self_heal_t *sh = NULL;
         afr_private_t   *priv = NULL;
-        int              i = 0;
-
 
         sh = &local->self_heal;
         priv = this->private;
 
-        if (sh->buf)
-                GF_FREE (sh->buf);
+        GF_FREE (sh->buf);
 
-        if (sh->parentbufs)
-                GF_FREE (sh->parentbufs);
+        GF_FREE (sh->parentbufs);
 
         if (sh->inode)
                 inode_unref (sh->inode);
@@ -741,57 +787,36 @@ afr_local_sh_cleanup (afr_local_t *local, xlator_t *this)
                 GF_FREE (sh->xattr);
         }
 
-        if (sh->child_errno)
-                GF_FREE (sh->child_errno);
+        GF_FREE (sh->child_errno);
 
-        if (sh->pending_matrix) {
-                for (i = 0; i < priv->child_count; i++) {
-                        GF_FREE (sh->pending_matrix[i]);
-                }
-                GF_FREE (sh->pending_matrix);
-        }
+        afr_matrix_cleanup (sh->pending_matrix, priv->child_count);
+        afr_matrix_cleanup (sh->delta_matrix, priv->child_count);
 
-        if (sh->delta_matrix) {
-                for (i = 0; i < priv->child_count; i++) {
-                        GF_FREE (sh->delta_matrix[i]);
-                }
-                GF_FREE (sh->delta_matrix);
-        }
+        GF_FREE (sh->sources);
 
-        if (sh->sources)
-                GF_FREE (sh->sources);
+        GF_FREE (sh->success);
 
-        if (sh->success)
-                GF_FREE (sh->success);
-
-        if (sh->locked_nodes)
-                GF_FREE (sh->locked_nodes);
+        GF_FREE (sh->locked_nodes);
 
         if (sh->healing_fd) {
                 fd_unref (sh->healing_fd);
                 sh->healing_fd = NULL;
         }
 
-        if (sh->linkname)
-                GF_FREE ((char *)sh->linkname);
+        GF_FREE ((char *)sh->linkname);
 
-        if (sh->success_children)
-                GF_FREE (sh->success_children);
+        GF_FREE (sh->success_children);
 
-        if (sh->fresh_children)
-                GF_FREE (sh->fresh_children);
+        GF_FREE (sh->fresh_children);
 
-        if (sh->fresh_parent_dirs)
-                GF_FREE (sh->fresh_parent_dirs);
+        GF_FREE (sh->fresh_parent_dirs);
 
         loc_wipe (&sh->parent_loc);
         loc_wipe (&sh->lookup_loc);
 
-        if (sh->checksum)
-                GF_FREE (sh->checksum);
+        GF_FREE (sh->checksum);
 
-        if (sh->write_needed)
-                GF_FREE (sh->write_needed);
+        GF_FREE (sh->write_needed);
         if (sh->healing_fd)
                 fd_unref (sh->healing_fd);
 }
@@ -800,34 +825,24 @@ afr_local_sh_cleanup (afr_local_t *local, xlator_t *this)
 void
 afr_local_transaction_cleanup (afr_local_t *local, xlator_t *this)
 {
-        int             i = 0;
         afr_private_t * priv = NULL;
 
         priv = this->private;
 
-        for (i = 0; i < priv->child_count; i++) {
-                if (local->pending && local->pending[i])
-                        GF_FREE (local->pending[i]);
-        }
+        afr_matrix_cleanup (local->pending, priv->child_count);
+        afr_matrix_cleanup (local->transaction.txn_changelog,
+                            priv->child_count);
 
-        GF_FREE (local->pending);
+        GF_FREE (local->internal_lock.locked_nodes);
 
-        if (local->internal_lock.locked_nodes)
-                GF_FREE (local->internal_lock.locked_nodes);
+        GF_FREE (local->internal_lock.inode_locked_nodes);
 
-        if (local->internal_lock.inode_locked_nodes)
-                GF_FREE (local->internal_lock.inode_locked_nodes);
+        GF_FREE (local->internal_lock.entry_locked_nodes);
 
-        if (local->internal_lock.entry_locked_nodes)
-                GF_FREE (local->internal_lock.entry_locked_nodes);
-
-        if (local->internal_lock.lower_locked_nodes)
-                GF_FREE (local->internal_lock.lower_locked_nodes);
+        GF_FREE (local->internal_lock.lower_locked_nodes);
 
 
         GF_FREE (local->transaction.pre_op);
-        GF_FREE (local->transaction.child_errno);
-        GF_FREE (local->child_errno);
         GF_FREE (local->transaction.eager_lock);
 
         GF_FREE (local->transaction.basename);
@@ -861,14 +876,16 @@ afr_local_cleanup (afr_local_t *local, xlator_t *this)
         if (local->xattr_req)
                 dict_unref (local->xattr_req);
 
-        if (local->child_up)
-                GF_FREE (local->child_up);
+        if (local->dict)
+                dict_unref (local->dict);
 
-        if (local->fresh_children)
-                GF_FREE (local->fresh_children);
+        GF_FREE (local->child_up);
 
-        if (local->fd_open_on)
-                GF_FREE (local->fd_open_on);
+        GF_FREE (local->child_errno);
+
+        GF_FREE (local->fresh_children);
+
+        GF_FREE (local->fd_open_on);
 
         { /* lookup */
                 if (local->cont.lookup.xattrs) {
@@ -886,27 +903,23 @@ afr_local_cleanup (afr_local_t *local, xlator_t *this)
                         inode_unref (local->cont.lookup.inode);
                 }
 
-                if (local->cont.lookup.postparents)
-                        GF_FREE (local->cont.lookup.postparents);
+                GF_FREE (local->cont.lookup.postparents);
 
-                if (local->cont.lookup.bufs)
-                        GF_FREE (local->cont.lookup.bufs);
+                GF_FREE (local->cont.lookup.bufs);
 
-                if (local->cont.lookup.success_children)
-                        GF_FREE (local->cont.lookup.success_children);
+                GF_FREE (local->cont.lookup.success_children);
 
-                if (local->cont.lookup.sources)
-                        GF_FREE (local->cont.lookup.sources);
+                GF_FREE (local->cont.lookup.sources);
+                afr_matrix_cleanup (local->cont.lookup.pending_matrix,
+                                    priv->child_count);
         }
 
         { /* getxattr */
-                if (local->cont.getxattr.name)
-                        GF_FREE (local->cont.getxattr.name);
+                GF_FREE (local->cont.getxattr.name);
         }
 
         { /* lk */
-                if (local->cont.lk.locked_nodes)
-                        GF_FREE (local->cont.lk.locked_nodes);
+                GF_FREE (local->cont.lk.locked_nodes);
         }
 
         { /* create */
@@ -940,18 +953,40 @@ afr_local_cleanup (afr_local_t *local, xlator_t *this)
                         dict_unref (local->cont.setxattr.dict);
         }
 
+        { /* fsetxattr */
+                if (local->cont.fsetxattr.dict)
+                        dict_unref (local->cont.fsetxattr.dict);
+        }
+
         { /* removexattr */
                 GF_FREE (local->cont.removexattr.name);
         }
-
+        { /* xattrop */
+                if (local->cont.xattrop.xattr)
+                        dict_unref (local->cont.xattrop.xattr);
+        }
+        { /* fxattrop */
+                if (local->cont.fxattrop.xattr)
+                        dict_unref (local->cont.fxattrop.xattr);
+        }
         { /* symlink */
                 GF_FREE (local->cont.symlink.linkpath);
         }
 
         { /* opendir */
-                if (local->cont.opendir.checksum)
-                        GF_FREE (local->cont.opendir.checksum);
+                GF_FREE (local->cont.opendir.checksum);
         }
+
+        { /* readdirp */
+                if (local->cont.readdir.dict)
+                        dict_unref (local->cont.readdir.dict);
+        }
+
+        if (local->xdata_req)
+                dict_unref (local->xdata_req);
+
+        if (local->xdata_rsp)
+                dict_unref (local->xdata_rsp);
 }
 
 
@@ -1037,20 +1072,43 @@ afr_update_loc_gfids (loc_t *loc, struct iatt *buf, struct iatt *postparent)
 int
 afr_lookup_build_response_params (afr_local_t *local, xlator_t *this)
 {
-        int32_t         read_child = -1;
         struct iatt     *buf = NULL;
         struct iatt     *postparent = NULL;
         dict_t          **xattr = NULL;
+        int32_t         *success_children = NULL;
+        int32_t         *sources = NULL;
+        afr_private_t   *priv = NULL;
+        int32_t         read_child = -1;
         int             ret = 0;
+        int             i = 0;
 
         GF_ASSERT (local);
 
         buf = &local->cont.lookup.buf;
         postparent = &local->cont.lookup.postparent;
         xattr = &local->cont.lookup.xattr;
+        priv = this->private;
 
         read_child = afr_inode_get_read_ctx (this, local->cont.lookup.inode,
-                                             NULL);
+                                             local->fresh_children);
+        if (read_child < 0) {
+                ret = -1;
+                goto out;
+        }
+        success_children = local->cont.lookup.success_children;
+        sources = local->cont.lookup.sources;
+        memset (sources, 0, sizeof (*sources) * priv->child_count);
+        afr_children_intersection_get (local->fresh_children, success_children,
+                                       sources, priv->child_count);
+        if (!sources[read_child]) {
+                read_child = -1;
+                for (i = 0; i < priv->child_count; i++) {
+                        if (sources[i]) {
+                                read_child = i;
+                                break;
+                        }
+                }
+        }
         if (read_child < 0) {
                 ret = -1;
                 goto out;
@@ -1077,6 +1135,7 @@ afr_lookup_update_lk_counts (afr_local_t *local, xlator_t *this,
         uint32_t inodelk_count = 0;
         uint32_t entrylk_count = 0;
         int      ret           = -1;
+        uint32_t parent_entrylk = 0;
 
         GF_ASSERT (local);
         GF_ASSERT (this);
@@ -1092,6 +1151,10 @@ afr_lookup_update_lk_counts (afr_local_t *local, xlator_t *this,
                                &entrylk_count);
         if (ret == 0)
                 local->entrylk_count += entrylk_count;
+        ret = dict_get_uint32 (xattr, GLUSTERFS_PARENT_ENTRYLK,
+                               &parent_entrylk);
+        if (!ret)
+                local->cont.lookup.parent_entrylk += parent_entrylk;
 }
 
 static void
@@ -1122,13 +1185,43 @@ afr_lookup_set_self_heal_params_by_xattr (afr_local_t *local, xlator_t *this,
         }
 }
 
+void
+afr_lookup_check_set_metadata_split_brain (afr_local_t *local, xlator_t *this)
+{
+        int32_t                  *sources = NULL;
+        afr_private_t            *priv = NULL;
+        int32_t                  subvol_status = 0;
+        int32_t                  *success_children   = NULL;
+        dict_t                   **xattrs = NULL;
+        struct iatt              *bufs = NULL;
+        int32_t                  **pending_matrix = NULL;
+
+        priv = this->private;
+
+        sources = GF_CALLOC (priv->child_count, sizeof (*sources),
+                             gf_afr_mt_int32_t);
+        if (NULL == sources)
+                goto out;
+        success_children = local->cont.lookup.success_children;
+        xattrs = local->cont.lookup.xattrs;
+        bufs = local->cont.lookup.bufs;
+        pending_matrix = local->cont.lookup.pending_matrix;
+        afr_build_sources (this, xattrs, bufs, pending_matrix,
+                           sources, success_children, AFR_METADATA_TRANSACTION,
+                           &subvol_status, _gf_false);
+        if (subvol_status & SPLIT_BRAIN)
+                local->cont.lookup.possible_spb = _gf_true;
+out:
+        GF_FREE (sources);
+}
+
 static void
 afr_detect_self_heal_by_iatt (afr_local_t *local, xlator_t *this,
                             struct iatt *buf, struct iatt *lookup_buf)
 {
         if (PERMISSION_DIFFERS (buf, lookup_buf)) {
                 /* mismatching permissions */
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "permissions differ for %s ", local->loc.path);
                 local->self_heal.do_metadata_self_heal = _gf_true;
         }
@@ -1136,13 +1229,13 @@ afr_detect_self_heal_by_iatt (afr_local_t *local, xlator_t *this,
         if (OWNERSHIP_DIFFERS (buf, lookup_buf)) {
                 /* mismatching permissions */
                 local->self_heal.do_metadata_self_heal = _gf_true;
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "ownership differs for %s ", local->loc.path);
         }
 
         if (SIZE_DIFFERS (buf, lookup_buf)
             && IA_ISREG (buf->ia_type)) {
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "size differs for %s ", local->loc.path);
                 local->self_heal.do_data_self_heal = _gf_true;
         }
@@ -1155,8 +1248,26 @@ afr_detect_self_heal_by_iatt (afr_local_t *local, xlator_t *this,
 }
 
 static void
-afr_detect_self_heal_by_lookup_status (afr_local_t *local, xlator_t *this,
-                                       gf_boolean_t split_brain)
+afr_detect_self_heal_by_split_brain_status (afr_local_t *local, xlator_t *this)
+{
+        gf_boolean_t split_brain = _gf_false;
+        afr_self_heal_t *sh = NULL;
+
+        sh = &local->self_heal;
+
+        split_brain = afr_is_split_brain (this, local->cont.lookup.inode);
+        split_brain = split_brain || local->cont.lookup.possible_spb;
+        if ((local->success_count > 0) && split_brain &&
+            IA_ISREG (local->cont.lookup.inode->ia_type)) {
+                sh->force_confirm_spb = _gf_true;
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "split brain detected during lookup of %s.",
+                        local->loc.path);
+        }
+}
+
+static void
+afr_detect_self_heal_by_lookup_status (afr_local_t *local, xlator_t *this)
 {
         GF_ASSERT (local);
         GF_ASSERT (this);
@@ -1167,24 +1278,11 @@ afr_detect_self_heal_by_lookup_status (afr_local_t *local, xlator_t *this,
                 local->self_heal.do_entry_self_heal    = _gf_true;
                 local->self_heal.do_gfid_self_heal    = _gf_true;
                 local->self_heal.do_missing_entry_self_heal    = _gf_true;
-                gf_log(this->name, GF_LOG_INFO,
+                gf_log(this->name, GF_LOG_DEBUG,
                        "entries are missing in lookup of %s.",
                        local->loc.path);
-                //If all self-heals are needed no need to check for other rules
-                goto out;
         }
 
-        if ((local->success_count > 0) && split_brain &&
-            IA_ISREG (local->cont.lookup.inode->ia_type)) {
-                local->self_heal.do_data_self_heal = _gf_true;
-                local->self_heal.do_gfid_self_heal    = _gf_true;
-                local->self_heal.do_missing_entry_self_heal    = _gf_true;
-                gf_log (this->name, GF_LOG_WARNING,
-                        "split brain detected during lookup of %s.",
-                        local->loc.path);
-        }
-
-out:
         return;
 }
 
@@ -1194,6 +1292,8 @@ afr_can_self_heal_proceed (afr_self_heal_t *sh, afr_private_t *priv)
         GF_ASSERT (sh);
         GF_ASSERT (priv);
 
+        if (sh->force_confirm_spb)
+                return _gf_true;
         return (sh->do_gfid_self_heal
                 || sh->do_missing_entry_self_heal
                 || (afr_data_self_heal_enabled (priv->data_self_heal) &&
@@ -1227,6 +1327,7 @@ afr_lookup_select_read_child (afr_local_t *local, xlator_t *this,
         dict_t                  **xattrs       = NULL;
         int32_t                 *success_children = NULL;
         afr_transaction_type    type           = AFR_METADATA_TRANSACTION;
+        uuid_t                  *gfid          = NULL;
 
         GF_ASSERT (local);
         GF_ASSERT (this);
@@ -1240,8 +1341,9 @@ afr_lookup_select_read_child (afr_local_t *local, xlator_t *this,
         ia_type = local->cont.lookup.bufs[success_children[0]].ia_type;
         type = afr_transaction_type_get (ia_type);
         xattrs = local->cont.lookup.xattrs;
+        gfid = &local->cont.lookup.buf.ia_gfid;
         source = afr_lookup_select_read_child_by_txn_type (this, local, xattrs,
-                                                           type);
+                                                           type, *gfid);
         if (source < 0) {
                 gf_log (this->name, GF_LOG_DEBUG, "failed to select source "
                         "for %s", local->loc.path);
@@ -1269,7 +1371,8 @@ afr_launch_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode,
                       void (*gfid_sh_success_cbk) (call_frame_t *sh_frame,
                                                    xlator_t *this),
                       int (*unwind) (call_frame_t *frame, xlator_t *this,
-                                     int32_t op_ret, int32_t op_errno))
+                                     int32_t op_ret, int32_t op_errno,
+                                     int32_t sh_failed))
 {
         afr_local_t             *local = NULL;
         char                    sh_type_str[256] = {0,};
@@ -1292,7 +1395,7 @@ afr_launch_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode,
 
         if (background)
                 bg = "background";
-        gf_log (this->name, GF_LOG_INFO,
+        gf_log (this->name, GF_LOG_DEBUG,
                 "%s %s self-heal triggered. path: %s, reason: %s", bg,
                 sh_type_str, local->loc.path, reason);
 
@@ -1455,13 +1558,11 @@ afr_lookup_set_self_heal_params (afr_local_t *local, xlator_t *this)
         int32_t                 child1 = -1;
         int32_t                 child2 = -1;
         afr_self_heal_t         *sh = NULL;
-        gf_boolean_t            split_brain = _gf_false;
 
         priv  = this->private;
         sh = &local->self_heal;
 
-        split_brain = afr_is_split_brain (this, local->cont.lookup.inode);
-        afr_detect_self_heal_by_lookup_status (local, this, split_brain);
+        afr_detect_self_heal_by_lookup_status (local, this);
 
         if (afr_lookup_gfid_missing_count (local, this))
                 local->self_heal.do_gfid_self_heal    = _gf_true;
@@ -1488,16 +1589,21 @@ afr_lookup_set_self_heal_params (afr_local_t *local, xlator_t *this)
                 afr_lookup_set_self_heal_params_by_xattr (local, this,
                                                           xattr[child1]);
         }
-        if (afr_open_only_data_self_heal (priv->data_self_heal)
-            && !split_brain)
+        if (afr_open_only_data_self_heal (priv->data_self_heal))
                 sh->do_data_self_heal = _gf_false;
+        if (sh->do_metadata_self_heal)
+                afr_lookup_check_set_metadata_split_brain (local, this);
+        afr_detect_self_heal_by_split_brain_status (local, this);
 }
 
 int
 afr_self_heal_lookup_unwind (call_frame_t *frame, xlator_t *this,
-                             int32_t op_ret, int32_t op_errno)
+                             int32_t op_ret, int32_t op_errno,
+                             int32_t sh_failed)
 {
         afr_local_t *local = NULL;
+        int         ret    = -1;
+        dict_t      *xattr = NULL;
 
         local = frame->local;
 
@@ -1512,6 +1618,13 @@ afr_self_heal_lookup_unwind (call_frame_t *frame, xlator_t *this,
         }
 
         afr_lookup_done_success_action (frame, this, _gf_true);
+        xattr = local->cont.lookup.xattr;
+        if (xattr) {
+                ret = dict_set_int32 (xattr, "sh-failed", sh_failed);
+                if (ret)
+                        gf_log (this->name, GF_LOG_ERROR, "%s: Failed to set "
+                                "sh-failed to %d", local->loc.path, sh_failed);
+        }
 out:
         AFR_STACK_UNWIND (lookup, frame, local->op_ret, local->op_errno,
                           local->cont.lookup.inode, &local->cont.lookup.buf,
@@ -1646,26 +1759,23 @@ afr_lookup_done_success_action (call_frame_t *frame, xlator_t *this,
         int32_t             read_child = -1;
         int32_t             ret        = -1;
         afr_local_t         *local     = NULL;
-        afr_private_t       *priv      = NULL;
+        gf_boolean_t        fresh_lookup = _gf_false;
 
         local   = frame->local;
-        priv    = this->private;
+        fresh_lookup = local->cont.lookup.fresh_lookup;
 
         if (local->loc.parent == NULL)
                 fail_conflict = _gf_true;
 
-        if (afr_conflicting_iattrs (local->cont.lookup.bufs,
-                                     local->cont.lookup.success_children,
-                                     priv->child_count, local->loc.path,
-                                     this->name)) {
+        if (afr_lookup_conflicting_entries (local, this)) {
                 if (fail_conflict == _gf_false)
                         ret = 0;
                 goto out;
         }
 
-        if (!afr_is_transaction_running (local)) {
-                ret = afr_lookup_select_read_child (local, this, &read_child);
-                if (ret)
+        ret = afr_lookup_select_read_child (local, this, &read_child);
+        if (!afr_is_transaction_running (local) || fresh_lookup) {
+                if (read_child < 0)
                         goto out;
 
                 ret = afr_lookup_set_read_ctx (local, this, read_child);
@@ -1676,11 +1786,9 @@ afr_lookup_done_success_action (call_frame_t *frame, xlator_t *this,
         ret = afr_lookup_build_response_params (local, this);
         if (ret)
                 goto out;
-        if (afr_is_fresh_lookup (&local->loc, this)) {
-                afr_update_loc_gfids (&local->loc,
-                                      &local->cont.lookup.buf,
-                                      &local->cont.lookup.postparent);
-        }
+        afr_update_loc_gfids (&local->loc,
+                              &local->cont.lookup.buf,
+                              &local->cont.lookup.postparent);
 
         ret = 0;
 out:
@@ -1689,6 +1797,84 @@ out:
                 local->op_errno = EIO;
         }
         return ret;
+}
+
+int
+afr_lookup_get_latest_subvol (afr_local_t *local, xlator_t *this)
+{
+        afr_private_t *priv = NULL;
+        int32_t       *success_children = NULL;
+        struct iatt   *bufs = NULL;
+        int           i = 0;
+        int           child = 0;
+        int           lsubvol = -1;
+
+        priv = this->private;
+        success_children = local->cont.lookup.success_children;
+        bufs = local->cont.lookup.bufs;
+        for (i = 0; i < priv->child_count; i++) {
+                child = success_children[i];
+                if (child == -1)
+                        break;
+                if (uuid_is_null (bufs[child].ia_gfid))
+                        continue;
+                if (lsubvol < 0) {
+                        lsubvol = child;
+                } else if (bufs[lsubvol].ia_ctime < bufs[child].ia_ctime) {
+                        lsubvol = child;
+                } else if ((bufs[lsubvol].ia_ctime == bufs[child].ia_ctime) &&
+                  (bufs[lsubvol].ia_ctime_nsec < bufs[child].ia_ctime_nsec)) {
+                        lsubvol = child;
+                }
+        }
+        return lsubvol;
+}
+
+void
+afr_lookup_mark_other_entries_stale (afr_local_t *local, xlator_t *this,
+                                     int subvol)
+{
+        afr_private_t *priv = NULL;
+        int32_t       *success_children = NULL;
+        struct iatt   *bufs = NULL;
+        int           i = 0;
+        int           child = 0;
+
+        priv = this->private;
+        success_children = local->cont.lookup.success_children;
+        bufs = local->cont.lookup.bufs;
+        memcpy (local->fresh_children, success_children,
+                sizeof (*success_children) * priv->child_count);
+        for (i = 0; i < priv->child_count; i++) {
+                child = local->fresh_children[i];
+                if (child == -1)
+                        break;
+                if (child == subvol)
+                        continue;
+                if (uuid_is_null (bufs[child].ia_gfid) &&
+                    (bufs[child].ia_type == bufs[subvol].ia_type))
+                        continue;
+                afr_children_rm_child (success_children, child,
+                                       priv->child_count);
+                local->success_count--;
+        }
+        afr_reset_children (local->fresh_children, priv->child_count);
+}
+
+void
+afr_succeed_lookup_on_latest_iatt (afr_local_t *local, xlator_t *this)
+{
+        int    lsubvol = 0;
+
+        if (!afr_lookup_conflicting_entries (local, this))
+                goto out;
+
+        lsubvol = afr_lookup_get_latest_subvol (local, this);
+        if (lsubvol < 0)
+                goto out;
+        afr_lookup_mark_other_entries_stale (local, this, lsubvol);
+out:
+        return;
 }
 
 static void
@@ -1709,6 +1895,10 @@ afr_lookup_done (call_frame_t *frame, xlator_t *this)
 
         if (local->op_ret < 0)
                 goto unwind;
+
+        if (local->cont.lookup.parent_entrylk && local->success_count > 1)
+                afr_succeed_lookup_on_latest_iatt (local, this);
+
         gfid_miss_count = afr_lookup_gfid_missing_count (local, this);
         up_children_count = afr_up_children_count (local->child_up,
                                                    priv->child_count);
@@ -1773,8 +1963,9 @@ afr_error_more_important (int32_t old_errno, int32_t new_errno)
         if (old_errno == ESTALE)
                 ret = _gf_false;
 
-        /* Nothing should overwrite ENOENT, except ESTALE */
-        else if ((old_errno == ENOENT) && (new_errno != ESTALE))
+        /* Nothing should overwrite ENOENT, except ESTALE/EIO*/
+        else if ((old_errno == ENOENT) && (new_errno != ESTALE)
+                 && (new_errno != EIO))
                 ret = _gf_false;
 
         return ret;
@@ -1857,12 +2048,79 @@ afr_lookup_handle_first_success (afr_local_t *local, xlator_t *this,
         afr_set_root_inode_on_first_lookup (local, this, inode);
 }
 
+static int32_t
+afr_discovery_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                   int32_t op_ret, int32_t op_errno, dict_t *dict,
+                   dict_t *xdata)
+{
+        int              ret            = 0;
+        char            *pathinfo       = NULL;
+        gf_boolean_t     is_local        = _gf_false;
+        afr_private_t   *priv           = NULL;
+        int32_t          child_index    = -1;
+
+        if (op_ret != 0) {
+                goto out;
+        }
+
+        ret = dict_get_str (dict, GF_XATTR_PATHINFO_KEY, &pathinfo);
+        if (ret != 0) {
+                goto out;
+        }
+
+        ret = afr_local_pathinfo (pathinfo, &is_local);
+        if (ret) {
+                goto out;
+        }
+
+        priv = this->private;
+        /*
+         * Note that one local subvolume will override another here.  The only
+         * way to avoid that would be to retain extra information about whether
+         * the previous read_child is local, and it's just not worth it.  Even
+         * the slowest local subvolume is far preferable to a remote one.
+         */
+        if (is_local) {
+                child_index = (int32_t)(long)cookie;
+                gf_log (this->name, GF_LOG_INFO,
+                        "selecting local read_child %s",
+                        priv->children[child_index]->name);
+                priv->read_child = child_index;
+        }
+
+out:
+        STACK_DESTROY(frame->root);
+        return 0;
+}
+
+static void
+afr_attempt_local_discovery (xlator_t *this, int32_t child_index)
+{
+        call_frame_t    *newframe = NULL;
+        loc_t            tmploc = {0,};
+        afr_private_t   *priv = this->private;
+
+        newframe = create_frame(this,this->ctx->pool);
+        if (!newframe) {
+                return;
+        }
+
+        tmploc.gfid[sizeof(tmploc.gfid)-1] = 1;
+        STACK_WIND_COOKIE (newframe, afr_discovery_cbk,
+                           (void *)(long)child_index,
+                           priv->children[child_index],
+                           priv->children[child_index]->fops->getxattr,
+                           &tmploc, GF_XATTR_PATHINFO_KEY, NULL);
+}
+
 static void
 afr_lookup_handle_success (afr_local_t *local, xlator_t *this, int32_t child_index,
                            int32_t op_ret, int32_t op_errno, inode_t *inode,
                            struct iatt *buf, dict_t *xattr,
                            struct iatt *postparent)
 {
+        afr_private_t   *priv   = this->private;
+
         if (local->success_count == 0) {
                 if (local->op_errno != ESTALE) {
                         local->op_ret = op_ret;
@@ -1875,6 +2133,11 @@ afr_lookup_handle_success (afr_local_t *local, xlator_t *this, int32_t child_ind
 
         afr_lookup_cache_args (local, child_index, xattr,
                                buf, postparent);
+
+        if (local->do_discovery && (priv->read_child == (-1))) {
+                afr_attempt_local_discovery(this,child_index);
+        }
+
         local->cont.lookup.success_children[local->success_count] = child_index;
         local->success_count++;
 }
@@ -1922,6 +2185,7 @@ afr_lookup_cont_init (afr_local_t *local, unsigned int child_count)
         struct iatt       *iatts         = NULL;
         int32_t           *success_children = NULL;
         int32_t           *sources       = NULL;
+        int32_t           **pending_matrix = NULL;
 
         GF_ASSERT (local);
         local->cont.lookup.xattrs = GF_CALLOC (child_count,
@@ -1954,6 +2218,11 @@ afr_lookup_cont_init (afr_local_t *local, unsigned int child_count)
                 goto out;
         local->cont.lookup.sources = sources;
 
+        pending_matrix = afr_matrix_create (child_count, child_count);
+        if (NULL == pending_matrix)
+                goto out;
+        local->cont.lookup.pending_matrix = pending_matrix;
+
         ret = 0;
 out:
         return ret;
@@ -1974,34 +2243,41 @@ afr_lookup (call_frame_t *frame, xlator_t *this,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (local, out);
 
         local->op_ret = -1;
 
         frame->local = local;
         local->fop = GF_FOP_LOOKUP;
 
-        if (!strcmp (loc->path, "/" GF_REPLICATE_TRASH_DIR)) {
-                op_errno = ENOENT;
+        loc_copy (&local->loc, loc);
+        ret = loc_path (&local->loc, NULL);
+        if (ret < 0) {
+                op_errno = EINVAL;
                 goto out;
         }
 
-        loc_copy (&local->loc, loc);
-
-        ret = inode_ctx_get (loc->inode, this, &ctx);
+        ret = inode_ctx_get (local->loc.inode, this, &ctx);
         if (ret == 0) {
                 /* lookup is a revalidate */
 
                 local->read_child_index = afr_inode_get_read_ctx (this,
-                                                                  loc->inode,
-                                                                  NULL);
+                                                               local->loc.inode,
+                                                               NULL);
         } else {
                 LOCK (&priv->read_child_lock);
                 {
-                        local->read_child_index = (++priv->read_child_rr)
-                                % (priv->child_count);
+                        if (priv->hash_mode) {
+                                local->read_child_index = -1;
+                        }
+                        else {
+                                local->read_child_index =
+                                        (++priv->read_child_rr) %
+                                        (priv->child_count);
+                        }
                 }
                 UNLOCK (&priv->read_child_lock);
+                local->cont.lookup.fresh_lookup = _gf_true;
         }
 
         local->child_up = memdup (priv->child_up,
@@ -2029,24 +2305,28 @@ afr_lookup (call_frame_t *frame, xlator_t *this,
         /* By default assume ENOTCONN. On success it will be set to 0. */
         local->op_errno = ENOTCONN;
 
-        local->call_count = afr_up_children_count (local->child_up,
-                                                   priv->child_count);
-        ret = afr_lookup_xattr_req_prepare (local, this, xattr_req, loc,
+        ret = afr_lookup_xattr_req_prepare (local, this, xattr_req, &local->loc,
                                             &gfid_req);
         if (ret) {
                 local->op_errno = -ret;
                 goto out;
         }
         afr_lookup_save_gfid (local->cont.lookup.gfid_req, gfid_req,
-                              loc);
+                              &local->loc);
         local->fop = GF_FOP_LOOKUP;
+        if (priv->choose_local && !priv->did_discovery) {
+                if (gfid_req && __is_root_gfid(gfid_req)) {
+                        local->do_discovery = _gf_true;
+                        priv->did_discovery = _gf_true;
+                }
+        }
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND_COOKIE (frame, afr_lookup_cbk,
                                            (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->lookup,
-                                           loc, local->xattr_req);
+                                           &local->loc, local->xattr_req);
                         if (!--call_count)
                                 break;
                 }
@@ -2065,7 +2345,7 @@ out:
 /* {{{ open */
 
 int
-afr_fd_ctx_set (xlator_t *this, fd_t *fd)
+__afr_fd_ctx_set (xlator_t *this, fd_t *fd)
 {
         afr_private_t * priv   = NULL;
         int             ret    = -1;
@@ -2077,82 +2357,93 @@ afr_fd_ctx_set (xlator_t *this, fd_t *fd)
 
         priv = this->private;
 
+        ret = __fd_ctx_get (fd, this, &ctx);
+
+        if (ret == 0)
+                goto out;
+
+        fd_ctx = GF_CALLOC (1, sizeof (afr_fd_ctx_t),
+                            gf_afr_mt_afr_fd_ctx_t);
+        if (!fd_ctx) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        fd_ctx->pre_op_done = GF_CALLOC (sizeof (*fd_ctx->pre_op_done),
+                                         priv->child_count,
+                                         gf_afr_mt_char);
+        if (!fd_ctx->pre_op_done) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        fd_ctx->pre_op_piggyback = GF_CALLOC (sizeof (*fd_ctx->pre_op_piggyback),
+                                              priv->child_count,
+                                              gf_afr_mt_char);
+        if (!fd_ctx->pre_op_piggyback) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        fd_ctx->opened_on = GF_CALLOC (sizeof (*fd_ctx->opened_on),
+                                       priv->child_count,
+                                       gf_afr_mt_int32_t);
+        if (!fd_ctx->opened_on) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        fd_ctx->lock_piggyback = GF_CALLOC (sizeof (*fd_ctx->lock_piggyback),
+                                            priv->child_count,
+                                            gf_afr_mt_char);
+        if (!fd_ctx->lock_piggyback) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        fd_ctx->lock_acquired = GF_CALLOC (sizeof (*fd_ctx->lock_acquired),
+                                           priv->child_count,
+                                           gf_afr_mt_char);
+        if (!fd_ctx->lock_acquired) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+        fd_ctx->up_count   = priv->up_count;
+        fd_ctx->down_count = priv->down_count;
+
+        fd_ctx->locked_on = GF_CALLOC (sizeof (*fd_ctx->locked_on),
+                                       priv->child_count,
+                                       gf_afr_mt_char);
+        if (!fd_ctx->locked_on) {
+                ret = -ENOMEM;
+                goto out;
+        }
+
+	pthread_mutex_init (&fd_ctx->delay_lock, NULL);
+        INIT_LIST_HEAD (&fd_ctx->paused_calls);
+        INIT_LIST_HEAD (&fd_ctx->entries);
+
+        ret = __fd_ctx_set (fd, this, (uint64_t)(long) fd_ctx);
+        if (ret)
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "failed to set fd ctx (%p)", fd);
+out:
+        return ret;
+}
+
+
+int
+afr_fd_ctx_set (xlator_t *this, fd_t *fd)
+{
+        int ret = -1;
+
         LOCK (&fd->lock);
         {
-                ret = __fd_ctx_get (fd, this, &ctx);
-
-                if (ret == 0)
-                        goto unlock;
-
-                fd_ctx = GF_CALLOC (1, sizeof (afr_fd_ctx_t),
-                                    gf_afr_mt_afr_fd_ctx_t);
-                if (!fd_ctx) {
-                        ret = -ENOMEM;
-                        goto unlock;
-                }
-
-                fd_ctx->pre_op_done = GF_CALLOC (sizeof (*fd_ctx->pre_op_done),
-                                                 priv->child_count,
-                                                 gf_afr_mt_char);
-                if (!fd_ctx->pre_op_done) {
-                        ret = -ENOMEM;
-                        goto unlock;
-                }
-
-                fd_ctx->pre_op_piggyback = GF_CALLOC (sizeof (*fd_ctx->pre_op_piggyback),
-                                                      priv->child_count,
-                                                      gf_afr_mt_char);
-                if (!fd_ctx->pre_op_piggyback) {
-                        ret = -ENOMEM;
-                        goto unlock;
-                }
-
-                fd_ctx->opened_on = GF_CALLOC (sizeof (*fd_ctx->opened_on),
-                                               priv->child_count,
-                                               gf_afr_mt_int32_t);
-                if (!fd_ctx->opened_on) {
-                        ret = -ENOMEM;
-                        goto unlock;
-                }
-
-                fd_ctx->lock_piggyback = GF_CALLOC (sizeof (*fd_ctx->lock_piggyback),
-                                                    priv->child_count,
-                                                    gf_afr_mt_char);
-                if (!fd_ctx->lock_piggyback) {
-                        ret = -ENOMEM;
-                        goto unlock;
-                }
-
-                fd_ctx->lock_acquired = GF_CALLOC (sizeof (*fd_ctx->lock_acquired),
-                                                    priv->child_count,
-                                                    gf_afr_mt_char);
-                if (!fd_ctx->lock_acquired) {
-                        ret = -ENOMEM;
-                        goto unlock;
-                }
-
-                fd_ctx->up_count   = priv->up_count;
-                fd_ctx->down_count = priv->down_count;
-
-                fd_ctx->locked_on = GF_CALLOC (sizeof (*fd_ctx->locked_on),
-                                               priv->child_count,
-                                               gf_afr_mt_char);
-                if (!fd_ctx->locked_on) {
-                        ret = -ENOMEM;
-                        goto unlock;
-                }
-
-                INIT_LIST_HEAD (&fd_ctx->paused_calls);
-                INIT_LIST_HEAD (&fd_ctx->entries);
-
-                ret = __fd_ctx_set (fd, this, (uint64_t)(long) fd_ctx);
-                if (ret)
-                        gf_log (this->name, GF_LOG_DEBUG,
-                                "failed to set fd ctx (%p)", fd);
+                ret = __afr_fd_ctx_set (this, fd);
         }
-unlock:
         UNLOCK (&fd->lock);
-out:
+
         return ret;
 }
 
@@ -2176,7 +2467,8 @@ afr_flush_unwind (call_frame_t *frame, xlator_t *this)
 
         if (main_frame) {
                 AFR_STACK_UNWIND (flush, main_frame,
-                                  local->op_ret, local->op_errno);
+                                  local->op_ret, local->op_errno,
+                                  NULL);
         }
 
         return 0;
@@ -2185,7 +2477,7 @@ afr_flush_unwind (call_frame_t *frame, xlator_t *this)
 
 int
 afr_flush_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         afr_local_t *   local = NULL;
         afr_private_t * priv  = NULL;
@@ -2255,7 +2547,7 @@ afr_flush_wind (call_frame_t *frame, xlator_t *this)
                                            (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->flush,
-                                           local->fd);
+                                           local->fd, NULL);
 
                         if (!--call_count)
                                 break;
@@ -2282,14 +2574,13 @@ afr_flush_done (call_frame_t *frame, xlator_t *this)
 
 
 int
-afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd)
+afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 {
-        afr_private_t * priv  = NULL;
-        afr_local_t   * local = NULL;
-        call_frame_t  * transaction_frame = NULL;
-        int ret        = -1;
-        int op_ret   = -1;
-        int op_errno = 0;
+        afr_private_t *priv  = NULL;
+        afr_local_t   *local = NULL;
+        call_frame_t  *transaction_frame = NULL;
+        int            ret        = -1;
+        int            op_errno   = 0;
 
         VALIDATE_OR_GOTO (frame, out);
         VALIDATE_OR_GOTO (this, out);
@@ -2297,21 +2588,18 @@ afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd)
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
-
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
-                goto out;
-        }
-
         transaction_frame = copy_frame (frame);
         if (!transaction_frame) {
                 op_errno = ENOMEM;
                 goto out;
         }
 
-        transaction_frame->local = local;
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
+        local = transaction_frame->local;
+
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
+                goto out;
 
         local->op = GF_FOP_FLUSH;
 
@@ -2327,20 +2615,22 @@ afr_flush (call_frame_t *frame, xlator_t *this, fd_t *fd)
 
         ret = afr_open_fd_fix (transaction_frame, this, _gf_false);
         if (ret) {
-                op_ret = -1;
                 op_errno = -ret;
                 goto out;
         }
-        afr_transaction (transaction_frame, this, AFR_DATA_TRANSACTION);
+        ret = afr_transaction (transaction_frame, this, AFR_DATA_TRANSACTION);
+        if (ret < 0) {
+            op_errno = -ret;
+            goto out;
+        }
 
-
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
+        if (ret < 0) {
                 if (transaction_frame)
                         AFR_STACK_DESTROY (transaction_frame);
 
-                AFR_STACK_UNWIND (flush, frame, op_ret, op_errno);
+                AFR_STACK_UNWIND (flush, frame, -1, op_errno, NULL);
         }
 
         return 0;
@@ -2365,28 +2655,24 @@ afr_cleanup_fd_ctx (xlator_t *this, fd_t *fd)
         fd_ctx = (afr_fd_ctx_t *)(long) ctx;
 
         if (fd_ctx) {
-                if (fd_ctx->pre_op_done)
-                        GF_FREE (fd_ctx->pre_op_done);
+                GF_FREE (fd_ctx->pre_op_done);
 
-                if (fd_ctx->opened_on)
-                        GF_FREE (fd_ctx->opened_on);
+                GF_FREE (fd_ctx->opened_on);
 
-                if (fd_ctx->locked_on)
-                        GF_FREE (fd_ctx->locked_on);
+                GF_FREE (fd_ctx->locked_on);
 
-                if (fd_ctx->pre_op_piggyback)
-                        GF_FREE (fd_ctx->pre_op_piggyback);
+                GF_FREE (fd_ctx->pre_op_piggyback);
                 list_for_each_entry_safe (paused_call, tmp, &fd_ctx->paused_calls,
                                           call_list) {
                         list_del_init (&paused_call->call_list);
                         GF_FREE (paused_call);
                 }
 
-                if (fd_ctx->lock_piggyback)
-                        GF_FREE (fd_ctx->lock_piggyback);
+                GF_FREE (fd_ctx->lock_piggyback);
 
-                if (fd_ctx->lock_acquired)
-                        GF_FREE (fd_ctx->lock_acquired);
+                GF_FREE (fd_ctx->lock_acquired);
+
+		pthread_mutex_destroy (&fd_ctx->delay_lock);
 
                 GF_FREE (fd_ctx);
         }
@@ -2426,7 +2712,7 @@ afr_release (xlator_t *this, fd_t *fd)
 int
 afr_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-               struct iatt *postbuf)
+               struct iatt *postbuf, dict_t *xdata)
 {
         afr_local_t *local = NULL;
         int call_count = -1;
@@ -2468,7 +2754,8 @@ afr_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (call_count == 0) {
                 AFR_STACK_UNWIND (fsync, frame, local->op_ret, local->op_errno,
                                   &local->cont.fsync.prebuf,
-                                  &local->cont.fsync.postbuf);
+                                  &local->cont.fsync.postbuf,
+                                  NULL);
         }
 
         return 0;
@@ -2477,14 +2764,13 @@ afr_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 afr_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd,
-           int32_t datasync)
+           int32_t datasync, dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -2493,16 +2779,14 @@ afr_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         local->fd             = fd_ref (fd);
 
@@ -2512,17 +2796,16 @@ afr_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd,
                                            (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->fsync,
-                                           fd, datasync);
+                                           fd, datasync, xdata);
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (fsync, frame, op_ret, op_errno, NULL, NULL);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (fsync, frame, -1, op_errno, NULL, NULL, NULL);
         return 0;
 }
 
@@ -2532,7 +2815,8 @@ out:
 
 int32_t
 afr_fsyncdir_cbk (call_frame_t *frame, void *cookie,
-                  xlator_t *this, int32_t op_ret, int32_t op_errno)
+                  xlator_t *this, int32_t op_ret, int32_t op_errno,
+                  dict_t *xdata)
 {
         afr_local_t *local = NULL;
         int call_count = -1;
@@ -2552,7 +2836,7 @@ afr_fsyncdir_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (fsyncdir, frame, local->op_ret,
-                                  local->op_errno);
+                                  local->op_errno, xdata);
 
         return 0;
 }
@@ -2560,14 +2844,13 @@ afr_fsyncdir_cbk (call_frame_t *frame, void *cookie,
 
 int32_t
 afr_fsyncdir (call_frame_t *frame, xlator_t *this, fd_t *fd,
-              int32_t datasync)
+              int32_t datasync, dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -2576,33 +2859,30 @@ afr_fsyncdir (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND (frame, afr_fsyncdir_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->fsyncdir,
-                                    fd, datasync);
+                                    fd, datasync, xdata);
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (fsyncdir, frame, op_ret, op_errno);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (fsyncdir, frame, -1, op_errno, NULL);
         return 0;
 }
 
@@ -2613,7 +2893,7 @@ out:
 int32_t
 afr_xattrop_cbk (call_frame_t *frame, void *cookie,
                  xlator_t *this, int32_t op_ret, int32_t op_errno,
-                 dict_t *xattr)
+                 dict_t *xattr, dict_t *xdata)
 {
         afr_local_t *local = NULL;
         int call_count = -1;
@@ -2622,8 +2902,11 @@ afr_xattrop_cbk (call_frame_t *frame, void *cookie,
 
         LOCK (&frame->lock);
         {
-                if (op_ret == 0)
+                if (op_ret == 0) {
+                        if (!local->cont.xattrop.xattr)
+                                local->cont.xattrop.xattr = dict_ref (xattr);
                         local->op_ret = 0;
+                }
 
                 local->op_errno = op_errno;
         }
@@ -2633,7 +2916,7 @@ afr_xattrop_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (xattrop, frame, local->op_ret, local->op_errno,
-                                  xattr);
+                local->cont.xattrop.xattr, xdata);
 
         return 0;
 }
@@ -2641,14 +2924,13 @@ afr_xattrop_cbk (call_frame_t *frame, void *cookie,
 
 int32_t
 afr_xattrop (call_frame_t *frame, xlator_t *this, loc_t *loc,
-             gf_xattrop_flags_t optype, dict_t *xattr)
+             gf_xattrop_flags_t optype, dict_t *xattr, dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local  = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -2657,33 +2939,30 @@ afr_xattrop (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND (frame, afr_xattrop_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->xattrop,
-                                    loc, optype, xattr);
+                                    loc, optype, xattr, xdata);
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (xattrop, frame, op_ret, op_errno, NULL);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (xattrop, frame, -1, op_errno, NULL, NULL);
         return 0;
 }
 
@@ -2694,7 +2973,7 @@ out:
 int32_t
 afr_fxattrop_cbk (call_frame_t *frame, void *cookie,
                   xlator_t *this, int32_t op_ret, int32_t op_errno,
-                  dict_t *xattr)
+                  dict_t *xattr, dict_t *xdata)
 {
         afr_local_t *local = NULL;
 
@@ -2704,8 +2983,12 @@ afr_fxattrop_cbk (call_frame_t *frame, void *cookie,
 
         LOCK (&frame->lock);
         {
-                if (op_ret == 0)
+                if (op_ret == 0) {
+                        if (!local->cont.fxattrop.xattr)
+                                local->cont.fxattrop.xattr = dict_ref (xattr);
+
                         local->op_ret = 0;
+                }
 
                 local->op_errno = op_errno;
         }
@@ -2715,7 +2998,7 @@ afr_fxattrop_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (fxattrop, frame, local->op_ret, local->op_errno,
-                                  xattr);
+                                  local->cont.fxattrop.xattr, xdata);
 
         return 0;
 }
@@ -2723,14 +3006,13 @@ afr_fxattrop_cbk (call_frame_t *frame, void *cookie,
 
 int32_t
 afr_fxattrop (call_frame_t *frame, xlator_t *this, fd_t *fd,
-              gf_xattrop_flags_t optype, dict_t *xattr)
+              gf_xattrop_flags_t optype, dict_t *xattr, dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local  = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -2739,33 +3021,30 @@ afr_fxattrop (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND (frame, afr_fxattrop_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->fxattrop,
-                                    fd, optype, xattr);
+                                    fd, optype, xattr, xdata);
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (fxattrop, frame, op_ret, op_errno, NULL);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (fxattrop, frame, -1, op_errno, NULL, NULL);
         return 0;
 }
 
@@ -2774,7 +3053,7 @@ out:
 
 int32_t
 afr_inodelk_cbk (call_frame_t *frame, void *cookie,
-                 xlator_t *this, int32_t op_ret, int32_t op_errno)
+                 xlator_t *this, int32_t op_ret, int32_t op_errno, dict_t *xdata)
 
 {
         afr_local_t *local = NULL;
@@ -2795,7 +3074,7 @@ afr_inodelk_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (inodelk, frame, local->op_ret,
-                                  local->op_errno);
+                                  local->op_errno, xdata);
 
         return 0;
 }
@@ -2803,14 +3082,14 @@ afr_inodelk_cbk (call_frame_t *frame, void *cookie,
 
 int32_t
 afr_inodelk (call_frame_t *frame, xlator_t *this,
-             const char *volume, loc_t *loc, int32_t cmd, struct gf_flock *flock)
+             const char *volume, loc_t *loc, int32_t cmd,
+             struct gf_flock *flock, dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local  = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -2819,41 +3098,39 @@ afr_inodelk (call_frame_t *frame, xlator_t *this,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND (frame, afr_inodelk_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->inodelk,
-                                    volume, loc, cmd, flock);
+                                    volume, loc, cmd, flock, xdata);
 
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (inodelk, frame, op_ret, op_errno);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (inodelk, frame, -1, op_errno, NULL);
         return 0;
 }
 
 
 int32_t
 afr_finodelk_cbk (call_frame_t *frame, void *cookie,
-                  xlator_t *this, int32_t op_ret, int32_t op_errno)
+                  xlator_t *this, int32_t op_ret, int32_t op_errno,
+                  dict_t *xdata)
 
 {
         afr_local_t *local = NULL;
@@ -2874,7 +3151,7 @@ afr_finodelk_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (finodelk, frame, local->op_ret,
-                                  local->op_errno);
+                                  local->op_errno, xdata);
 
         return 0;
 }
@@ -2882,14 +3159,14 @@ afr_finodelk_cbk (call_frame_t *frame, void *cookie,
 
 int32_t
 afr_finodelk (call_frame_t *frame, xlator_t *this,
-              const char *volume, fd_t *fd, int32_t cmd, struct gf_flock *flock)
+              const char *volume, fd_t *fd, int32_t cmd, struct gf_flock *flock,
+              dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local  = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -2898,42 +3175,38 @@ afr_finodelk (call_frame_t *frame, xlator_t *this,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND (frame, afr_finodelk_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->finodelk,
-                                    volume, fd, cmd, flock);
+                                    volume, fd, cmd, flock, xdata);
 
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (finodelk, frame, op_ret, op_errno);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (finodelk, frame, -1, op_errno, NULL);
         return 0;
 }
 
 
 int32_t
-afr_entrylk_cbk (call_frame_t *frame, void *cookie,
-                 xlator_t *this, int32_t op_ret, int32_t op_errno)
-
+afr_entrylk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                 int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         afr_local_t *local = NULL;
         int call_count = -1;
@@ -2953,7 +3226,7 @@ afr_entrylk_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (entrylk, frame, local->op_ret,
-                                  local->op_errno);
+                                  local->op_errno, xdata);
 
         return 0;
 }
@@ -2962,14 +3235,14 @@ afr_entrylk_cbk (call_frame_t *frame, void *cookie,
 int32_t
 afr_entrylk (call_frame_t *frame, xlator_t *this,
              const char *volume, loc_t *loc,
-             const char *basename, entrylk_cmd cmd, entrylk_type type)
+             const char *basename, entrylk_cmd cmd, entrylk_type type,
+             dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local  = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -2978,34 +3251,31 @@ afr_entrylk (call_frame_t *frame, xlator_t *this,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND (frame, afr_entrylk_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->entrylk,
-                                    volume, loc, basename, cmd, type);
+                                    volume, loc, basename, cmd, type, xdata);
 
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (entrylk, frame, op_ret, op_errno);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (entrylk, frame, -1, op_errno, NULL);
         return 0;
 }
 
@@ -3013,7 +3283,7 @@ out:
 
 int32_t
 afr_fentrylk_cbk (call_frame_t *frame, void *cookie,
-                  xlator_t *this, int32_t op_ret, int32_t op_errno)
+                  xlator_t *this, int32_t op_ret, int32_t op_errno, dict_t *xdata)
 
 {
         afr_local_t *local = NULL;
@@ -3034,7 +3304,7 @@ afr_fentrylk_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (fentrylk, frame, local->op_ret,
-                                  local->op_errno);
+                                  local->op_errno, xdata);
 
         return 0;
 }
@@ -3043,14 +3313,14 @@ afr_fentrylk_cbk (call_frame_t *frame, void *cookie,
 int32_t
 afr_fentrylk (call_frame_t *frame, xlator_t *this,
               const char *volume, fd_t *fd,
-              const char *basename, entrylk_cmd cmd, entrylk_type type)
+              const char *basename, entrylk_cmd cmd,
+              entrylk_type type, dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local  = NULL;
         int ret = -1;
         int i = 0;
         int32_t call_count = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
 
         VALIDATE_OR_GOTO (frame, out);
@@ -3059,41 +3329,38 @@ afr_fentrylk (call_frame_t *frame, xlator_t *this,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
         call_count = local->call_count;
-        frame->local = local;
 
         for (i = 0; i < priv->child_count; i++) {
                 if (local->child_up[i]) {
                         STACK_WIND (frame, afr_fentrylk_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->fentrylk,
-                                    volume, fd, basename, cmd, type);
+                                    volume, fd, basename, cmd, type, xdata);
 
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (fentrylk, frame, op_ret, op_errno);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (fentrylk, frame, -1, op_errno, NULL);
         return 0;
 }
 
 int32_t
 afr_statfs_cbk (call_frame_t *frame, void *cookie,
                 xlator_t *this, int32_t op_ret, int32_t op_errno,
-                struct statvfs *statvfs)
+                struct statvfs *statvfs, dict_t *xdata)
 {
         afr_local_t *local = NULL;
         int call_count = 0;
@@ -3124,7 +3391,7 @@ afr_statfs_cbk (call_frame_t *frame, void *cookie,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (statfs, frame, local->op_ret, local->op_errno,
-                                  &local->cont.statfs.buf);
+                                  &local->cont.statfs.buf, xdata);
 
         return 0;
 }
@@ -3132,7 +3399,7 @@ afr_statfs_cbk (call_frame_t *frame, void *cookie,
 
 int32_t
 afr_statfs (call_frame_t *frame, xlator_t *this,
-            loc_t *loc)
+            loc_t *loc, dict_t *xdata)
 {
         afr_private_t *  priv        = NULL;
         int              child_count = 0;
@@ -3140,7 +3407,6 @@ afr_statfs (call_frame_t *frame, xlator_t *this,
         int              i           = 0;
         int              ret = -1;
         int              call_count = 0;
-        int32_t          op_ret      = -1;
         int32_t          op_errno    = 0;
 
         VALIDATE_OR_GOTO (this, out);
@@ -3150,15 +3416,13 @@ afr_statfs (call_frame_t *frame, xlator_t *this,
         priv = this->private;
         child_count = priv->child_count;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        ret = AFR_LOCAL_INIT (local, priv);
-        if (ret < 0) {
-                op_errno = -ret;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
                 goto out;
-        }
 
-        frame->local = local;
         call_count = local->call_count;
 
         for (i = 0; i < child_count; i++) {
@@ -3166,24 +3430,24 @@ afr_statfs (call_frame_t *frame, xlator_t *this,
                         STACK_WIND (frame, afr_statfs_cbk,
                                     priv->children[i],
                                     priv->children[i]->fops->statfs,
-                                    loc);
+                                    loc, xdata);
                         if (!--call_count)
                                 break;
                 }
         }
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (statfs, frame, op_ret, op_errno, NULL);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (statfs, frame, -1, op_errno, NULL, NULL);
         return 0;
 }
 
 
 int32_t
 afr_lk_unlock_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                   int32_t op_ret, int32_t op_errno, struct gf_flock *lock)
+                   int32_t op_ret, int32_t op_errno, struct gf_flock *lock,
+                   dict_t *xdata)
 {
         afr_local_t * local = NULL;
         int call_count = -1;
@@ -3193,7 +3457,7 @@ afr_lk_unlock_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (call_count == 0)
                 AFR_STACK_UNWIND (lk, frame, local->op_ret, local->op_errno,
-                                  lock);
+                                  lock, xdata);
 
         return 0;
 }
@@ -3215,7 +3479,7 @@ afr_lk_unlock (call_frame_t *frame, xlator_t *this)
 
         if (call_count == 0) {
                 AFR_STACK_UNWIND (lk, frame, local->op_ret, local->op_errno,
-                                  &local->cont.lk.ret_flock);
+                                  &local->cont.lk.ret_flock, NULL);
                 return 0;
         }
 
@@ -3229,7 +3493,7 @@ afr_lk_unlock (call_frame_t *frame, xlator_t *this)
                                     priv->children[i],
                                     priv->children[i]->fops->lk,
                                     local->fd, F_SETLK,
-                                    &local->cont.lk.user_flock);
+                                    &local->cont.lk.user_flock, NULL);
 
                         if (!--call_count)
                                 break;
@@ -3242,7 +3506,7 @@ afr_lk_unlock (call_frame_t *frame, xlator_t *this)
 
 int32_t
 afr_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-            int32_t op_ret, int32_t op_errno, struct gf_flock *lock)
+            int32_t op_ret, int32_t op_errno, struct gf_flock *lock, dict_t *xdata)
 {
         afr_local_t *local = NULL;
         afr_private_t *priv = NULL;
@@ -3277,12 +3541,12 @@ afr_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                    priv->children[child_index],
                                    priv->children[child_index]->fops->lk,
                                    local->fd, local->cont.lk.cmd,
-                                   &local->cont.lk.user_flock);
+                                   &local->cont.lk.user_flock, xdata);
         } else if (local->op_ret == -1) {
                 /* all nodes have gone down */
 
                 AFR_STACK_UNWIND (lk, frame, -1, ENOTCONN,
-                                  &local->cont.lk.ret_flock);
+                                  &local->cont.lk.ret_flock, NULL);
         } else {
                 /* locking has succeeded on all nodes that are up */
 
@@ -3300,7 +3564,7 @@ afr_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
                 */
                 AFR_STACK_UNWIND (lk, frame, local->op_ret, local->op_errno,
-                                  &local->cont.lk.ret_flock);
+                                  &local->cont.lk.ret_flock, NULL);
         }
 
         return 0;
@@ -3309,13 +3573,13 @@ afr_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 afr_lk (call_frame_t *frame, xlator_t *this,
-        fd_t *fd, int32_t cmd, struct gf_flock *flock)
+        fd_t *fd, int32_t cmd, struct gf_flock *flock, dict_t *xdata)
 {
         afr_private_t *priv = NULL;
         afr_local_t *local = NULL;
         int i = 0;
-        int32_t op_ret   = -1;
         int32_t op_errno = 0;
+        int     ret      = -1;
 
         VALIDATE_OR_GOTO (frame, out);
         VALIDATE_OR_GOTO (this, out);
@@ -3323,10 +3587,12 @@ afr_lk (call_frame_t *frame, xlator_t *this,
 
         priv = this->private;
 
-        ALLOC_OR_GOTO (local, afr_local_t, out);
-        AFR_LOCAL_INIT (local, priv);
+        AFR_LOCAL_ALLOC_OR_GOTO (frame->local, out);
+        local = frame->local;
 
-        frame->local  = local;
+        ret = afr_local_init (local, priv, &op_errno);
+        if (ret < 0)
+                goto out;
 
         local->cont.lk.locked_nodes = GF_CALLOC (priv->child_count,
                                                  sizeof (*local->cont.lk.locked_nodes),
@@ -3345,13 +3611,12 @@ afr_lk (call_frame_t *frame, xlator_t *this,
         STACK_WIND_COOKIE (frame, afr_lk_cbk, (void *) (long) 0,
                            priv->children[i],
                            priv->children[i]->fops->lk,
-                           fd, cmd, flock);
+                           fd, cmd, flock, xdata);
 
-        op_ret = 0;
+        ret = 0;
 out:
-        if (op_ret == -1) {
-                AFR_STACK_UNWIND (lk, frame, op_ret, op_errno, NULL);
-        }
+        if (ret < 0)
+                AFR_STACK_UNWIND (lk, frame, -1, op_errno, NULL, NULL);
         return 0;
 }
 
@@ -3367,8 +3632,7 @@ afr_forget (xlator_t *this, inode_t *inode)
                 goto out;
 
         ctx = (afr_inode_ctx_t *)(long)ctx_addr;
-        if (ctx->fresh_children)
-                GF_FREE (ctx->fresh_children);
+        GF_FREE (ctx->fresh_children);
         GF_FREE (ctx);
 out:
         return 0;
@@ -3405,11 +3669,6 @@ afr_priv_dump (xlator_t *this)
         gf_proc_dump_write("entry-change_log", "%d", priv->entry_change_log);
         gf_proc_dump_write("read_child", "%d", priv->read_child);
         gf_proc_dump_write("favorite_child", "%d", priv->favorite_child);
-        gf_proc_dump_write("data_lock_server_count", "%u", priv->data_lock_server_count);
-        gf_proc_dump_write("metadata_lock_server_count", "%u",
-                           priv->metadata_lock_server_count);
-        gf_proc_dump_write("entry_lock_server_count", "%u",
-                           priv->entry_lock_server_count);
         gf_proc_dump_write("wait_count", "%u", priv->wait_count);
 
         return 0;
@@ -3440,7 +3699,7 @@ find_child_index (xlator_t *this, xlator_t *child)
 
 int32_t
 afr_notify (xlator_t *this, int32_t event,
-            void *data, ...)
+            void *data, void *data2)
 {
         afr_private_t   *priv               = NULL;
         int             i                   = -1;
@@ -3453,11 +3712,21 @@ afr_notify (xlator_t *this, int32_t event,
         int             ret                 = -1;
         int             call_psh            = 0;
         int             up_child            = AFR_ALL_CHILDREN;
+        dict_t          *input              = NULL;
+        dict_t          *output             = NULL;
 
         priv = this->private;
 
         if (!priv)
                 return 0;
+
+        /*
+         * We need to reset this in case children come up in "staggered"
+         * fashion, so that we discover a late-arriving local subvolume.  Note
+         * that we could end up issuing N lookups to the first subvolume, and
+         * O(N^2) overall, but N is small for AFR so it shouldn't be an issue.
+         */
+        priv->did_discovery = _gf_false;
 
         had_heard_from_all = 1;
         for (i = 0; i < priv->child_count; i++) {
@@ -3486,9 +3755,19 @@ afr_notify (xlator_t *this, int32_t event,
         case GF_EVENT_CHILD_UP:
                 LOCK (&priv->lock);
                 {
+                        /*
+                         * This only really counts if the child was never up
+                         * (value = -1) or had been down (value = 0).  See
+                         * comment at GF_EVENT_CHILD_DOWN for a more detailed
+                         * explanation.
+                         */
+                        if (priv->child_up[idx] != 1) {
+                                priv->up_count++;
+                        }
                         priv->child_up[idx] = 1;
-                        priv->up_count++;
 
+                        call_psh = 1;
+                        up_child = idx;
                         for (i = 0; i < priv->child_count; i++)
                                 if (priv->child_up[i] == 1)
                                         up_children++;
@@ -3498,12 +3777,6 @@ afr_notify (xlator_t *this, int32_t event,
                                         "going online.", ((xlator_t *)data)->name);
                         } else {
                                 event = GF_EVENT_CHILD_MODIFIED;
-                                gf_log (this->name, GF_LOG_INFO, "subvol %d came up, "
-                                        "start crawl", idx);
-                                if (had_heard_from_all) {
-                                        call_psh = 1;
-                                        up_child = idx;
-                                }
                         }
 
                         priv->last_event[idx] = event;
@@ -3515,8 +3788,22 @@ afr_notify (xlator_t *this, int32_t event,
         case GF_EVENT_CHILD_DOWN:
                 LOCK (&priv->lock);
                 {
+                        /*
+                         * If a brick is down when we start, we'll get a
+                         * CHILD_DOWN to indicate its initial state.  There
+                         * was never a CHILD_UP in this case, so if we
+                         * increment "down_count" the difference between than
+                         * and "up_count" will no longer be the number of
+                         * children that are currently up.  This has serious
+                         * implications e.g. for quorum enforcement, so we
+                         * don't increment these values unless the event
+                         * represents an actual state transition between "up"
+                         * (value = 1) and anything else.
+                         */
+                        if (priv->child_up[idx] == 1) {
+                                priv->down_count++;
+                        }
                         priv->child_up[idx] = 0;
-                        priv->down_count++;
 
                         for (i = 0; i < priv->child_count; i++)
                                 if (priv->child_up[i] == 0)
@@ -3544,10 +3831,11 @@ afr_notify (xlator_t *this, int32_t event,
 
                 break;
 
-        case GF_EVENT_TRIGGER_HEAL:
-                gf_log (this->name, GF_LOG_INFO, "Self-heal was triggered"
-                        " manually. Start crawling");
-                call_psh = 1;
+        case GF_EVENT_TRANSLATOR_OP:
+                input = data;
+                output = data2;
+                ret = afr_xl_op (this, input, output);
+                goto out;
                 break;
 
         default:
@@ -3592,18 +3880,13 @@ afr_notify (xlator_t *this, int32_t event,
                         }
                 }
                 UNLOCK (&priv->lock);
-                if (up_children > 1) {
-                        gf_log (this->name, GF_LOG_INFO, "All subvolumes came "
-                                "up, start crawl");
-                        call_psh = 1;
-                }
         }
 
         ret = 0;
         if (propagate)
                 ret = default_notify (this, event, data);
-        if (call_psh)
-                afr_proactive_self_heal (this, up_child);
+        if (call_psh && priv->shd.iamshd)
+                afr_proactive_self_heal ((void*) (long) up_child);
 
 out:
         return ret;
@@ -3628,29 +3911,45 @@ afr_first_up_child (unsigned char *child_up, size_t child_count)
 }
 
 int
-AFR_LOCAL_INIT (afr_local_t *local, afr_private_t *priv)
+afr_local_init (afr_local_t *local, afr_private_t *priv, int32_t *op_errno)
 {
+        int     ret = -1;
+
         local->op_ret = -1;
         local->op_errno = EUCLEAN;
-        local->call_count = afr_up_children_count (priv->child_up,
-                                                   priv->child_count);
-        if (local->call_count == 0) {
-                gf_log (THIS->name, GF_LOG_INFO, "no subvolumes up");
-                return -ENOTCONN;
-        }
 
-
-        local->child_up = GF_CALLOC (sizeof (*local->child_up),
-                                     priv->child_count,
+        local->child_up = GF_CALLOC (priv->child_count,
+                                     sizeof (*local->child_up),
                                      gf_afr_mt_char);
         if (!local->child_up) {
-                return -ENOMEM;
+                if (op_errno)
+                        *op_errno = ENOMEM;
+                goto out;
         }
 
         memcpy (local->child_up, priv->child_up,
                 sizeof (*local->child_up) * priv->child_count);
+        local->call_count = afr_up_children_count (local->child_up,
+                                                   priv->child_count);
+        if (local->call_count == 0) {
+                gf_log (THIS->name, GF_LOG_INFO, "no subvolumes up");
+                if (op_errno)
+                        *op_errno = ENOTCONN;
+                goto out;
+        }
 
-        return 0;
+        local->child_errno = GF_CALLOC (priv->child_count,
+                                        sizeof (*local->child_errno),
+                                        gf_afr_mt_int32_t);
+        if (!local->child_errno) {
+                if (op_errno)
+                        *op_errno = ENOMEM;
+                goto out;
+        }
+
+        ret = 0;
+out:
+        return ret;
 }
 
 int
@@ -3688,10 +3987,47 @@ out:
         return ret;
 }
 
+void
+afr_matrix_cleanup (int32_t **matrix, unsigned int m)
+{
+        int             i         = 0;
+
+        if (!matrix)
+                goto out;
+        for (i = 0; i < m; i++) {
+                GF_FREE (matrix[i]);
+        }
+
+        GF_FREE (matrix);
+out:
+        return;
+}
+
+int32_t**
+afr_matrix_create (unsigned int m, unsigned int n)
+{
+        int32_t         **matrix = NULL;
+        int             i       = 0;
+
+        matrix = GF_CALLOC (sizeof (*matrix), m, gf_afr_mt_int32_t);
+        if (!matrix)
+                goto out;
+
+        for (i = 0; i < m; i++) {
+                matrix[i] = GF_CALLOC (sizeof (*matrix[i]), n,
+                                       gf_afr_mt_int32_t);
+                if (!matrix[i])
+                        goto out;
+        }
+        return matrix;
+out:
+        afr_matrix_cleanup (matrix, m);
+        return NULL;
+}
+
 int
 afr_transaction_local_init (afr_local_t *local, xlator_t *this)
 {
-        int            i = 0;
         int            child_up_count = 0;
         int            ret = -ENOMEM;
         afr_private_t *priv = NULL;
@@ -3711,25 +4047,12 @@ afr_transaction_local_init (afr_local_t *local, xlator_t *this)
         local->first_up_child = afr_first_up_child (local->child_up,
                                                     priv->child_count);
 
-        local->child_errno = GF_CALLOC (sizeof (*local->child_errno),
-                                        priv->child_count,
-                                        gf_afr_mt_int32_t);
-        if (!local->child_errno)
-                goto out;
-
         local->transaction.eager_lock =
                 GF_CALLOC (sizeof (*local->transaction.eager_lock),
                            priv->child_count,
                            gf_afr_mt_int32_t);
 
         if (!local->transaction.eager_lock)
-                goto out;
-
-        local->pending = GF_CALLOC (sizeof (*local->pending),
-                                    priv->child_count,
-                                    gf_afr_mt_int32_t);
-
-        if (!local->pending)
                 goto out;
 
         local->fresh_children = afr_children_create (priv->child_count);
@@ -3750,20 +4073,15 @@ afr_transaction_local_init (afr_local_t *local, xlator_t *this)
         if (!local->transaction.pre_op)
                 goto out;
 
-        for (i = 0; i < priv->child_count; i++) {
-                local->pending[i] = GF_CALLOC (sizeof (*local->pending[i]),
-                                               3, /* data + metadata + entry */
-                                               gf_afr_mt_int32_t);
-                if (!local->pending[i])
-                        goto out;
-        }
+        local->pending = afr_matrix_create (priv->child_count,
+                                            AFR_NUM_CHANGE_LOGS);
+        if (!local->pending)
+                goto out;
 
-        local->transaction.child_errno =
-                GF_CALLOC (sizeof (*local->transaction.child_errno),
-                           priv->child_count,
-                           gf_afr_mt_int32_t);
-        local->transaction.erase_pending = 1;
-
+        local->transaction.txn_changelog = afr_matrix_create (priv->child_count,
+                                                           AFR_NUM_CHANGE_LOGS);
+        if (!local->transaction.txn_changelog)
+                goto out;
         ret = 0;
 out:
         return ret;
@@ -3858,7 +4176,7 @@ afr_set_low_priority (call_frame_t *frame)
 
 int
 afr_child_fd_ctx_set (xlator_t *this, fd_t *fd, int32_t child,
-                      int flags, int32_t wbflags)
+                      int flags)
 {
         int             ret = 0;
         uint64_t        ctx = 0;
@@ -3883,7 +4201,6 @@ afr_child_fd_ctx_set (xlator_t *this, fd_t *fd, int32_t child,
         fd_ctx->opened_on[child] = AFR_FD_OPENED;
         if (!IA_ISDIR (fd->inode->ia_type)) {
                 fd_ctx->flags            = flags;
-                fd_ctx->wbflags          = wbflags;
         }
         ret = 0;
 out:
@@ -3893,31 +4210,88 @@ out:
 gf_boolean_t
 afr_have_quorum (char *logname, afr_private_t *priv)
 {
-	unsigned int	quorum = 0;
+        unsigned int        quorum = 0;
 
-	GF_VALIDATE_OR_GOTO(logname,priv,out);
+        GF_VALIDATE_OR_GOTO(logname,priv,out);
 
-	quorum = priv->child_count / 2 + 1;
-	if (priv->up_count >= (priv->down_count + quorum)) {
-		return _gf_true;
-	}
+        quorum = priv->quorum_count;
+        if (quorum != AFR_QUORUM_AUTO) {
+                return (priv->up_count >= (priv->down_count + quorum));
+        }
 
-	/*
-	 * Special case for even numbers of nodes: if we have exactly half
-	 * and that includes the first ("senior-most") node, then that counts
-	 * as quorum even if it wouldn't otherwise.  This supports e.g. N=2
-	 * while preserving the critical property that there can only be one
-	 * such group.
-	 */
-	if ((priv->child_count % 2) == 0) {
-		quorum = priv->child_count / 2;
-		if (priv->up_count >= (priv->down_count + quorum)) {
-			if (priv->child_up[0]) {
-				return _gf_true;
-			}
-		}
-	}
+        quorum = priv->child_count / 2 + 1;
+        if (priv->up_count >= (priv->down_count + quorum)) {
+                return _gf_true;
+        }
+
+        /*
+         * Special case for even numbers of nodes: if we have exactly half
+         * and that includes the first ("senior-most") node, then that counts
+         * as quorum even if it wouldn't otherwise.  This supports e.g. N=2
+         * while preserving the critical property that there can only be one
+         * such group.
+         */
+        if ((priv->child_count % 2) == 0) {
+                quorum = priv->child_count / 2;
+                if (priv->up_count >= (priv->down_count + quorum)) {
+                        if (priv->child_up[0]) {
+                                return _gf_true;
+                        }
+                }
+        }
 
 out:
-	return _gf_false;
+        return _gf_false;
+}
+
+void
+afr_priv_destroy (afr_private_t *priv)
+{
+        int            i           = 0;
+
+        if (!priv)
+                goto out;
+        inode_unref (priv->root_inode);
+        GF_FREE (priv->shd.pos);
+        GF_FREE (priv->shd.pending);
+        GF_FREE (priv->shd.inprogress);
+//        for (i = 0; i < priv->child_count; i++)
+//                if (priv->shd.timer && priv->shd.timer[i])
+//                        gf_timer_call_cancel (this->ctx, priv->shd.timer[i]);
+        GF_FREE (priv->shd.timer);
+
+        if (priv->shd.healed)
+                eh_destroy (priv->shd.healed);
+
+        if (priv->shd.heal_failed)
+                eh_destroy (priv->shd.heal_failed);
+
+        if (priv->shd.split_brain)
+                eh_destroy (priv->shd.split_brain);
+
+        GF_FREE (priv->last_event);
+        if (priv->pending_key) {
+                for (i = 0; i < priv->child_count; i++)
+                        GF_FREE (priv->pending_key[i]);
+        }
+        GF_FREE (priv->pending_key);
+        GF_FREE (priv->children);
+        GF_FREE (priv->child_up);
+        LOCK_DESTROY (&priv->lock);
+        LOCK_DESTROY (&priv->read_child_lock);
+        pthread_mutex_destroy (&priv->mutex);
+        GF_FREE (priv);
+out:
+        return;
+}
+
+int
+xlator_subvolume_count (xlator_t *this)
+{
+        int i = 0;
+        xlator_list_t *list = NULL;
+
+        for (list = this->children; list; list = list->next)
+                i++;
+        return i;
 }

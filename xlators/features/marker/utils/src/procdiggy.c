@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2011-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 
 #ifndef _CONFIG_H
 #define _CONFIG_H
@@ -28,6 +18,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/param.h> /* for PATH_MAX */
 
 #include "common-utils.h"
 #include "procdiggy.h"
@@ -37,35 +28,38 @@ pidinfo (pid_t pid, char **name)
 {
         char buf[NAME_MAX * 2] = {0,};
         FILE *f                = NULL;
+        char path[PATH_MAX]    = {0,};
         char *p                = NULL;
         int ret                = 0;
 
-        ret = gf_asprintf (&p, PROC"/%d/status", pid);
-        if (ret == -1)
-                goto oom;
+        sprintf (path, PROC"/%d/status", pid);
 
-        f = fopen (p, "r");
+        f = fopen (path, "r");
         if (!f)
                 return -1;
 
         if (name)
                 *name = NULL;
         for (;;) {
+                size_t len;
                 memset (buf, 0, sizeof (buf));
                 if (fgets (buf, sizeof (buf), f) == NULL ||
-                    buf[strlen (buf) - 1] != '\n') {
+                    (len = strlen (buf)) == 0 ||
+                    buf[len - 1] != '\n') {
                         pid = -1;
                         goto out;
                 }
-                buf[strlen (buf) -1] = '\0';
+                buf[len - 1] = '\0';
 
                 if (name && !*name) {
                         p = strtail (buf, "Name:");
                         if (p) {
                                 while (isspace (*++p));
                                 *name = gf_strdup (p);
-                                if (!*name)
-                                        goto oom;
+                                if (!*name) {
+                                        pid = -2;
+                                        goto out;
+                                }
                                 continue;
                         }
                 }
@@ -82,16 +76,15 @@ pidinfo (pid_t pid, char **name)
 
  out:
         fclose (f);
+        if (pid == -1 && name && *name)
+                GF_FREE (name);
+        if (pid == -2)
+                fprintf (stderr, "out of memory\n");
         return pid;
-
- oom:
-        fclose (f);
-        fprintf (stderr, "out of memory\n");
-        return -2;
 }
 
 int
-prociter (int (*proch) (pid_t pid, pid_t ppid, char *name, void *data),
+prociter (int (*proch) (pid_t pid, pid_t ppid, char *tmpname, void *data),
           void *data)
 {
         char *name        = NULL;
@@ -102,23 +95,27 @@ prociter (int (*proch) (pid_t pid, pid_t ppid, char *name, void *data),
         int ret           = 0;
 
         d = opendir (PROC);
+        if (!d)
+                return -1;
         while (errno = 0, de = readdir (d)) {
                 if (gf_string2int (de->d_name, &pid) != -1 && pid >= 0) {
                         ppid = pidinfo (pid, &name);
                         switch (ppid) {
                         case -1: continue;
-                        case -2: return -1;
+                        case -2: ret = -1; break;
                         }
                         ret = proch (pid, ppid, name, data);
+                        GF_FREE (name);
                         if (ret)
-                                return ret;
+                                break;
                 }
         }
-        if (errno) {
+        closedir (d);
+        if (!de && errno) {
                 fprintf (stderr, "failed to traverse "PROC" (%s)\n",
                          strerror (errno));
-                return -1;
+                ret = -1;
         }
 
-        return 0;
+        return ret;
 }

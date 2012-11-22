@@ -1,21 +1,11 @@
-
 /*
-   Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -25,9 +15,8 @@
 #include "mem-types.h"
 
 enum gf_stripe_mem_types_ {
-        gf_stripe_mt_stripe_local_t = gf_common_mt_end + 1,
-        gf_stripe_mt_iovec,
-        gf_stripe_mt_readv_replies,
+        gf_stripe_mt_iovec = gf_common_mt_end + 1,
+        gf_stripe_mt_stripe_replies,
         gf_stripe_mt_stripe_fd_ctx_t,
         gf_stripe_mt_char,
         gf_stripe_mt_int8_t,

@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2011-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
-
 
 #include <errno.h>
 
@@ -540,7 +530,7 @@ posix_acl_inherit_mode (struct posix_acl *acl, mode_t modein)
 
 mode_t
 posix_acl_inherit (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode,
-                   int is_dir)
+                   int32_t umask, int is_dir)
 {
         int                    ret = 0;
         struct posix_acl      *par_default = NULL;
@@ -552,8 +542,24 @@ posix_acl_inherit (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode,
         int                    size_default = 0;
         int                    size_access = 0;
         mode_t                 retmode = 0;
+        int16_t                tmp_mode = 0;
+        mode_t                 client_umask = 0;
 
         retmode = mode;
+        client_umask = umask;
+        ret = dict_get_int16 (params, "umask", &tmp_mode);
+        if (ret == 0) {
+                client_umask = (mode_t)tmp_mode;
+                dict_del (params, "umask");
+                ret = dict_get_int16 (params, "mode", &tmp_mode);
+                if (ret == 0) {
+                        retmode = (mode_t)tmp_mode;
+                        dict_del (params, "mode");
+                } else {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "client sent umask, but not the original mode");
+                }
+        }
 
         ret = posix_acl_get (loc->parent, this, NULL, &par_default);
 
@@ -566,7 +572,8 @@ posix_acl_inherit (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode,
         if (!acl_access)
                 goto out;
 
-        retmode = posix_acl_inherit_mode (acl_access, mode);
+        client_umask = 0; // No umask if we inherit an ACL
+        retmode = posix_acl_inherit_mode (acl_access, retmode);
         ctx->perm = retmode;
 
         size_access = posix_acl_to_xattr (this, acl_access, NULL, 0);
@@ -615,6 +622,8 @@ set:
                 goto out;
 
 out:
+        retmode &= ~client_umask;
+
         if (par_default)
                 posix_acl_unref (this, par_default);
         if (acl_access)
@@ -627,22 +636,24 @@ out:
 
 
 mode_t
-posix_acl_inherit_dir (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode)
+posix_acl_inherit_dir (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode,
+                       int32_t umask)
 {
         mode_t  retmode = 0;
 
-        retmode = posix_acl_inherit (this, loc, params, mode, 1);
+        retmode = posix_acl_inherit (this, loc, params, mode, umask, 1);
 
         return retmode;
 }
 
 
 mode_t
-posix_acl_inherit_file (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode)
+posix_acl_inherit_file (xlator_t *this, loc_t *loc, dict_t *params, mode_t mode,
+                        int32_t umask)
 {
         mode_t  retmode = 0;
 
-        retmode = posix_acl_inherit (this, loc, params, mode, 0);
+        retmode = posix_acl_inherit (this, loc, params, mode, umask, 0);
 
         return retmode;
 }
@@ -792,7 +803,8 @@ red:
 
 
 int
-posix_acl_access (call_frame_t *frame, xlator_t *this, loc_t *loc, int mask)
+posix_acl_access (call_frame_t *frame, xlator_t *this, loc_t *loc, int mask,
+                  dict_t *xdata)
 {
         int  op_ret = 0;
         int  op_errno = 0;
@@ -845,9 +857,9 @@ posix_acl_access (call_frame_t *frame, xlator_t *this, loc_t *loc, int mask)
 
 unwind:
         if (is_fuse_call)
-                STACK_UNWIND_STRICT (access, frame, op_ret, op_errno);
+                STACK_UNWIND_STRICT (access, frame, op_ret, op_errno, NULL);
         else
-                STACK_UNWIND_STRICT (access, frame, 0, mode);
+                STACK_UNWIND_STRICT (access, frame, 0, mode, NULL);
         return 0;
 }
 
@@ -855,16 +867,18 @@ unwind:
 int
 posix_acl_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         int op_ret, int op_errno, struct iatt *prebuf,
-                        struct iatt *postbuf)
+                        struct iatt *postbuf, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (truncate, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (truncate, frame, op_ret, op_errno, prebuf,
+                             postbuf, xdata);
 
         return 0;
 }
 
 
 int
-posix_acl_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t off)
+posix_acl_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t off,
+                    dict_t *xdata)
 {
         if (acl_permits (frame, loc->inode, POSIX_ACL_WRITE))
                 goto green;
@@ -873,19 +887,19 @@ posix_acl_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t off)
 green:
         STACK_WIND (frame, posix_acl_truncate_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->truncate,
-                    loc, off);
+                    loc, off, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (truncate, frame, -1, EACCES, NULL, NULL);
+        STACK_UNWIND_STRICT (truncate, frame, -1, EACCES, NULL, NULL, NULL);
         return 0;
 }
 
 
 int
 posix_acl_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int op_ret, int op_errno, fd_t *fd)
+                    int op_ret, int op_errno, fd_t *fd, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd);
+        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd, xdata);
 
         return 0;
 }
@@ -893,13 +907,20 @@ posix_acl_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 posix_acl_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags,
-                fd_t *fd, int wbflags)
+                fd_t *fd, dict_t *xdata)
 {
         int perm = 0;
 
         switch (flags & O_ACCMODE) {
         case O_RDONLY:
                 perm = POSIX_ACL_READ;
+
+                /* If O_FMODE_EXEC is present, its good enough
+                   to have '--x' perm, and its not covered in
+                   O_ACCMODE bits */
+                if (flags & O_FMODE_EXEC)
+                        perm = POSIX_ACL_EXECUTE;
+
                 break;
         case O_WRONLY:
         case O_APPEND:
@@ -918,10 +939,10 @@ posix_acl_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags,
 green:
         STACK_WIND (frame, posix_acl_open_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->open,
-                    loc, flags, fd, wbflags);
+                    loc, flags, fd, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (open, frame, -1, EACCES, NULL);
+        STACK_UNWIND_STRICT (open, frame, -1, EACCES, NULL, xdata);
         return 0;
 }
 
@@ -929,17 +950,18 @@ red:
 int
 posix_acl_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int op_ret, int op_errno, struct iovec *vector,
-                     int count, struct iatt *stbuf, struct iobref *iobref)
+                     int count, struct iatt *stbuf, struct iobref *iobref,
+                     dict_t *xdata)
 {
         STACK_UNWIND_STRICT (readv, frame, op_ret, op_errno, vector, count,
-                             stbuf, iobref);
+                             stbuf, iobref, xdata);
         return 0;
 }
 
 
 int
 posix_acl_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                 size_t size, off_t offset)
+                 size_t size, off_t offset, uint32_t flags, dict_t *xdata)
 {
         if (__is_fuse_call (frame))
                 goto green;
@@ -952,10 +974,10 @@ posix_acl_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
 green:
         STACK_WIND (frame, posix_acl_readv_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->readv,
-                    fd, size, offset);
+                    fd, size, offset, flags, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (readv, frame, -1, EACCES, NULL, 0, NULL, NULL);
+        STACK_UNWIND_STRICT (readv, frame, -1, EACCES, NULL, 0, NULL, NULL, xdata);
         return 0;
 }
 
@@ -963,10 +985,10 @@ red:
 int
 posix_acl_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int op_ret, int op_errno,
-                      struct iatt *prebuf, struct iatt *postbuf)
+                      struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
 {
         STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno,
-                             prebuf, postbuf);
+                             prebuf, postbuf, xdata);
         return 0;
 }
 
@@ -974,7 +996,7 @@ posix_acl_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 posix_acl_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
                   struct iovec *vector, int count, off_t offset,
-                  struct iobref *iobref)
+                  uint32_t flags, struct iobref *iobref, dict_t *xdata)
 {
         if (__is_fuse_call (frame))
                 goto green;
@@ -987,10 +1009,10 @@ posix_acl_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 green:
         STACK_WIND (frame, posix_acl_writev_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->writev,
-                    fd, vector, count, offset, iobref);
+                    fd, vector, count, offset, flags, iobref, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (writev, frame, -1, EACCES, NULL, NULL);
+        STACK_UNWIND_STRICT (writev, frame, -1, EACCES, NULL, NULL, xdata);
         return 0;
 }
 
@@ -998,18 +1020,18 @@ red:
 
 int
 posix_acl_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                         int op_ret, int op_errno,
-                         struct iatt *prebuf, struct iatt *postbuf)
+                         int op_ret, int op_errno, struct iatt *prebuf,
+                         struct iatt *postbuf, dict_t *xdata)
 {
         STACK_UNWIND_STRICT (ftruncate, frame, op_ret, op_errno,
-                             prebuf, postbuf);
+                             prebuf, postbuf, xdata);
         return 0;
 }
 
 
 int
 posix_acl_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                     off_t offset)
+                     off_t offset, dict_t *xdata)
 {
         if (__is_fuse_call (frame))
                 goto green;
@@ -1022,26 +1044,26 @@ posix_acl_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd,
 green:
         STACK_WIND (frame, posix_acl_ftruncate_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->ftruncate,
-                    fd, offset);
+                    fd, offset, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (ftruncate, frame, -1, EACCES, NULL, NULL);
+        STACK_UNWIND_STRICT (ftruncate, frame, -1, EACCES, NULL, NULL, xdata);
         return 0;
 }
 
 
 int
 posix_acl_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                       int op_ret, int op_errno, fd_t *fd)
+                       int op_ret, int op_errno, fd_t *fd, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (opendir, frame, op_ret, op_errno, fd);
+        STACK_UNWIND_STRICT (opendir, frame, op_ret, op_errno, fd, xdata);
 
         return 0;
 }
 
 
 int
-posix_acl_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd)
+posix_acl_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd, dict_t *xdata)
 {
         if (acl_permits (frame, loc->inode, POSIX_ACL_READ))
                 goto green;
@@ -1050,10 +1072,10 @@ posix_acl_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd)
 green:
         STACK_WIND (frame, posix_acl_opendir_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->opendir,
-                    loc, fd);
+                    loc, fd, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (opendir, frame, -1, EACCES, NULL);
+        STACK_UNWIND_STRICT (opendir, frame, -1, EACCES, NULL, xdata);
         return 0;
 }
 
@@ -1061,7 +1083,8 @@ red:
 int
 posix_acl_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int op_ret, int op_errno, inode_t *inode, struct iatt *buf,
-                     struct iatt *preparent, struct iatt *postparent)
+                     struct iatt *preparent, struct iatt *postparent,
+                     dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
@@ -1070,14 +1093,14 @@ posix_acl_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 unwind:
         STACK_UNWIND_STRICT (mkdir, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
 posix_acl_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
-                 dict_t *params)
+                 mode_t umask, dict_t *xdata)
 {
         mode_t   newmode = 0;
 
@@ -1087,14 +1110,15 @@ posix_acl_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         else
                 goto red;
 green:
-        newmode = posix_acl_inherit_dir (this, loc, params, mode);
+        newmode = posix_acl_inherit_dir (this, loc, xdata, mode, umask);
 
         STACK_WIND (frame, posix_acl_mkdir_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->mkdir,
-                    loc, newmode, params);
+                    loc, newmode, umask, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (mkdir, frame, -1, EACCES, NULL, NULL, NULL, NULL);
+        STACK_UNWIND_STRICT (mkdir, frame, -1, EACCES, NULL, NULL, NULL, NULL,
+                             NULL);
         return 0;
 }
 
@@ -1102,7 +1126,8 @@ red:
 int
 posix_acl_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int op_ret, int op_errno, inode_t *inode, struct iatt *buf,
-                     struct iatt *preparent, struct iatt *postparent)
+                     struct iatt *preparent, struct iatt *postparent,
+                     dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
@@ -1111,14 +1136,14 @@ posix_acl_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 unwind:
         STACK_UNWIND_STRICT (mknod, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
 posix_acl_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
-                 dev_t rdev, dict_t *params)
+                 dev_t rdev, mode_t umask, dict_t *xdata)
 {
         mode_t  newmode = 0;
 
@@ -1128,14 +1153,15 @@ posix_acl_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         else
                 goto red;
 green:
-        newmode = posix_acl_inherit_file (this, loc, params, mode);
+        newmode = posix_acl_inherit_file (this, loc, xdata, mode, umask);
 
         STACK_WIND (frame, posix_acl_mknod_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->mknod,
-                    loc, newmode, rdev, params);
+                    loc, newmode, rdev, umask, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (mknod, frame, -1, EACCES, NULL, NULL, NULL, NULL);
+        STACK_UNWIND_STRICT (mknod, frame, -1, EACCES, NULL, NULL, NULL, NULL,
+                             NULL);
         return 0;
 }
 
@@ -1144,7 +1170,7 @@ int
 posix_acl_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int op_ret, int op_errno, fd_t *fd, inode_t *inode,
                       struct iatt *buf, struct iatt *preparent,
-                      struct iatt *postparent)
+                      struct iatt *postparent, dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
@@ -1153,14 +1179,14 @@ posix_acl_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 unwind:
         STACK_UNWIND_STRICT (create, frame, op_ret, op_errno, fd, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
 posix_acl_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags,
-                  mode_t mode, fd_t *fd, dict_t *params)
+                  mode_t mode, mode_t umask, fd_t *fd, dict_t *xdata)
 {
         mode_t  newmode = 0;
 
@@ -1170,14 +1196,15 @@ posix_acl_create (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags,
         else
                 goto red;
 green:
-        newmode = posix_acl_inherit_file (this, loc, params, mode);
+        newmode = posix_acl_inherit_file (this, loc, xdata, mode, umask);
 
         STACK_WIND (frame, posix_acl_create_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->create,
-                    loc, flags, newmode, fd, params);
+                    loc, flags, newmode, umask, fd, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (create, frame, -1, EACCES, NULL, NULL, NULL, NULL, NULL);
+        STACK_UNWIND_STRICT (create, frame, -1, EACCES, NULL, NULL, NULL,
+                             NULL, NULL, NULL);
         return 0;
 }
 
@@ -1186,7 +1213,7 @@ int
 posix_acl_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int op_ret, int op_errno, inode_t *inode,
                       struct iatt *buf, struct iatt *preparent,
-                      struct iatt *postparent)
+                      struct iatt *postparent, dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
@@ -1195,14 +1222,14 @@ posix_acl_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 unwind:
         STACK_UNWIND_STRICT (symlink, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
 posix_acl_symlink (call_frame_t *frame, xlator_t *this, const char *linkname,
-                   loc_t *loc, dict_t *params)
+                   loc_t *loc, mode_t umask, dict_t *xdata)
 {
         if (acl_permits (frame, loc->parent, POSIX_ACL_WRITE|POSIX_ACL_EXECUTE))
                 goto green;
@@ -1211,30 +1238,32 @@ posix_acl_symlink (call_frame_t *frame, xlator_t *this, const char *linkname,
 green:
         STACK_WIND (frame, posix_acl_symlink_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->symlink,
-                    linkname, loc, params);
+                    linkname, loc, umask, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (symlink, frame, -1, EACCES, NULL, NULL, NULL, NULL);
+        STACK_UNWIND_STRICT (symlink, frame, -1, EACCES, NULL, NULL, NULL,
+                             NULL, xdata);
         return 0;
 }
 
 
 int
 posix_acl_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int op_ret, int op_errno,
-                      struct iatt *preparent, struct iatt *postparent)
+                      int op_ret, int op_errno, struct iatt *preparent,
+                      struct iatt *postparent, dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
 unwind:
         STACK_UNWIND_STRICT (unlink, frame, op_ret, op_errno,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
-posix_acl_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
+posix_acl_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
+                  dict_t *xdata)
 {
         if (!sticky_permits (frame, loc->parent, loc->inode))
                 goto red;
@@ -1246,10 +1275,10 @@ posix_acl_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
 green:
         STACK_WIND (frame, posix_acl_unlink_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->unlink,
-                    loc);
+                    loc, xflag, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (unlink, frame, -1, EACCES, NULL, NULL);
+        STACK_UNWIND_STRICT (unlink, frame, -1, EACCES, NULL, NULL, xdata);
         return 0;
 }
 
@@ -1257,19 +1286,19 @@ red:
 int
 posix_acl_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int op_ret, int op_errno,
-                     struct iatt *preparent, struct iatt *postparent)
+                     struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
 unwind:
         STACK_UNWIND_STRICT (rmdir, frame, op_ret, op_errno,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
-posix_acl_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags)
+posix_acl_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags, dict_t *xdata)
 {
         if (!sticky_permits (frame, loc->parent, loc->inode))
                 goto red;
@@ -1281,10 +1310,10 @@ posix_acl_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags)
 green:
         STACK_WIND (frame, posix_acl_rmdir_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->rmdir,
-                    loc, flags);
+                    loc, flags, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (rmdir, frame, -1, EACCES, NULL, NULL);
+        STACK_UNWIND_STRICT (rmdir, frame, -1, EACCES, NULL, NULL, xdata);
         return 0;
 }
 
@@ -1293,20 +1322,21 @@ int
 posix_acl_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int op_ret, int op_errno, struct iatt *buf,
                       struct iatt *preoldparent, struct iatt *postoldparent,
-                      struct iatt *prenewparent, struct iatt *postnewparent)
+                      struct iatt *prenewparent, struct iatt *postnewparent,
+                      dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
 unwind:
         STACK_UNWIND_STRICT (rename, frame, op_ret, op_errno, buf,
                              preoldparent, postoldparent,
-                             prenewparent, postnewparent);
+                             prenewparent, postnewparent, xdata);
         return 0;
 }
 
 
 int
-posix_acl_rename (call_frame_t *frame, xlator_t *this, loc_t *old, loc_t *new)
+posix_acl_rename (call_frame_t *frame, xlator_t *this, loc_t *old, loc_t *new, dict_t *xdata)
 {
         if (!acl_permits (frame, old->parent, POSIX_ACL_WRITE))
                 goto red;
@@ -1324,11 +1354,11 @@ posix_acl_rename (call_frame_t *frame, xlator_t *this, loc_t *old, loc_t *new)
 
         STACK_WIND (frame, posix_acl_rename_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->rename,
-                    old, new);
+                    old, new, xdata);
         return 0;
 red:
         STACK_UNWIND_STRICT (rename, frame, -1, EACCES, NULL, NULL, NULL, NULL,
-                             NULL);
+                             NULL, NULL);
         return 0;
 }
 
@@ -1336,19 +1366,19 @@ red:
 int
 posix_acl_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int op_ret, int op_errno, inode_t *inode, struct iatt *buf,
-                    struct iatt *preparent, struct iatt *postparent)
+                    struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
 unwind:
         STACK_UNWIND_STRICT (link, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
-posix_acl_link (call_frame_t *frame, xlator_t *this, loc_t *old, loc_t *new)
+posix_acl_link (call_frame_t *frame, xlator_t *this, loc_t *old, loc_t *new, dict_t *xdata)
 {
         struct posix_acl_ctx *ctx = NULL;
         int                   op_errno = 0;
@@ -1366,10 +1396,10 @@ posix_acl_link (call_frame_t *frame, xlator_t *this, loc_t *old, loc_t *new)
 
         STACK_WIND (frame, posix_acl_link_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->link,
-                    old, new);
+                    old, new, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (link, frame, -1, op_errno, NULL, NULL, NULL, NULL);
+        STACK_UNWIND_STRICT (link, frame, -1, op_errno, NULL, NULL, NULL, NULL, xdata);
 
         return 0;
 }
@@ -1377,19 +1407,20 @@ red:
 
 int
 posix_acl_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                       int op_ret, int op_errno, gf_dirent_t *entries)
+                       int op_ret, int op_errno, gf_dirent_t *entries,
+                       dict_t *xdata)
 {
         if (op_ret != 0)
                 goto unwind;
 unwind:
-        STACK_UNWIND_STRICT (readdir, frame, op_ret, op_errno, entries);
+        STACK_UNWIND_STRICT (readdir, frame, op_ret, op_errno, entries, xdata);
         return 0;
 }
 
 
 int
 posix_acl_readdir (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
-                   off_t offset)
+                   off_t offset, dict_t *xdata)
 {
         if (acl_permits (frame, fd->inode, POSIX_ACL_READ))
                 goto green;
@@ -1398,10 +1429,10 @@ posix_acl_readdir (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
 green:
         STACK_WIND (frame, posix_acl_readdir_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->readdir,
-                    fd, size, offset);
+                    fd, size, offset, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (readdir, frame, -1, EACCES, NULL);
+        STACK_UNWIND_STRICT (readdir, frame, -1, EACCES, NULL, xdata);
 
         return 0;
 }
@@ -1409,31 +1440,110 @@ red:
 
 int
 posix_acl_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, gf_dirent_t *entries)
+                        int op_ret, int op_errno, gf_dirent_t *entries,
+                        dict_t *xdata)
 {
-        if (op_ret != 0)
+        gf_dirent_t      *entry       = NULL;
+        struct posix_acl *acl_access  = NULL;
+        struct posix_acl *acl_default = NULL;
+        data_t           *data        = NULL;
+        int               ret         = 0;
+
+        if (op_ret <= 0)
                 goto unwind;
+
+        list_for_each_entry (entry, &entries->list, list) {
+                /* Update the inode ctx */
+                if (!entry->dict || !entry->inode)
+                        continue;
+
+                ret = posix_acl_get (entry->inode, this,
+                                     &acl_access, &acl_default);
+
+                data = dict_get (entry->dict, POSIX_ACL_ACCESS_XATTR);
+                if (!data)
+                        goto acl_default;
+
+                if (acl_access &&
+                    posix_acl_matches_xattr (this, acl_access, data->data,
+                                             data->len))
+                        goto acl_default;
+
+		if (acl_access)
+			posix_acl_unref(this, acl_access);
+
+                acl_access = posix_acl_from_xattr (this, data->data,
+                                                   data->len);
+
+        acl_default:
+                data = dict_get (entry->dict, POSIX_ACL_DEFAULT_XATTR);
+                if (!data)
+                        goto acl_set;
+
+                if (acl_default &&
+                    posix_acl_matches_xattr (this, acl_default, data->data,
+                                             data->len))
+                        goto acl_set;
+
+		if (acl_default)
+			posix_acl_unref(this, acl_default);
+
+                acl_default = posix_acl_from_xattr (this, data->data,
+                                                    data->len);
+
+        acl_set:
+                posix_acl_ctx_update (entry->inode, this, &entry->d_stat);
+
+                ret = posix_acl_set (entry->inode, this,
+                                     acl_access, acl_default);
+                if (ret)
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "failed to set ACL in context");
+
+		if (acl_access)
+			posix_acl_unref(this, acl_access);
+		if (acl_default)
+			posix_acl_unref(this, acl_default);
+        }
+
 unwind:
-        STACK_UNWIND_STRICT (readdirp, frame, op_ret, op_errno, entries);
+        STACK_UNWIND_STRICT (readdirp, frame, op_ret, op_errno, entries, xdata);
         return 0;
 }
 
 
 int
 posix_acl_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
-                   off_t offset)
+                    off_t offset, dict_t *dict)
 {
+        int ret = 0;
+
         if (acl_permits (frame, fd->inode, POSIX_ACL_READ))
                 goto green;
         else
                 goto red;
 green:
+        if (dict) {
+                ret = dict_set_int8 (dict, POSIX_ACL_ACCESS_XATTR, 0);
+                if (ret)
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "failed to set key %s",
+                                POSIX_ACL_ACCESS_XATTR);
+
+                ret = dict_set_int8 (dict, POSIX_ACL_DEFAULT_XATTR, 0);
+                if (ret)
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "failed to set key %s",
+                                POSIX_ACL_DEFAULT_XATTR);
+        }
+
         STACK_WIND (frame, posix_acl_readdirp_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->readdirp,
-                    fd, size, offset);
+                    fd, size, offset, dict);
+
         return 0;
 red:
-        STACK_UNWIND_STRICT (readdirp, frame, -1, EACCES, NULL);
+        STACK_UNWIND_STRICT (readdirp, frame, -1, EACCES, NULL, NULL);
 
         return 0;
 }
@@ -1503,7 +1613,7 @@ setattr_scrutiny (call_frame_t *frame, inode_t *inode, struct iatt *buf,
 int
 posix_acl_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                        int op_ret, int op_errno,
-                       struct iatt *prebuf, struct iatt *postbuf)
+                       struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
 {
         inode_t   *inode = NULL;
 
@@ -1516,14 +1626,15 @@ posix_acl_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         posix_acl_ctx_update (inode, this, postbuf);
 
 unwind:
-        STACK_UNWIND_STRICT (setattr, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (setattr, frame, op_ret, op_errno, prebuf,
+                             postbuf, xdata);
         return 0;
 }
 
 
 int
 posix_acl_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                   struct iatt *buf, int valid)
+                   struct iatt *buf, int valid, dict_t *xdata)
 {
         int  op_errno = 0;
 
@@ -1536,10 +1647,10 @@ posix_acl_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         STACK_WIND (frame, posix_acl_setattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->setattr,
-                    loc, buf, valid);
+                    loc, buf, valid, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (setattr, frame, -1, op_errno, NULL, NULL);
+        STACK_UNWIND_STRICT (setattr, frame, -1, op_errno, NULL, NULL, xdata);
 
         return 0;
 }
@@ -1548,7 +1659,7 @@ red:
 int
 posix_acl_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         int op_ret, int op_errno,
-                        struct iatt *prebuf, struct iatt *postbuf)
+                        struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
 {
         inode_t   *inode = NULL;
 
@@ -1561,14 +1672,15 @@ posix_acl_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         posix_acl_ctx_update (inode, this, postbuf);
 
 unwind:
-        STACK_UNWIND_STRICT (fsetattr, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (fsetattr, frame, op_ret, op_errno, prebuf,
+                             postbuf, xdata);
         return 0;
 }
 
 
 int
 posix_acl_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                    struct iatt *buf, int valid)
+                    struct iatt *buf, int valid, dict_t *xdata)
 {
         int  op_errno = 0;
 
@@ -1581,10 +1693,10 @@ posix_acl_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         STACK_WIND (frame, posix_acl_fsetattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->fsetattr,
-                    fd, buf, valid);
+                    fd, buf, valid, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (fsetattr, frame, -1, EACCES, NULL, NULL);
+        STACK_UNWIND_STRICT (fsetattr, frame, -1, EACCES, NULL, NULL, xdata);
 
         return 0;
 }
@@ -1687,9 +1799,9 @@ posix_acl_setxattr_update (xlator_t *this, inode_t *inode, dict_t *xattr)
 
 int
 posix_acl_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno)
+                        int op_ret, int op_errno, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (setxattr, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (setxattr, frame, op_ret, op_errno, xdata);
 
         return 0;
 }
@@ -1697,7 +1809,7 @@ posix_acl_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 posix_acl_setxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                    dict_t *xattr, int flags)
+                    dict_t *xattr, int flags, dict_t *xdata)
 {
         int  op_errno = 0;
 
@@ -1710,10 +1822,10 @@ posix_acl_setxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         STACK_WIND (frame, posix_acl_setxattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->setxattr,
-                    loc, xattr, flags);
+                    loc, xattr, flags, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (setxattr, frame, -1, op_errno);
+        STACK_UNWIND_STRICT (setxattr, frame, -1, op_errno, xdata);
 
         return 0;
 }
@@ -1721,9 +1833,9 @@ red:
 
 int
 posix_acl_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                         int op_ret, int op_errno)
+                         int op_ret, int op_errno, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (fsetxattr, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (fsetxattr, frame, op_ret, op_errno, xdata);
 
         return 0;
 }
@@ -1731,7 +1843,7 @@ posix_acl_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 posix_acl_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                     dict_t *xattr, int flags)
+                     dict_t *xattr, int flags, dict_t *xdata)
 {
         int  op_errno = 0;
 
@@ -1744,10 +1856,10 @@ posix_acl_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         STACK_WIND (frame, posix_acl_fsetxattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->fsetxattr,
-                    fd, xattr, flags);
+                    fd, xattr, flags, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (fsetxattr, frame, -1, op_errno);
+        STACK_UNWIND_STRICT (fsetxattr, frame, -1, op_errno, xdata);
 
         return 0;
 }
@@ -1755,9 +1867,9 @@ red:
 
 int
 posix_acl_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, dict_t *xattr)
+                        int op_ret, int op_errno, dict_t *xattr, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, xattr);
+        STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, xattr, xdata);
 
         return 0;
 }
@@ -1765,7 +1877,7 @@ posix_acl_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 posix_acl_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                    const char *name)
+                    const char *name, dict_t *xdata)
 {
         if (whitelisted_xattr (name))
                 goto green;
@@ -1777,10 +1889,10 @@ posix_acl_getxattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 green:
         STACK_WIND (frame, posix_acl_getxattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->getxattr,
-                    loc, name);
+                    loc, name, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (getxattr, frame, -1, EACCES, NULL);
+        STACK_UNWIND_STRICT (getxattr, frame, -1, EACCES, NULL, xdata);
 
         return 0;
 }
@@ -1788,9 +1900,9 @@ red:
 
 int
 posix_acl_fgetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                         int op_ret, int op_errno, dict_t *xattr)
+                         int op_ret, int op_errno, dict_t *xattr, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (fgetxattr, frame, op_ret, op_errno, xattr);
+        STACK_UNWIND_STRICT (fgetxattr, frame, op_ret, op_errno, xattr, xdata);
 
         return 0;
 }
@@ -1798,7 +1910,7 @@ posix_acl_fgetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 posix_acl_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                     const char *name)
+                     const char *name, dict_t *xdata)
 {
         if (whitelisted_xattr (name))
                 goto green;
@@ -1810,10 +1922,10 @@ posix_acl_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
 green:
         STACK_WIND (frame, posix_acl_fgetxattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->fgetxattr,
-                    fd, name);
+                    fd, name, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (fgetxattr, frame, -1, EACCES, NULL);
+        STACK_UNWIND_STRICT (fgetxattr, frame, -1, EACCES, NULL, xdata);
 
         return 0;
 }
@@ -1821,9 +1933,9 @@ red:
 
 int
 posix_acl_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                           int op_ret, int op_errno)
+                           int op_ret, int op_errno, dict_t *xdata)
 {
-        STACK_UNWIND_STRICT (removexattr, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (removexattr, frame, op_ret, op_errno, xdata);
 
         return 0;
 }
@@ -1831,7 +1943,7 @@ posix_acl_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 posix_acl_removexattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                       const char *name)
+                       const char *name, dict_t *xdata)
 {
         struct  posix_acl_ctx  *ctx = NULL;
         int                     op_errno = EACCES;
@@ -1859,10 +1971,10 @@ posix_acl_removexattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 green:
         STACK_WIND (frame, posix_acl_removexattr_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->removexattr,
-                    loc, name);
+                    loc, name, xdata);
         return 0;
 red:
-        STACK_UNWIND_STRICT (removexattr, frame, -1, op_errno);
+        STACK_UNWIND_STRICT (removexattr, frame, -1, op_errno, xdata);
 
         return 0;
 }
@@ -1944,6 +2056,28 @@ err:
 int
 fini (xlator_t *this)
 {
+        struct posix_acl_conf   *conf = NULL;
+        struct posix_acl        *minacl = NULL;
+
+        conf = this->private;
+        if (!conf)
+                return 0;
+        this->private = NULL;
+
+        minacl = conf->minimal_acl;
+
+        LOCK (&conf->acl_lock);
+        {
+                conf->minimal_acl = NULL;
+        }
+        UNLOCK (&conf->acl_lock);
+
+        LOCK_DESTROY (&conf->acl_lock);
+
+        GF_FREE (minacl);
+
+        GF_FREE (conf);
+
         return 0;
 }
 

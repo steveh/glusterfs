@@ -1,21 +1,12 @@
-/*Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+/*
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -152,7 +143,7 @@ mq_assign_lk_owner (xlator_t *this, call_frame_t *frame)
         }
         UNLOCK (&conf->lock);
 
-        frame->root->lk_owner = lk_owner;
+        set_lk_owner_from_uint64 (&frame->root->lk_owner, lk_owner);
 
         return;
 }
@@ -179,6 +170,7 @@ mq_loc_fill_from_name (xlator_t *this, loc_t *newloc, loc_t *oldloc,
         }
 
         newloc->parent = inode_ref (oldloc->inode);
+        uuid_copy (newloc->pargfid, oldloc->inode->gfid);
 
         len = strlen (oldloc->path);
 
@@ -207,7 +199,7 @@ out:
 
 int32_t
 mq_dirty_inode_updation_done (call_frame_t *frame, void *cookie, xlator_t *this,
-                              int32_t op_ret, int32_t op_errno)
+                              int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         QUOTA_STACK_DESTROY (frame, this);
 
@@ -216,7 +208,7 @@ mq_dirty_inode_updation_done (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int32_t
 mq_release_lock_on_dirty_inode (call_frame_t *frame, void *cookie, xlator_t *this,
-                                int32_t op_ret, int32_t op_errno)
+                                int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         struct gf_flock   lock  = {0, };
         quota_local_t    *local = NULL;
@@ -228,7 +220,7 @@ mq_release_lock_on_dirty_inode (call_frame_t *frame, void *cookie, xlator_t *thi
         if (op_ret == -1) {
                 local->err = -1;
 
-                mq_dirty_inode_updation_done (frame, NULL, this, 0, 0);
+                mq_dirty_inode_updation_done (frame, NULL, this, 0, 0, NULL);
 
                 return 0;
         }
@@ -246,7 +238,7 @@ mq_release_lock_on_dirty_inode (call_frame_t *frame, void *cookie, xlator_t *thi
 	if (ret == -1) {
                 local->err = -1;
                 frame->local = NULL;
-                mq_dirty_inode_updation_done (frame, NULL, this, 0, 0);
+                mq_dirty_inode_updation_done (frame, NULL, this, 0, 0, NULL);
                 return 0;
         }
 
@@ -260,20 +252,21 @@ mq_release_lock_on_dirty_inode (call_frame_t *frame, void *cookie, xlator_t *thi
                     mq_dirty_inode_updation_done,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
-                    this->name, &loc, F_SETLKW, &lock);
+                    this->name, &loc, F_SETLKW, &lock, NULL);
 
         loc_wipe (&loc);
 
         return 0;
 out:
-        mq_dirty_inode_updation_done (frame, NULL, this, -1, 0);
+        mq_dirty_inode_updation_done (frame, NULL, this, -1, 0, NULL);
 
         return 0;
 }
 
 int32_t
 mq_mark_inode_undirty (call_frame_t *frame, void *cookie, xlator_t *this,
-                       int32_t op_ret, int32_t op_errno, dict_t *dict)
+                       int32_t op_ret, int32_t op_errno, dict_t *dict,
+                       dict_t *xdata)
 {
         int32_t        ret     = -1;
         int64_t       *size    = NULL;
@@ -307,17 +300,21 @@ wind:
         if (ret)
                 goto err;
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, local->loc.inode->gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
         STACK_WIND (frame, mq_release_lock_on_dirty_inode,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setxattr,
-                    &local->loc, newdict, 0);
+                    &local->loc, newdict, 0, NULL);
         ret = 0;
 
 err:
         if (op_ret == -1 || ret == -1) {
                 local->err = -1;
 
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
         }
 
         if (newdict)
@@ -373,9 +370,14 @@ mq_update_size_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
         if (ret)
                 goto err;
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, buf->ia_gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
+
         STACK_WIND (frame, mq_mark_inode_undirty, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->xattrop, &local->loc,
-                    GF_XATTROP_ADD_ARRAY64, new_dict);
+                    GF_XATTROP_ADD_ARRAY64, new_dict, NULL);
 
         ret = 0;
 
@@ -383,7 +385,7 @@ err:
         if (op_ret == -1 || ret == -1) {
                 local->err = -1;
 
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
         }
 
         if (new_dict)
@@ -434,6 +436,11 @@ mq_get_dirty_inode_size (call_frame_t *frame, xlator_t *this)
         if (ret)
                 goto err;
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, local->loc.inode->gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
+
         STACK_WIND (frame, mq_update_size_xattr, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->lookup, &local->loc, dict);
         ret =0;
@@ -442,7 +449,7 @@ err:
         if (ret) {
                 local->err = -1;
 
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
         }
 
         if (dict)
@@ -480,7 +487,8 @@ mq_get_child_contribution (call_frame_t *frame,
                 val = -2;
                 if (!mq_test_and_set_local_err (local, &val) &&
                     val != -2)
-                        mq_release_lock_on_dirty_inode (local->frame, NULL, this, 0, 0);
+                        mq_release_lock_on_dirty_inode (local->frame, NULL,
+                                                        this, 0, 0, NULL);
 
                 goto exit;
         }
@@ -508,7 +516,7 @@ out:
 
         if (val == 0) {
                 mq_dirty_inode_readdir (local->frame, NULL, this,
-                                                   0, 0, NULL);
+                                        0, 0, NULL, NULL);
         }
         mq_local_unref (this, local);
 
@@ -524,7 +532,7 @@ mq_readdir_cbk (call_frame_t *frame,
                 xlator_t *this,
                 int32_t op_ret,
                 int32_t op_errno,
-                gf_dirent_t *entries)
+                gf_dirent_t *entries, dict_t *xdata)
 {
         char           contri_key [512]   = {0, };
         int32_t        ret                = 0;
@@ -544,7 +552,7 @@ mq_readdir_cbk (call_frame_t *frame,
                         "readdir failed %s", strerror (op_errno));
                 local->err = -1;
 
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
 
                 goto end;
         } else if (op_ret == 0) {
@@ -666,7 +674,7 @@ mq_readdir_cbk (call_frame_t *frame,
         }
 
         if (ret && val != -2) {
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
         }
 end:
         mq_local_unref (this, local);
@@ -680,7 +688,7 @@ mq_dirty_inode_readdir (call_frame_t *frame,
                         xlator_t *this,
                         int32_t op_ret,
                         int32_t op_errno,
-                        fd_t *fd)
+                        fd_t *fd, dict_t *xdata)
 {
         quota_local_t *local = NULL;
 
@@ -688,7 +696,7 @@ mq_dirty_inode_readdir (call_frame_t *frame,
 
         if (op_ret == -1) {
                 local->err = -1;
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
                 return 0;
         }
 
@@ -699,7 +707,7 @@ mq_dirty_inode_readdir (call_frame_t *frame,
                     mq_readdir_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->readdir,
-                    local->fd, READDIR_BUF, local->d_off);
+                    local->fd, READDIR_BUF, local->d_off, xdata);
 
         return 0;
 }
@@ -739,7 +747,7 @@ mq_check_if_still_dirty (call_frame_t *frame,
 
         //the inode is not dirty anymore
         if (dirty == 0) {
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
 
                 return 0;
         }
@@ -748,18 +756,22 @@ mq_check_if_still_dirty (call_frame_t *frame,
 
         local->d_off = 0;
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, buf->ia_gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
         STACK_WIND(frame,
                    mq_dirty_inode_readdir,
                    FIRST_CHILD(this),
                    FIRST_CHILD(this)->fops->opendir,
-                   &local->loc, fd);
+                   &local->loc, fd, NULL);
 
         ret = 0;
 
 err:
         if (op_ret == -1 || ret == -1) {
                 local->err = -1;
-                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode (frame, NULL, this, 0, 0, NULL);
         }
 
         if (fd != NULL) {
@@ -770,15 +782,15 @@ err:
 }
 
 int32_t
-mq_get_dirty_xattr (call_frame_t *frame, void *cookie,
-                    xlator_t *this, int32_t op_ret, int32_t op_errno)
+mq_get_dirty_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         int32_t        ret       = -1;
         dict_t        *xattr_req = NULL;
         quota_local_t *local     = NULL;
 
         if (op_ret == -1) {
-                mq_dirty_inode_updation_done (frame, NULL, this, 0, 0);
+                mq_dirty_inode_updation_done (frame, NULL, this, 0, 0, NULL);
                 return 0;
         }
 
@@ -794,6 +806,11 @@ mq_get_dirty_xattr (call_frame_t *frame, void *cookie,
         if (ret)
                 goto err;
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, local->loc.inode->gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
+
         STACK_WIND (frame,
                     mq_check_if_still_dirty,
                     FIRST_CHILD(this),
@@ -805,7 +822,7 @@ mq_get_dirty_xattr (call_frame_t *frame, void *cookie,
 err:
         if (ret) {
                 local->err = -1;
-                mq_release_lock_on_dirty_inode(frame, NULL, this, 0, 0);
+                mq_release_lock_on_dirty_inode(frame, NULL, this, 0, 0, NULL);
         }
 
         if (xattr_req)
@@ -872,7 +889,7 @@ mq_update_dirty_inode (xlator_t *this,
                     mq_get_dirty_xattr,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
-                    this->name, &local->loc, F_SETLKW, &lock);
+                    this->name, &local->loc, F_SETLKW, &lock, NULL);
         return 1;
 
 fr_destroy:
@@ -885,7 +902,7 @@ out:
 
 int32_t
 mq_inode_creation_done (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int32_t op_ret, int32_t op_errno)
+                        int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         quota_local_t *local = NULL;
 
@@ -907,7 +924,7 @@ mq_inode_creation_done (call_frame_t *frame, void *cookie, xlator_t *this,
 int32_t
 mq_xattr_creation_release_lock (call_frame_t *frame, void *cookie,
                                 xlator_t *this, int32_t op_ret,
-                                int32_t op_errno)
+                                int32_t op_errno, dict_t *xdata)
 {
         struct gf_flock  lock  = {0, };
         quota_local_t   *local = NULL;
@@ -925,7 +942,7 @@ mq_xattr_creation_release_lock (call_frame_t *frame, void *cookie,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
                     this->name, &local->loc,
-                    F_SETLKW, &lock);
+                    F_SETLKW, &lock, NULL);
 
         return 0;
 }
@@ -933,7 +950,8 @@ mq_xattr_creation_release_lock (call_frame_t *frame, void *cookie,
 
 int32_t
 mq_create_dirty_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
-                       int32_t op_ret, int32_t op_errno, dict_t *dict)
+                       int32_t op_ret, int32_t op_errno, dict_t *dict,
+                       dict_t *xdata)
 {
         int32_t          ret       = -1;
         dict_t          *newdict   = NULL;
@@ -956,19 +974,22 @@ mq_create_dirty_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
                         goto err;
                 }
 
+                uuid_copy (local->loc.gfid, local->loc.inode->gfid);
+                GF_UUID_ASSERT (local->loc.gfid);
+
                 STACK_WIND (frame, mq_xattr_creation_release_lock,
                             FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->setxattr,
-                            &local->loc, newdict, 0);
+                            &local->loc, newdict, 0, NULL);
         } else {
-                mq_xattr_creation_release_lock (frame, NULL, this, 0, 0);
+                mq_xattr_creation_release_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         ret = 0;
 
 err:
         if (ret < 0) {
-                mq_xattr_creation_release_lock (frame, NULL, this, 0, 0);
+                mq_xattr_creation_release_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         if (newdict != NULL)
@@ -1030,9 +1051,11 @@ mq_create_xattr (xlator_t *this, call_frame_t *frame)
                         goto free_value;
         }
 
+        GF_UUID_ASSERT (local->loc.gfid);
+
         STACK_WIND (frame, mq_create_dirty_xattr, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->xattrop, &local->loc,
-                    GF_XATTROP_ADD_ARRAY64, dict);
+                    GF_XATTROP_ADD_ARRAY64, dict, NULL);
         ret = 0;
 
 free_size:
@@ -1050,7 +1073,7 @@ err:
 
 out:
         if (ret < 0) {
-                mq_xattr_creation_release_lock (frame, NULL, this, 0, 0);
+                mq_xattr_creation_release_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         return 0;
@@ -1095,10 +1118,14 @@ mq_check_n_set_inode_xattr (call_frame_t *frame, void *cookie,
         }
 
 out:
-        mq_xattr_creation_release_lock (frame, NULL, this, 0, 0);
+        mq_xattr_creation_release_lock (frame, NULL, this, 0, 0, NULL);
         return 0;
 
 create_xattr:
+        if (uuid_is_null (local->loc.gfid)) {
+                uuid_copy (local->loc.gfid, buf->ia_gfid);
+        }
+
         mq_create_xattr (this, frame);
         return 0;
 }
@@ -1106,7 +1133,7 @@ create_xattr:
 
 int32_t
 mq_get_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
-              int32_t op_ret, int32_t op_errno)
+              int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         dict_t        *xattr_req = NULL;
         quota_local_t *local     = NULL;
@@ -1129,6 +1156,11 @@ mq_get_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
                 goto err;
         }
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, local->loc.inode->gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
+
         STACK_WIND (frame, mq_check_n_set_inode_xattr, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->lookup, &local->loc, xattr_req);
 
@@ -1137,14 +1169,14 @@ mq_get_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
         return 0;
 
 err:
-        mq_xattr_creation_release_lock (frame, NULL, this, 0, 0);
+        mq_xattr_creation_release_lock (frame, NULL, this, 0, 0, NULL);
 
         if (xattr_req)
                 dict_unref (xattr_req);
         return 0;
 
 lock_err:
-        mq_inode_creation_done (frame, NULL, this, 0, 0);
+        mq_inode_creation_done (frame, NULL, this, 0, 0, NULL);
         return 0;
 }
 
@@ -1186,7 +1218,7 @@ mq_set_inode_xattr (xlator_t *this, loc_t *loc)
                     mq_get_xattr,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
-                    this->name, &local->loc, F_SETLKW, &lock);
+                    this->name, &local->loc, F_SETLKW, &lock, NULL);
 
         return 0;
 
@@ -1259,7 +1291,7 @@ mq_xattr_updation_done (call_frame_t *frame,
                         xlator_t *this,
                         int32_t op_ret,
                         int32_t op_errno,
-                        dict_t *dict)
+                        dict_t *dict, dict_t *xdata)
 {
         QUOTA_STACK_DESTROY (frame, this);
         return 0;
@@ -1268,7 +1300,7 @@ mq_xattr_updation_done (call_frame_t *frame,
 
 int32_t
 mq_inodelk_cbk (call_frame_t *frame, void *cookie,
-                xlator_t *this, int32_t op_ret, int32_t op_errno)
+                xlator_t *this, int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         int32_t         ret    = 0;
         gf_boolean_t    status = _gf_false;
@@ -1282,7 +1314,7 @@ mq_inodelk_cbk (call_frame_t *frame, void *cookie,
                                 "unlocking failed on path (%s)(%s)",
                                 local->parent_loc.path, strerror (op_errno));
                 }
-                mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL);
+                mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL, NULL);
 
                 return 0;
         }
@@ -1292,11 +1324,12 @@ mq_inodelk_cbk (call_frame_t *frame, void *cookie,
 
         if ((strcmp (local->parent_loc.path, "/") == 0)
             || (local->delta == 0)) {
-                mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL);
+                mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL, NULL);
         } else {
                 ret = mq_get_parent_inode_local (this, local);
                 if (ret < 0) {
-                        mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL);
+                        mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL,
+                                                NULL);
                         goto out;
                 }
                 status = _gf_true;
@@ -1305,7 +1338,8 @@ mq_inodelk_cbk (call_frame_t *frame, void *cookie,
                 if (ret == 0 && status == _gf_false) {
                         mq_get_lock_on_parent (frame, this);
                 } else {
-                        mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL);
+                        mq_xattr_updation_done (frame, NULL, this, 0, 0, NULL,
+                                                NULL);
                 }
         }
 out:
@@ -1317,7 +1351,7 @@ out:
 int32_t
 mq_release_parent_lock (call_frame_t *frame, void *cookie,
                         xlator_t *this, int32_t op_ret,
-                        int32_t op_errno)
+                        int32_t op_errno, dict_t *xdata)
 {
         int32_t            ret      = 0;
         quota_local_t     *local    = NULL;
@@ -1346,7 +1380,7 @@ mq_release_parent_lock (call_frame_t *frame, void *cookie,
         UNLOCK (&ctx->lock);
 
         if (local->parent_loc.inode == NULL) {
-                gf_log (this->name, GF_LOG_WARNING,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "Invalid parent inode.");
                 goto err;
         }
@@ -1363,12 +1397,12 @@ wind:
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
                     this->name, &local->parent_loc,
-                    F_SETLKW, &lock);
+                    F_SETLKW, &lock, NULL);
 
         return 0;
 err:
         mq_xattr_updation_done (frame, NULL, this,
-                             0, 0 , NULL);
+                                0, 0 , NULL, NULL);
         return 0;
 }
 
@@ -1379,7 +1413,7 @@ mq_mark_undirty (call_frame_t *frame,
                  xlator_t *this,
                  int32_t op_ret,
                  int32_t op_errno,
-                 dict_t *dict)
+                 dict_t *dict, dict_t *xdata)
 {
         int32_t            ret          = -1;
         int64_t           *size         = NULL;
@@ -1434,17 +1468,20 @@ mq_mark_undirty (call_frame_t *frame,
                 goto err;
         }
 
+        uuid_copy (local->parent_loc.gfid, local->parent_loc.inode->gfid);
+        GF_UUID_ASSERT (local->parent_loc.gfid);
+
         STACK_WIND (frame, mq_release_parent_lock,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setxattr,
-                    &local->parent_loc, newdict, 0);
+                    &local->parent_loc, newdict, 0, NULL);
 
         ret = 0;
 err:
         if (op_ret == -1 || ret == -1) {
                 local->err = op_errno;
 
-                mq_release_parent_lock (frame, NULL, this, 0, 0);
+                mq_release_parent_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         if (newdict)
@@ -1460,7 +1497,7 @@ mq_update_parent_size (call_frame_t *frame,
                        xlator_t *this,
                        int32_t op_ret,
                        int32_t op_errno,
-                       dict_t *dict)
+                       dict_t *dict, dict_t *xdata)
 {
         int64_t             *size       = NULL;
         int32_t              ret        = -1;
@@ -1516,18 +1553,23 @@ mq_update_parent_size (call_frame_t *frame,
                 goto err;
         }
 
+        if (uuid_is_null (local->parent_loc.gfid))
+                        uuid_copy (local->parent_loc.gfid,
+                                   local->parent_loc.inode->gfid);
+        GF_UUID_ASSERT (local->parent_loc.gfid);
+
         STACK_WIND (frame,
                     mq_mark_undirty,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->xattrop,
                     &local->parent_loc,
                     GF_XATTROP_ADD_ARRAY64,
-                    newdict);
+                    newdict, NULL);
         ret = 0;
 err:
         if (op_ret == -1 || ret < 0) {
                 local->err = op_errno;
-                mq_release_parent_lock (frame, NULL, this, 0, 0);
+                mq_release_parent_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         if (newdict)
@@ -1615,7 +1657,7 @@ unlock:
         local->delta = size_int - contri_int;
 
         if (local->delta == 0) {
-                mq_mark_undirty (frame, NULL, this, 0, 0, NULL);
+                mq_mark_undirty (frame, NULL, this, 0, 0, NULL, NULL);
                 return 0;
         }
 
@@ -1637,20 +1679,25 @@ unlock:
                 goto err;
         }
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, buf->ia_gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
+
         STACK_WIND (frame,
                     mq_update_parent_size,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->xattrop,
                     &local->loc,
                     GF_XATTROP_ADD_ARRAY64,
-                    newdict);
+                    newdict, NULL);
         ret = 0;
 
 err:
         if (op_ret == -1 || ret < 0) {
                 local->err = op_errno;
 
-                mq_release_parent_lock (frame, NULL, this, 0, 0);
+                mq_release_parent_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         if (newdict)
@@ -1662,7 +1709,7 @@ err:
 int32_t
 mq_fetch_child_size_and_contri (call_frame_t *frame, void *cookie,
                                 xlator_t *this, int32_t op_ret,
-                                int32_t op_errno)
+                                int32_t op_errno, dict_t *xdata)
 {
         int32_t            ret              = -1;
         char               contri_key [512] = {0, };
@@ -1728,6 +1775,11 @@ mq_fetch_child_size_and_contri (call_frame_t *frame, void *cookie,
 
         mq_set_ctx_updation_status (local->ctx, _gf_false);
 
+        if (uuid_is_null (local->loc.gfid))
+                uuid_copy (local->loc.gfid, local->loc.inode->gfid);
+
+        GF_UUID_ASSERT (local->loc.gfid);
+
         STACK_WIND (frame, mq_update_inode_contribution, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->lookup, &local->loc, newdict);
 
@@ -1739,7 +1791,7 @@ err:
 
                 mq_set_ctx_updation_status (local->ctx, _gf_false);
 
-                mq_release_parent_lock (frame, NULL, this, 0, 0);
+                mq_release_parent_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         if (newdict)
@@ -1750,7 +1802,7 @@ err:
 
 int32_t
 mq_markdirty (call_frame_t *frame, void *cookie,
-              xlator_t *this, int32_t op_ret, int32_t op_errno)
+              xlator_t *this, int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         int32_t        ret      = -1;
         dict_t        *dict     = NULL;
@@ -1767,7 +1819,7 @@ mq_markdirty (call_frame_t *frame, void *cookie,
 
                 mq_set_ctx_updation_status (local->ctx, _gf_false);
 
-                mq_inodelk_cbk (frame, NULL, this, 0, 0);
+                mq_inodelk_cbk (frame, NULL, this, 0, 0, NULL);
 
                 return 0;
         }
@@ -1785,10 +1837,14 @@ mq_markdirty (call_frame_t *frame, void *cookie,
         if (ret == -1)
                 goto err;
 
+        uuid_copy (local->parent_loc.gfid,
+                   local->parent_loc.inode->gfid);
+        GF_UUID_ASSERT (local->parent_loc.gfid);
+
         STACK_WIND (frame, mq_fetch_child_size_and_contri,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setxattr,
-                    &local->parent_loc, dict, 0);
+                    &local->parent_loc, dict, 0, NULL);
 
         ret = 0;
 err:
@@ -1797,7 +1853,7 @@ err:
 
                 mq_set_ctx_updation_status (local->ctx, _gf_false);
 
-                mq_release_parent_lock (frame, NULL, this, 0, 0);
+                mq_release_parent_lock (frame, NULL, this, 0, 0, NULL);
         }
 
         if (dict)
@@ -1835,7 +1891,7 @@ mq_get_lock_on_parent (call_frame_t *frame, xlator_t *this)
                     mq_markdirty,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
-                    this->name, &local->parent_loc, F_SETLKW, &lock);
+                    this->name, &local->parent_loc, F_SETLKW, &lock, NULL);
 
         return 0;
 
@@ -1978,8 +2034,9 @@ mq_inspect_directory_xattr (xlator_t *this,
         if (strcmp (loc->path, "/") != 0) {
                 contribution = mq_add_new_contribution_node (this, ctx, loc);
                 if (contribution == NULL) {
-                        gf_log (this->name, GF_LOG_WARNING,
-                                "cannot add a new contribution node");
+                        if (!uuid_is_null (loc->inode->gfid))
+                                gf_log (this->name, GF_LOG_WARNING,
+                                        "cannot add a new contribution node");
                         ret = -1;
                         goto err;
                 }
@@ -2129,8 +2186,10 @@ mq_req_xattr (xlator_t *this,
         int32_t               ret       = -1;
 
         GF_VALIDATE_OR_GOTO ("marker", this, out);
-        GF_VALIDATE_OR_GOTO ("marker", loc, out);
         GF_VALIDATE_OR_GOTO ("marker", dict, out);
+
+        if (!loc)
+                goto set_size;
 
         //if not "/" then request contribution
         if (strcmp (loc->path, "/") == 0)
@@ -2162,7 +2221,7 @@ out:
 
 int32_t
 mq_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         QUOTA_STACK_DESTROY (frame, this);
 
@@ -2171,7 +2230,7 @@ mq_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int32_t
 _mq_inode_remove_done (call_frame_t *frame, void *cookie, xlator_t *this,
-                       int32_t op_ret, int32_t op_errno)
+                       int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         int32_t        ret                = 0;
         char           contri_key [512]   = {0, };
@@ -2180,7 +2239,7 @@ _mq_inode_remove_done (call_frame_t *frame, void *cookie, xlator_t *this,
         local = (quota_local_t *) frame->local;
 
         if (op_ret == -1 || local->err == -1) {
-                mq_removexattr_cbk (frame, NULL, this, -1, 0);
+                mq_removexattr_cbk (frame, NULL, this, -1, 0, NULL);
                 return 0;
         }
 
@@ -2191,10 +2250,10 @@ _mq_inode_remove_done (call_frame_t *frame, void *cookie, xlator_t *this,
 
                 STACK_WIND (frame, mq_removexattr_cbk, FIRST_CHILD(this),
                             FIRST_CHILD(this)->fops->removexattr,
-                            &local->loc, contri_key);
+                            &local->loc, contri_key, NULL);
                 ret = 0;
         } else {
-                mq_removexattr_cbk (frame, NULL, this, 0, 0);
+                mq_removexattr_cbk (frame, NULL, this, 0, 0, NULL);
         }
 
         if (strcmp (local->parent_loc.path, "/") != 0) {
@@ -2212,7 +2271,8 @@ out:
 
 int32_t
 mq_inode_remove_done (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int32_t op_ret, int32_t op_errno, dict_t *dict)
+                      int32_t op_ret, int32_t op_errno, dict_t *dict,
+                      dict_t *xdata)
 {
         int32_t            ret   = -1;
         struct gf_flock    lock  = {0, };
@@ -2259,13 +2319,13 @@ mq_inode_remove_done (call_frame_t *frame, void *cookie, xlator_t *this,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
                     this->name, &local->parent_loc,
-                    F_SETLKW, &lock);
+                    F_SETLKW, &lock, NULL);
         return 0;
 }
 
 int32_t
-mq_reduce_parent_size_xattr (call_frame_t *frame, void *cookie,
-                             xlator_t *this, int32_t op_ret, int32_t op_errno)
+mq_reduce_parent_size_xattr (call_frame_t *frame, void *cookie, xlator_t *this,
+                             int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         int32_t                  ret               = -1;
         int64_t                 *size              = NULL;
@@ -2296,16 +2356,19 @@ mq_reduce_parent_size_xattr (call_frame_t *frame, void *cookie,
         if (ret < 0)
                 goto err;
 
+        uuid_copy (local->parent_loc.gfid,
+                   local->parent_loc.inode->gfid);
+        GF_UUID_ASSERT (local->parent_loc.gfid);
 
         STACK_WIND (frame, mq_inode_remove_done, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->xattrop, &local->parent_loc,
-                    GF_XATTROP_ADD_ARRAY64, dict);
+                    GF_XATTROP_ADD_ARRAY64, dict, NULL);
         dict_unref (dict);
         return 0;
 
 err:
         local->err = 1;
-        mq_inode_remove_done (frame, NULL, this, -1, 0, NULL);
+        mq_inode_remove_done (frame, NULL, this, -1, 0, NULL, NULL);
         if (dict)
                 dict_unref (dict);
         return 0;
@@ -2381,7 +2444,7 @@ mq_reduce_parent_size (xlator_t *this, loc_t *loc, int64_t contri)
 
         if (local->parent_loc.inode == NULL) {
                 ret = -1;
-                gf_log (this->name, GF_LOG_WARNING,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "Inode is NULL, so can't stackwind.");
                 goto out;
         }
@@ -2390,7 +2453,7 @@ mq_reduce_parent_size (xlator_t *this, loc_t *loc, int64_t contri)
                     mq_reduce_parent_size_xattr,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->inodelk,
-                    this->name, &local->parent_loc, F_SETLKW, &lock);
+                    this->name, &local->parent_loc, F_SETLKW, &lock, NULL);
         local = NULL;
         ret = 0;
 

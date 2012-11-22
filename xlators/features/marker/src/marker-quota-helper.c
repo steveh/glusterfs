@@ -1,21 +1,12 @@
-/*Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+/*
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -168,8 +159,20 @@ __mq_add_new_contribution_node (xlator_t *this, quota_inode_ctx_t *ctx, loc_t *l
         int32_t ret = 0;
         inode_contribution_t *contribution = NULL;
 
+        if (!loc->parent) {
+                if (!uuid_is_null (loc->pargfid))
+                        loc->parent = inode_find (loc->inode->table,
+                                                  loc->pargfid);
+                if (!loc->parent)
+                        loc->parent = inode_parent (loc->inode, loc->pargfid,
+                                                    loc->name);
+                if (!loc->parent)
+                        goto out;
+        }
+
         list_for_each_entry (contribution, &ctx->contribution_head, contri_list) {
-                if (uuid_compare (contribution->gfid, loc->parent->gfid) == 0) {
+                if (loc->parent &&
+                     uuid_compare (contribution->gfid, loc->parent->gfid) == 0) {
                         goto out;
                 }
         }
@@ -223,6 +226,7 @@ mq_dict_set_contribution (xlator_t *this, dict_t *dict,
         GF_VALIDATE_OR_GOTO ("marker", this, out);
         GF_VALIDATE_OR_GOTO ("marker", dict, out);
         GF_VALIDATE_OR_GOTO ("marker", loc, out);
+        GF_VALIDATE_OR_GOTO ("marker", loc->parent, out);
 
         GET_CONTRI_KEY (contri_key, loc->parent->gfid, ret);
         if (ret < 0) {
@@ -323,20 +327,14 @@ mq_inode_ctx_new (inode_t * inode, xlator_t *this)
 quota_local_t *
 mq_local_new ()
 {
-        int32_t         ret     = -1;
         quota_local_t  *local   = NULL;
 
-        QUOTA_ALLOC (local, quota_local_t, ret);
-        if (ret < 0)
+        local = mem_get0 (THIS->local_pool);
+        if (!local)
                 goto out;
 
         local->ref = 1;
-        local->delta = 0;
-        local->err = 0;
         LOCK_INIT (&local->lock);
-
-        memset (&local->loc, 0, sizeof (loc_t));
-        memset (&local->parent_loc, 0, sizeof (loc_t));
 
         local->ctx = NULL;
         local->contri = NULL;
@@ -379,7 +377,7 @@ mq_local_unref (xlator_t *this, quota_local_t *local)
 
         LOCK_DESTROY (&local->lock);
 
-        GF_FREE (local);
+        mem_put (local);
 out:
         return 0;
 }

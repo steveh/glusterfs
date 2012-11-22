@@ -1,21 +1,12 @@
-/*Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+/*
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _MARKER_QUOTA_H
 #define _MARKER_QUOTA_H
 
@@ -24,7 +15,6 @@
 #include "config.h"
 #endif
 
-#include "marker.h"
 #include "xlator.h"
 #include "marker-mem-types.h"
 
@@ -104,28 +94,6 @@ struct inode_contribution {
 };
 typedef struct inode_contribution inode_contribution_t;
 
-struct quota_local {
-        int64_t delta;
-        int64_t d_off;
-        int32_t err;
-        int32_t ref;
-        int64_t sum;
-        int64_t size;
-        int32_t hl_count;
-        int32_t dentry_child_count;
-
-        fd_t         *fd;
-        call_frame_t *frame;
-        gf_lock_t     lock;
-
-        loc_t loc;
-        loc_t parent_loc;
-
-        quota_inode_ctx_t    *ctx;
-        inode_contribution_t *contri;
-};
-typedef struct quota_local quota_local_t;
-
 int32_t
 mq_get_lock_on_parent (call_frame_t *, xlator_t *);
 
@@ -146,7 +114,7 @@ mq_initiate_quota_txn (xlator_t *, loc_t *);
 
 int32_t
 mq_dirty_inode_readdir (call_frame_t *, void *, xlator_t *,
-                        int32_t, int32_t, fd_t *);
+                        int32_t, int32_t, fd_t *, dict_t *);
 
 int32_t
 mq_reduce_parent_size (xlator_t *, loc_t *, int64_t);

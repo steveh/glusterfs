@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "rpcsvc.h"
@@ -29,6 +20,8 @@ rpcsvc_auth_unix_init (rpcsvc_t *svc, dict_t *options);
 
 extern rpcsvc_auth_t *
 rpcsvc_auth_glusterfs_init (rpcsvc_t *svc, dict_t *options);
+extern rpcsvc_auth_t *
+rpcsvc_auth_glusterfs_v2_init (rpcsvc_t *svc, dict_t *options);
 
 int
 rpcsvc_auth_add_initer (struct list_head *list, char *idfier,
@@ -63,6 +56,16 @@ rpcsvc_auth_add_initers (rpcsvc_t *svc)
                                       rpcsvc_auth_glusterfs_init);
         if (ret == -1) {
                 gf_log (GF_RPCSVC, GF_LOG_ERROR, "Failed to add AUTH_GLUSTERFS");
+                goto err;
+        }
+
+
+        ret = rpcsvc_auth_add_initer (&svc->authschemes, "auth-glusterfs-v2",
+                                      (rpcsvc_auth_initer_t)
+                                      rpcsvc_auth_glusterfs_v2_init);
+        if (ret == -1) {
+                gf_log (GF_RPCSVC, GF_LOG_ERROR,
+                        "Failed to add AUTH_GLUSTERFS-v2");
                 goto err;
         }
 
@@ -434,8 +437,12 @@ rpcsvc_auth_unix_auxgids (rpcsvc_request_t *req, int *arrlen)
                 return NULL;
 
         /* In case of AUTH_NULL auxgids are not used */
-        if ((req->cred.flavour != AUTH_UNIX) &&
-            (req->cred.flavour != AUTH_GLUSTERFS)) {
+        switch (req->cred.flavour) {
+        case AUTH_UNIX:
+        case AUTH_GLUSTERFS:
+        case AUTH_GLUSTERFS_v2:
+                break;
+        default:
                 gf_log ("rpc", GF_LOG_DEBUG, "auth type not unix or glusterfs");
                 return NULL;
         }

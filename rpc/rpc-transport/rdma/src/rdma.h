@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _XPORT_RDMA_H
@@ -49,6 +40,11 @@
 
 #define GF_RDMA_VERSION                1
 #define GF_RDMA_POOL_SIZE              512
+
+/* Additional attributes */
+#define GF_RDMA_TIMEOUT                14
+#define GF_RDMA_RETRY_CNT              7
+#define GF_RDMA_RNR_RETRY              7
 
 typedef enum gf_rdma_errcode {
         ERR_VERS = 1,
@@ -148,6 +144,9 @@ struct __gf_rdma_options {
         int32_t  recv_count;
         uint64_t recv_size;
         uint64_t send_size;
+	uint8_t  attr_timeout;
+	uint8_t  attr_retry_cnt;
+	uint8_t  attr_rnr_retry;
 };
 typedef struct __gf_rdma_options gf_rdma_options_t;
 

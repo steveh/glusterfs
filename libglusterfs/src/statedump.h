@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -32,6 +23,7 @@ typedef struct gf_dump_xl_options_ {
         gf_boolean_t    dump_fd;
         gf_boolean_t    dump_inodectx;
         gf_boolean_t    dump_fdctx;
+        gf_boolean_t    dump_history;
 } gf_dump_xl_options_t;
 
 typedef struct gf_dump_options_ {
@@ -39,6 +31,7 @@ typedef struct gf_dump_options_ {
         gf_boolean_t            dump_iobuf;
         gf_boolean_t            dump_callpool;
         gf_dump_xl_options_t    xl_options; //options for all xlators
+        char                    *dump_path;
 } gf_dump_options_t;
 
 extern gf_dump_options_t dump_options;
@@ -63,13 +56,21 @@ void _gf_proc_dump_build_key (char *key, const char *prefix, char *fmt,...)
 
 #define GF_PROC_DUMP_SET_OPTION(opt,val) opt = val
 
+#define GF_CHECK_DUMP_OPTION_ENABLED(option_dump, var, label)      \
+        do {                                                    \
+                if (option_dump == _gf_true) {                  \
+                        var = _gf_false;                        \
+                        goto label;                             \
+                }                                               \
+        } while (0);
+
 void gf_proc_dump_init();
 
 void gf_proc_dump_fini(void);
 
 void gf_proc_dump_cleanup(void);
 
-void gf_proc_dump_info(int signum);
+void gf_proc_dump_info(int signum, glusterfs_ctx_t *ctx);
 
 int gf_proc_dump_add_section(char *key,...);
 
@@ -77,9 +78,17 @@ int gf_proc_dump_write(char *key, char *value,...);
 
 void inode_table_dump(inode_table_t *itable, char *prefix);
 
+void inode_table_dump_to_dict (inode_table_t *itable, char *prefix, dict_t *dict);
+
 void fdtable_dump(fdtable_t *fdtable, char *prefix);
 
+void fdtable_dump_to_dict (fdtable_t *fdtable, char *prefix, dict_t *dict);
+
 void inode_dump(inode_t *inode, char *prefix);
+
+void gf_proc_dump_mem_info_to_dict (dict_t *dict);
+
+void gf_proc_dump_mempool_info_to_dict (glusterfs_ctx_t *ctx, dict_t *dict);
 
 void glusterd_init (int sig);
 #endif /* STATEDUMP_H */

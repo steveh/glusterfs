@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "fd.h"
@@ -35,7 +26,7 @@ gf_fd_fdtable_expand (fdtable_t *fdtable, uint32_t nr);
 
 
 fd_t *
-_fd_ref (fd_t *fd);
+__fd_ref (fd_t *fd);
 
 static int
 gf_fd_chain_fd_entries (fdentry_t *entries, uint32_t startidx,
@@ -130,7 +121,7 @@ gf_fd_fdtable_alloc (void)
 }
 
 
-fdentry_t *
+static fdentry_t *
 __gf_fd_fdtable_get_all_fds (fdtable_t *fdtable, uint32_t *count)
 {
         fdentry_t       *fdentries = NULL;
@@ -160,6 +151,53 @@ gf_fd_fdtable_get_all_fds (fdtable_t *fdtable, uint32_t *count)
                 pthread_mutex_lock (&fdtable->lock);
                 {
                         entries = __gf_fd_fdtable_get_all_fds (fdtable, count);
+                }
+                pthread_mutex_unlock (&fdtable->lock);
+        }
+
+        return entries;
+}
+
+
+static fdentry_t *
+__gf_fd_fdtable_copy_all_fds (fdtable_t *fdtable, uint32_t *count)
+{
+        fdentry_t *fdentries = NULL;
+        int        i         = 0;
+
+        if (count == NULL) {
+                gf_log_callingfn ("fd", GF_LOG_WARNING, "!count");
+                goto out;
+        }
+
+        fdentries = GF_CALLOC (fdtable->max_fds, sizeof (fdentry_t),
+                               gf_common_mt_fdentry_t);
+        if (fdentries == NULL) {
+                goto out;
+        }
+
+        *count = fdtable->max_fds;
+
+        for (i = 0; i < fdtable->max_fds; i++) {
+                if (fdtable->fdentries[i].fd != NULL) {
+                        fdentries[i].fd = fd_ref (fdtable->fdentries[i].fd);
+                }
+        }
+
+out:
+        return fdentries;
+}
+
+
+fdentry_t *
+gf_fd_fdtable_copy_all_fds (fdtable_t *fdtable, uint32_t *count)
+{
+        fdentry_t *entries = NULL;
+
+        if (fdtable) {
+                pthread_mutex_lock (&fdtable->lock);
+                {
+                        entries = __gf_fd_fdtable_copy_all_fds (fdtable, count);
                 }
                 pthread_mutex_unlock (&fdtable->lock);
         }
@@ -269,6 +307,10 @@ gf_fd_put (fdtable_t *fdtable, int32_t fd)
         fd_t *fdptr = NULL;
         fdentry_t *fde = NULL;
 
+        if (fd == -2)
+                /* anonymous fd */
+                return;
+
         if (fdtable == NULL || fd < 0) {
                 gf_log_callingfn ("fd", GF_LOG_ERROR, "invalid argument");
                 return;
@@ -305,6 +347,54 @@ unlock_out:
 }
 
 
+inline void
+gf_fdptr_put (fdtable_t *fdtable, fd_t *fd)
+{
+        fdentry_t *fde   = NULL;
+        int32_t    i     = 0;
+
+        if ((fdtable == NULL) || (fd == NULL)) {
+                gf_log_callingfn ("fd", GF_LOG_ERROR, "invalid argument");
+                return;
+        }
+
+        pthread_mutex_lock (&fdtable->lock);
+        {
+                for (i = 0; i < fdtable->max_fds; i++) {
+                        if (fdtable->fdentries[i].fd == fd) {
+                                fde = &fdtable->fdentries[i];
+                                break;
+                        }
+                }
+
+                if (fde == NULL) {
+                        gf_log_callingfn ("fd", GF_LOG_WARNING,
+                                "fd (%p) is not present in fdtable", fd);
+                        goto unlock_out;
+                }
+
+                /* If the entry is not allocated, put operation must return
+                 * without doing anything.
+                 * This has the potential of masking out any bugs in a user of
+                 * fd that ends up calling gf_fd_put twice for the same fd or
+                 * for an unallocated fd, but it is a price we have to pay for
+                 * ensuring sanity of our fd-table.
+                 */
+                if (fde->next_free != GF_FDENTRY_ALLOCATED)
+                        goto unlock_out;
+                fde->fd = NULL;
+                fde->next_free = fdtable->first_free;
+                fdtable->first_free = i;
+        }
+unlock_out:
+        pthread_mutex_unlock (&fdtable->lock);
+
+        if ((fd != NULL) && (fde != NULL)) {
+                fd_unref (fd);
+        }
+}
+
+
 fd_t *
 gf_fd_fdptr_get (fdtable_t *fdtable, int64_t fd)
 {
@@ -336,7 +426,7 @@ gf_fd_fdptr_get (fdtable_t *fdtable, int64_t fd)
 
 
 fd_t *
-_fd_ref (fd_t *fd)
+__fd_ref (fd_t *fd)
 {
         ++fd->refcount;
 
@@ -355,7 +445,7 @@ fd_ref (fd_t *fd)
         }
 
         LOCK (&fd->inode->lock);
-        refed_fd = _fd_ref (fd);
+        refed_fd = __fd_ref (fd);
         UNLOCK (&fd->inode->lock);
 
         return refed_fd;
@@ -363,7 +453,7 @@ fd_ref (fd_t *fd)
 
 
 fd_t *
-_fd_unref (fd_t *fd)
+__fd_unref (fd_t *fd)
 {
         GF_ASSERT (fd->refcount);
 
@@ -397,7 +487,7 @@ fd_destroy (fd_t *fd)
                 goto out;
 
         if (IA_ISDIR (fd->inode->ia_type)) {
-                for (i = 0; i < fd->xl_count; i++) {
+                for (i = 0; i <  fd->xl_count; i++) {
                         if (fd->_ctx[i].key) {
                                 xl = fd->_ctx[i].xl_key;
                                 old_THIS = THIS;
@@ -425,6 +515,7 @@ fd_destroy (fd_t *fd)
         GF_FREE (fd->_ctx);
         inode_unref (fd->inode);
         fd->inode = (inode_t *)0xaaaaaaaa;
+        fd_lk_ctx_unref (fd->lk_ctx);
         mem_put (fd);
 out:
         return;
@@ -443,7 +534,7 @@ fd_unref (fd_t *fd)
 
         LOCK (&fd->inode->lock);
         {
-                _fd_unref (fd);
+                __fd_unref (fd);
                 refcount = fd->refcount;
         }
         UNLOCK (&fd->inode->lock);
@@ -457,28 +548,35 @@ fd_unref (fd_t *fd)
 
 
 fd_t *
-fd_bind (fd_t *fd)
+__fd_bind (fd_t *fd)
 {
-        inode_t *inode = NULL;
-
-        if (!fd || !fd->inode) {
-                gf_log_callingfn ("fd", GF_LOG_ERROR, "!fd || !fd->inode");
-                return NULL;
-        }
-        inode = fd->inode;
-
-        LOCK (&inode->lock);
-        {
-                list_add (&fd->inode_list, &inode->fd_list);
-        }
-        UNLOCK (&inode->lock);
+        list_del_init (&fd->inode_list);
+        list_add (&fd->inode_list, &fd->inode->fd_list);
 
         return fd;
 }
 
 
 fd_t *
-fd_create (inode_t *inode, pid_t pid)
+fd_bind (fd_t *fd)
+{
+        if (!fd || !fd->inode) {
+                gf_log_callingfn ("fd", GF_LOG_ERROR, "!fd || !fd->inode");
+                return NULL;
+        }
+
+        LOCK (&fd->inode->lock);
+        {
+                fd = __fd_bind (fd);
+        }
+        UNLOCK (&fd->inode->lock);
+
+        return fd;
+}
+
+
+static fd_t *
+__fd_create (inode_t *inode, uint64_t pid)
 {
         fd_t *fd = NULL;
 
@@ -495,24 +593,78 @@ fd_create (inode_t *inode, pid_t pid)
 
         fd->_ctx = GF_CALLOC (1, (sizeof (struct _fd_ctx) * fd->xl_count),
                               gf_common_mt_fd_ctx);
-        if (!fd->_ctx) {
-                mem_put (fd);
-                fd = NULL;
-                goto out;
-        }
+        if (!fd->_ctx)
+                goto free_fd;
+
+        fd->lk_ctx = fd_lk_ctx_create ();
+        if (!fd->lk_ctx)
+                goto free_fd_ctx;
 
         fd->inode = inode_ref (inode);
         fd->pid = pid;
         INIT_LIST_HEAD (&fd->inode_list);
 
         LOCK_INIT (&fd->lock);
-
-        LOCK (&inode->lock);
-        {
-                fd = _fd_ref (fd);
-        }
-        UNLOCK (&inode->lock);
 out:
+        return fd;
+
+free_fd_ctx:
+        GF_FREE (fd->_ctx);
+free_fd:
+        mem_put (fd);
+
+        return NULL;
+}
+
+
+fd_t *
+fd_create (inode_t *inode, pid_t pid)
+{
+        fd_t *fd = NULL;
+
+        fd = __fd_create (inode, (uint64_t)pid);
+        if (!fd)
+                goto out;
+
+        fd = fd_ref (fd);
+
+out:
+        return fd;
+}
+
+fd_t *
+fd_create_uint64 (inode_t *inode, uint64_t pid)
+{
+        fd_t *fd = NULL;
+
+        fd = __fd_create (inode, pid);
+        if (!fd)
+                goto out;
+
+        fd = fd_ref (fd);
+
+out:
+        return fd;
+}
+
+
+static fd_t *
+__fd_lookup (inode_t *inode, uint64_t pid)
+{
+        fd_t *iter_fd = NULL;
+        fd_t *fd = NULL;
+
+        if (list_empty (&inode->fd_list))
+                return NULL;
+
+
+        list_for_each_entry (iter_fd, &inode->fd_list, inode_list) {
+                if (!pid || iter_fd->pid == pid) {
+                        fd = __fd_ref (iter_fd);
+                        break;
+                }
+        }
+
         return fd;
 }
 
@@ -521,7 +673,6 @@ fd_t *
 fd_lookup (inode_t *inode, pid_t pid)
 {
         fd_t *fd = NULL;
-        fd_t *iter_fd = NULL;
 
         if (!inode) {
                 gf_log_callingfn ("fd", GF_LOG_WARNING, "!inode");
@@ -530,25 +681,98 @@ fd_lookup (inode_t *inode, pid_t pid)
 
         LOCK (&inode->lock);
         {
-                if (list_empty (&inode->fd_list)) {
-                        fd = NULL;
-                } else {
-                        list_for_each_entry (iter_fd, &inode->fd_list, inode_list) {
-                                if (pid) {
-                                        if (iter_fd->pid == pid) {
-                                                fd = _fd_ref (iter_fd);
-                                                break;
-                                        }
-                                } else {
-                                        fd = _fd_ref (iter_fd);
-                                        break;
-                                }
-                        }
-                }
+                fd = __fd_lookup (inode, (uint64_t)pid);
         }
         UNLOCK (&inode->lock);
 
         return fd;
+}
+
+fd_t *
+fd_lookup_uint64 (inode_t *inode, uint64_t pid)
+{
+        fd_t *fd = NULL;
+
+        if (!inode) {
+                gf_log_callingfn ("fd", GF_LOG_WARNING, "!inode");
+                return NULL;
+        }
+
+        LOCK (&inode->lock);
+        {
+                fd = __fd_lookup (inode, pid);
+        }
+        UNLOCK (&inode->lock);
+
+        return fd;
+}
+
+static fd_t *
+__fd_lookup_anonymous (inode_t *inode)
+{
+        fd_t *iter_fd = NULL;
+        fd_t *fd = NULL;
+
+        if (list_empty (&inode->fd_list))
+                return NULL;
+
+        list_for_each_entry (iter_fd, &inode->fd_list, inode_list) {
+                if (iter_fd->anonymous) {
+                        fd = __fd_ref (iter_fd);
+                        break;
+                }
+        }
+
+        return fd;
+}
+
+static fd_t *
+__fd_anonymous (inode_t *inode)
+{
+        fd_t *fd = NULL;
+
+        fd = __fd_lookup_anonymous (inode);
+
+        /* if (fd); then we already have increased the refcount in
+           __fd_lookup_anonymous(), so no need of one more fd_ref().
+           if (!fd); then both create and bind wont bump up the ref
+           count, so we have to call fd_ref() after bind. */
+        if (!fd) {
+                fd = __fd_create (inode, 0);
+
+                if (!fd)
+                        return NULL;
+
+                fd->anonymous = _gf_true;
+
+                __fd_bind (fd);
+
+                __fd_ref (fd);
+        }
+
+        return fd;
+}
+
+
+fd_t *
+fd_anonymous (inode_t *inode)
+{
+        fd_t *fd = NULL;
+
+        LOCK (&inode->lock);
+        {
+                fd = __fd_anonymous (inode);
+        }
+        UNLOCK (&inode->lock);
+
+        return fd;
+}
+
+
+gf_boolean_t
+fd_is_anonymous (fd_t *fd)
+{
+        return (fd && fd->anonymous);
 }
 
 
@@ -570,9 +794,12 @@ fd_list_empty (inode_t *inode)
 int
 __fd_ctx_set (fd_t *fd, xlator_t *xlator, uint64_t value)
 {
-        int index = 0;
-        int ret = 0;
-        int set_idx = -1;
+        int             index   = 0, new_xl_count = 0;
+        int             ret     = 0;
+        int             set_idx = -1;
+        void           *begin   = NULL;
+        size_t          diff    = 0;
+        struct _fd_ctx *tmp     = NULL;
 
 	if (!fd || !xlator)
 		return -1;
@@ -591,9 +818,33 @@ __fd_ctx_set (fd_t *fd, xlator_t *xlator, uint64_t value)
         }
 
         if (set_idx == -1) {
-                gf_log_callingfn ("", GF_LOG_WARNING, "%p %s", fd, xlator->name);
-                ret = -1;
-                goto out;
+                set_idx = fd->xl_count;
+
+                new_xl_count = fd->xl_count + xlator->graph->xl_count;
+
+                tmp = GF_REALLOC (fd->_ctx,
+                                  (sizeof (struct _fd_ctx)
+                                   * new_xl_count));
+                if (tmp == NULL) {
+                        gf_log_callingfn (THIS->name, GF_LOG_WARNING,
+                                          "realloc of fd->_ctx for fd "
+                                          "(ptr: %p) failed, cannot set the key"
+                                          , fd);
+                        ret = -1;
+                        goto out;
+                }
+
+                fd->_ctx = tmp;
+
+                begin = fd->_ctx;
+                begin += (fd->xl_count * sizeof (struct _fd_ctx));
+
+                diff = (new_xl_count - fd->xl_count )
+                        * sizeof (struct _fd_ctx);
+
+                memset (begin, 0, diff);
+
+                fd->xl_count = new_xl_count;
         }
 
         fd->_ctx[set_idx].xl_key = xlator;
@@ -669,7 +920,7 @@ fd_ctx_get (fd_t *fd, xlator_t *xlator, uint64_t *value)
 }
 
 
-int
+static int
 __fd_ctx_del (fd_t *fd, xlator_t *xlator, uint64_t *value)
 {
         int index = 0;
@@ -726,9 +977,16 @@ fd_dump (fd_t *fd, char *prefix)
                 return;
 
         memset(key, 0, sizeof(key));
-        gf_proc_dump_write("pid", "%d", fd->pid);
+        gf_proc_dump_write("pid", "%llu", fd->pid);
         gf_proc_dump_write("refcount", "%d", fd->refcount);
         gf_proc_dump_write("flags", "%d", fd->flags);
+
+        if (fd->inode) {
+                gf_proc_dump_build_key (key, "inode", NULL);
+                gf_proc_dump_add_section(key);
+                inode_dump (fd->inode, key);
+        }
+
 }
 
 
@@ -758,10 +1016,8 @@ fdtable_dump (fdtable_t *fdtable, char *prefix)
 
         ret = pthread_mutex_trylock (&fdtable->lock);
 
-        if (ret) {
-                gf_log ("fd", GF_LOG_WARNING, "Unable to acquire lock");
-                return;
-        }
+        if (ret)
+                goto out;
 
         memset(key, 0, sizeof(key));
         gf_proc_dump_build_key(key, prefix, "refcount");
@@ -781,6 +1037,12 @@ fdtable_dump (fdtable_t *fdtable, char *prefix)
         }
 
         pthread_mutex_unlock(&fdtable->lock);
+
+out:
+        if (ret != 0)
+                gf_proc_dump_write ("Unable to dump the fdtable",
+                                    "(Lock acquistion failed) %p", fdtable);
+        return;
 }
 
 
@@ -799,15 +1061,13 @@ fd_ctx_dump (fd_t *fd, char *prefix)
         LOCK (&fd->lock);
         {
                 if (fd->_ctx != NULL) {
-                        fd_ctx = GF_CALLOC (fd->inode->table->xl->graph->xl_count,
-                                            sizeof (*fd_ctx),
+                        fd_ctx = GF_CALLOC (fd->xl_count, sizeof (*fd_ctx),
                                             gf_common_mt_fd_ctx);
                         if (fd_ctx == NULL) {
                                 goto unlock;
                         }
 
-                        for (i = 0; i < fd->inode->table->xl->graph->xl_count;
-                             i++) {
+                        for (i = 0; i < fd->xl_count; i++) {
                                 fd_ctx[i] = fd->_ctx[i];
                         }
                 }
@@ -819,7 +1079,7 @@ unlock:
                 goto out;
         }
 
-        for (i = 0; i < fd->inode->table->xl->graph->xl_count; i++) {
+        for (i = 0; i < fd->xl_count; i++) {
                 if (fd_ctx[i].xl_key) {
                         xl = (xlator_t *)(long)fd_ctx[i].xl_key;
                         if (xl->dumpops && xl->dumpops->fdctx)
@@ -828,9 +1088,99 @@ unlock:
         }
 
 out:
-        if (fd_ctx != NULL) {
-                GF_FREE (fd_ctx);
+        GF_FREE (fd_ctx);
+
+        return;
+}
+
+void
+fdentry_dump_to_dict (fdentry_t *fdentry, char *prefix, dict_t *dict,
+                      int *openfds)
+{
+        char    key[GF_DUMP_MAX_BUF_LEN] = {0,};
+        int     ret = -1;
+
+        if (!fdentry)
+                return;
+        if (!dict)
+                return;
+
+        if (GF_FDENTRY_ALLOCATED != fdentry->next_free)
+                return;
+
+        if (fdentry->fd) {
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.pid", prefix);
+                ret = dict_set_int32 (dict, key, fdentry->fd->pid);
+                if (ret)
+                        return;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.refcount", prefix);
+                ret = dict_set_int32 (dict, key, fdentry->fd->refcount);
+                if (ret)
+                        return;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "%s.flags", prefix);
+                ret = dict_set_int32 (dict, key, fdentry->fd->flags);
+
+                (*openfds)++;
+        }
+        return;
+}
+
+void
+fdtable_dump_to_dict (fdtable_t *fdtable, char *prefix, dict_t *dict)
+{
+        char    key[GF_DUMP_MAX_BUF_LEN] = {0,};
+        int     i = 0;
+        int     openfds = 0;
+        int     ret = -1;
+
+        if (!fdtable)
+                return;
+        if (!dict)
+                return;
+
+        ret = pthread_mutex_trylock (&fdtable->lock);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.fdtable.refcount", prefix);
+        ret = dict_set_int32 (dict, key, fdtable->refcount);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.fdtable.maxfds", prefix);
+        ret = dict_set_uint32 (dict, key, fdtable->max_fds);
+        if (ret)
+                goto out;
+
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.fdtable.firstfree", prefix);
+        ret = dict_set_int32 (dict, key, fdtable->first_free);
+        if (ret)
+                goto out;
+
+        for (i = 0; i < fdtable->max_fds; i++) {
+                if (GF_FDENTRY_ALLOCATED ==
+                    fdtable->fdentries[i].next_free) {
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "%s.fdtable.fdentry%d",
+                                  prefix, i);
+                        fdentry_dump_to_dict (&fdtable->fdentries[i], key,
+                                              dict, &openfds);
+                }
         }
 
+        memset (key, 0, sizeof (key));
+        snprintf (key, sizeof (key), "%s.fdtable.openfds", prefix);
+        ret = dict_set_int32 (dict, key, openfds);
+
+out:
+        pthread_mutex_unlock (&fdtable->lock);
         return;
 }

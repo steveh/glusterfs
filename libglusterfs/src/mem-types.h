@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef __MEM_TYPES_H__
@@ -106,6 +97,11 @@ enum gf_common_mem_types_ {
         gf_common_mt_trie_end             = 81,
         gf_common_mt_run_argv             = 82,
         gf_common_mt_run_logbuf           = 83,
-        gf_common_mt_end                  = 84
+        gf_common_mt_fd_lk_ctx_t          = 84,
+        gf_common_mt_fd_lk_ctx_node_t     = 85,
+        gf_common_mt_buffer_t             = 86,
+        gf_common_mt_circular_buffer_t    = 87,
+        gf_common_mt_eh_t                 = 88,
+        gf_common_mt_end                  = 89
 };
 #endif

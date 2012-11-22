@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 
 #ifndef _CONFIG_H
 #define _CONFIG_H
@@ -100,8 +90,7 @@ glusterd_destroy_probe_ctx (glusterd_probe_ctx_t *ctx)
         if (!ctx)
                 return;
 
-        if (ctx->hostname)
-                GF_FREE (ctx->hostname);
+        GF_FREE (ctx->hostname);
         GF_FREE (ctx);
 }
 
@@ -113,8 +102,7 @@ glusterd_destroy_friend_req_ctx (glusterd_friend_req_ctx_t *ctx)
 
         if (ctx->vols)
                 dict_unref (ctx->vols);
-        if (ctx->hostname)
-                GF_FREE (ctx->hostname);
+        GF_FREE (ctx->hostname);
         GF_FREE (ctx);
 }
 
@@ -123,8 +111,7 @@ glusterd_destroy_friend_update_ctx (glusterd_friend_update_ctx_t *ctx)
 {
         if (!ctx)
                 return;
-        if (ctx->hostname)
-                GF_FREE (ctx->hostname);
+        GF_FREE (ctx->hostname);
         GF_FREE (ctx);
 }
 
@@ -257,12 +244,9 @@ glusterd_ac_reverse_probe_begin (glusterd_friend_sm_event_t *event, void *ctx)
 
 out:
         if (ret) {
-                if (new_event)
-                        GF_FREE (new_event);
-                if (new_ev_ctx->hostname)
-                        GF_FREE (new_ev_ctx->hostname);
-                if (new_ev_ctx)
-                        GF_FREE (new_ev_ctx);
+                GF_FREE (new_event);
+                GF_FREE (new_ev_ctx->hostname);
+                GF_FREE (new_ev_ctx);
         }
         gf_log ("", GF_LOG_DEBUG, "returning with %d", ret);
         return ret;
@@ -415,6 +399,7 @@ glusterd_ac_send_friend_remove_req (glusterd_friend_sm_event_t *event,
 
                 if (ctx)
                         ret = glusterd_xfer_cli_deprobe_resp (ctx->req, ret, 0,
+                                                              NULL,
                                                               ctx->hostname);
                 glusterd_friend_sm ();
                 glusterd_op_sm ();
@@ -444,22 +429,36 @@ out:
         return ret;
 }
 
+static gf_boolean_t
+glusterd_should_update_peer (glusterd_peerinfo_t *peerinfo,
+                             glusterd_peerinfo_t *cur_peerinfo)
+{
+        gf_boolean_t is_valid = _gf_false;
+
+        if ((peerinfo == cur_peerinfo) ||
+            (peerinfo->state.state == GD_FRIEND_STATE_BEFRIENDED))
+                is_valid = _gf_true;
+
+        return is_valid;
+}
+
 static int
 glusterd_ac_send_friend_update (glusterd_friend_sm_event_t *event, void *ctx)
 {
-        int                           ret         = 0;
-        glusterd_peerinfo_t          *peerinfo    = NULL;
-        rpc_clnt_procedure_t         *proc        = NULL;
-        xlator_t                     *this        = NULL;
-        glusterd_friend_update_ctx_t  ev_ctx      = {{0}};
-        glusterd_conf_t              *priv        = NULL;
-        dict_t                       *friends     = NULL;
-        char                          key[100]    = {0,};
-        char                         *dup_buf     = NULL;
-        int32_t                       count       = 0;
+        int                           ret               = 0;
+        glusterd_peerinfo_t          *cur_peerinfo      = NULL;
+        glusterd_peerinfo_t          *peerinfo          = NULL;
+        rpc_clnt_procedure_t         *proc              = NULL;
+        xlator_t                     *this              = NULL;
+        glusterd_friend_update_ctx_t  ev_ctx            = {{0}};
+        glusterd_conf_t              *priv              = NULL;
+        dict_t                       *friends           = NULL;
+        char                          key[100]          = {0,};
+        char                         *dup_buf           = NULL;
+        int32_t                       count             = 0;
 
         GF_ASSERT (event);
-        peerinfo = event->peerinfo;
+        cur_peerinfo = event->peerinfo;
 
         this = THIS;
         priv = this->private;
@@ -478,6 +477,9 @@ glusterd_ac_send_friend_update (glusterd_friend_sm_event_t *event, void *ctx)
                 goto out;
 
         list_for_each_entry (peerinfo, &priv->peers, uuid_list) {
+                if (!glusterd_should_update_peer (peerinfo, cur_peerinfo))
+                        continue;
+
                 count++;
                 snprintf (key, sizeof (key), "friend%d.uuid", count);
                 dup_buf = gf_strdup (uuid_utoa (peerinfo->uuid));
@@ -498,6 +500,9 @@ glusterd_ac_send_friend_update (glusterd_friend_sm_event_t *event, void *ctx)
 
         list_for_each_entry (peerinfo, &priv->peers, uuid_list) {
                 if (!peerinfo->connected || !peerinfo->peer)
+                        continue;
+
+                if (!glusterd_should_update_peer (peerinfo, cur_peerinfo))
                         continue;
 
                 ret = dict_set_static_ptr (friends, "peerinfo", peerinfo);
@@ -533,7 +538,7 @@ glusterd_peer_detach_cleanup (glusterd_conf_t *priv)
         list_for_each_entry_safe (volinfo,tmp_volinfo,
                                   &priv->volumes, vol_list) {
                 if (!glusterd_friend_contains_vol_bricks (volinfo,
-                                                          priv->uuid)) {
+                                                          MY_UUID)) {
                         gf_log (THIS->name, GF_LOG_INFO,
                                 "Deleting stale volume %s", volinfo->volname);
                         ret = glusterd_delete_volume (volinfo);

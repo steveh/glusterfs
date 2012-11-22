@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _GNU_SOURCE
@@ -30,7 +21,9 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <assert.h>
+#include <signal.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 
 #ifdef RUN_STANDALONE
 #define GF_CALLOC(n, s, t) calloc(n, s)
@@ -74,7 +67,10 @@ runner_chio (runner_t *runner, int fd)
 {
         GF_ASSERT (fd > 0 && fd < 3);
 
-        return runner->chio[fd];
+        if ((fd > 0) && (fd < 3))
+                return runner->chio[fd];
+
+        return NULL;
 }
 
 static void
@@ -201,7 +197,8 @@ runner_redir (runner_t *runner, int fd, int tgt_fd)
 {
         GF_ASSERT (fd > 0 && fd < 3);
 
-        runner->chfd[fd] = (tgt_fd >= 0) ? tgt_fd : -2;
+        if ((fd > 0) && (fd < 3))
+                runner->chfd[fd] = (tgt_fd >= 0) ? tgt_fd : -2;
 }
 
 int
@@ -293,7 +290,11 @@ runner_start (runner_t *runner)
                         } else
                                 ret = -1;
 #else
-                        for (i = 3; i < 65536; i++) {
+                        struct rlimit rl;
+                        ret = getrlimit (RLIMIT_NOFILE, &rl);
+                        GF_ASSERT (ret == 0);
+
+                        for (i = 3; i < rl.rlim_cur; i++) {
                                 if (i != xpi[1])
                                         close (i);
                         }
@@ -364,9 +365,11 @@ runner_end (runner_t *runner)
 
         ret = runner_end_reuse (runner);
 
-        for (p = runner->argv; *p; p++)
-                GF_FREE (*p);
-        GF_FREE (runner->argv);
+        if (runner->argv) {
+                for (p = runner->argv; *p; p++)
+                        GF_FREE (*p);
+                GF_FREE (runner->argv);
+        }
         for (i = 0; i < 3; i++)
                 close (runner->chfd[i]);
 
@@ -379,10 +382,8 @@ runner_run_generic (runner_t *runner, int (*rfin)(runner_t *runner))
         int ret = 0;
 
         ret = runner_start (runner);
-        if (ret != 0)
-                return -1;
 
-        return rfin (runner) ? -1 : 0;
+        return -(rfin (runner) || ret);
 }
 
 int
@@ -390,6 +391,25 @@ runner_run (runner_t *runner)
 {
         return runner_run_generic (runner, runner_end);
 }
+
+
+int
+runner_run_nowait (runner_t *runner)
+{
+	int pid;
+
+	pid = fork ();
+
+	if (!pid) {
+		setsid ();
+		_exit (runner_start (runner));
+	}
+
+	if (pid > 0)
+		runner->chpid = pid;
+	return runner_end (runner);
+}
+
 
 int
 runner_run_reuse (runner_t *runner)
@@ -422,7 +442,7 @@ TBANNER (const char *txt)
 }
 
 int
-main ()
+main (int argc, char **argv)
 {
         runner_t runner;
         char buf[80];
@@ -430,6 +450,8 @@ main ()
         int ret;
         int fd;
         long pathmax = pathconf ("/", _PC_PATH_MAX);
+        struct timeval tv = {0,};
+        struct timeval *tvp = NULL;
 
         wdbuf = malloc (pathmax);
         assert (wdbuf);
@@ -478,6 +500,13 @@ main ()
         if (ret != 0)
                 printf (" %d [%s]", errno, strerror (errno));
         putchar ('\n');
+
+        if (argc > 1) {
+                tv.tv_sec = strtoul (argv[1], NULL, 10);
+                if (tv.tv_sec > 0)
+                        tvp = &tv;
+                select (0, 0, 0, 0, tvp);
+        }
 
         return 0;
 }

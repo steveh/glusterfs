@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CLIENT_H
@@ -29,36 +20,49 @@
 #include "client-mem-types.h"
 #include "protocol-common.h"
 #include "glusterfs3.h"
+#include "fd-lk.h"
 
 /* FIXME: Needs to be defined in a common file */
 #define CLIENT_CMD_CONNECT    "trusted.glusterfs.client-connect"
 #define CLIENT_CMD_DISCONNECT "trusted.glusterfs.client-disconnect"
 #define CLIENT_DUMP_LOCKS     "trusted.glusterfs.clientlk-dump"
+#define GF_MAX_SOCKET_WINDOW_SIZE  (1 * GF_UNIT_MB)
+#define GF_MIN_SOCKET_WINDOW_SIZE  (0)
 
-#define CLIENT_GET_FD_CTX(conf, args, fdctx, op_errno, label)           \
+typedef enum {
+        GF_LK_HEAL_IN_PROGRESS,
+        GF_LK_HEAL_DONE,
+} lk_heal_state_t;
+
+#define CLIENT_GET_REMOTE_FD(conf, fd, remote_fd, op_errno, label)      \
         do {                                                            \
+                clnt_fd_ctx_t      *fdctx    = NULL;                    \
                 pthread_mutex_lock (&conf->lock);                       \
                 {                                                       \
-                        fdctx = this_fd_get_ctx (args->fd, this);       \
+                        fdctx = this_fd_get_ctx (fd, THIS);             \
                 }                                                       \
                 pthread_mutex_unlock (&conf->lock);                     \
-                                                                        \
-                if (fdctx == NULL) {                                    \
-                        gf_log (this->name, GF_LOG_WARNING,             \
-                                "(%s): failed to get fd ctx. EBADFD",   \
-                                uuid_utoa (args->fd->inode->gfid));     \
-                        op_errno = EBADFD;                              \
-                        goto label;                                     \
+                if (!fdctx) {                                           \
+                        remote_fd = -2;                                 \
+                } else {                                                \
+                        remote_fd = fdctx->remote_fd;                   \
                 }                                                       \
-                                                                        \
-                if (fdctx->remote_fd == -1) {                           \
-                        gf_log (this->name, GF_LOG_WARNING,             \
-                                "(%s): failed to get fd ctx. EBADFD",   \
-                                uuid_utoa (args->fd->inode->gfid));     \
+                if (remote_fd == -1) {                                  \
+                        gf_log (THIS->name, GF_LOG_WARNING, " (%s) "    \
+                                "remote_fd is -1. EBADFD",              \
+                                uuid_utoa (fd->inode->gfid));           \
                         op_errno = EBADFD;                              \
                         goto label;                                     \
                 }                                                       \
         } while (0);
+
+#define CLIENT_STACK_UNWIND(op, frame, params ...) do {             \
+                clnt_local_t *__local = frame->local;               \
+                frame->local = NULL;                                \
+                STACK_UNWIND_STRICT (op, frame, params);            \
+                client_local_wipe (__local);                        \
+        } while (0)
+
 
 struct clnt_options {
         char *remote_subvolume;
@@ -73,8 +77,6 @@ typedef struct clnt_conf {
         pthread_mutex_t        lock;
         int                    connecting;
         int                    connected;
-	struct timeval         last_sent;
-	struct timeval         last_received;
 
         rpc_clnt_prog_t       *fops;
         rpc_clnt_prog_t       *mgmt;
@@ -94,6 +96,24 @@ typedef struct clnt_conf {
         char                   need_different_port; /* flag used to change the
                                                        portmap path in case of
                                                        'tcp,rdma' on server */
+        gf_boolean_t           lk_heal;
+        uint16_t               lk_version; /* this variable is used to distinguish
+                                              client-server transaction while
+                                              performing lock healing */
+        struct timeval         grace_tv;
+        gf_timer_t            *grace_timer;
+        gf_boolean_t           grace_timer_needed; /* The state of this flag will
+                                                      be used to decide whether
+                                                      a new grace-timer must be
+                                                      registered or not. False
+                                                      means dont register, true
+                                                      means register */
+        char                   parent_down;
+	gf_boolean_t           quick_reconnect; /* When reconnecting after
+						   portmap query, do not let
+						   the reconnection happen after
+						   the usual 3-second wait
+						*/
 } clnt_conf_t;
 
 typedef struct _client_fd_ctx {
@@ -101,15 +121,13 @@ typedef struct _client_fd_ctx {
                                             fd's position in the saved_fds list.
                                         */
         int64_t           remote_fd;
-        inode_t          *inode;
-        uint64_t          ino;
-        uint64_t          gen;
         char              is_dir;
         char              released;
         int32_t           flags;
-        int32_t           wbflags;
-
+        fd_lk_ctx_t      *lk_ctx;
         pthread_mutex_t   mutex;
+        lk_heal_state_t   lk_heal_state;
+        uuid_t            gfid;
         struct list_head  lock_list;     /* List of all granted locks on this fd */
 } clnt_fd_ctx_t;
 
@@ -121,8 +139,7 @@ typedef struct _client_posix_lock {
         off_t              fl_end;
         short              fl_type;
         int32_t            cmd;           /* the cmd for the lock call */
-        uint64_t           owner;         /* lock owner from fuse */
-
+        gf_lkowner_t       owner; /* lock owner from fuse */
         struct list_head   list;          /* reference used to add to the fdctx list of locks */
 } client_posix_lock_t;
 
@@ -132,26 +149,24 @@ typedef struct client_local {
         fd_t                *fd;
         clnt_fd_ctx_t       *fdctx;
         uint32_t             flags;
-        uint32_t             wbflags;
         struct iobref       *iobref;
 
         client_posix_lock_t *client_lock;
-        uint64_t             owner;
+        gf_lkowner_t         owner;
         int32_t              cmd;
         struct list_head     lock_list;
         pthread_mutex_t      mutex;
+        char           *name;
 } clnt_local_t;
 
 typedef struct client_args {
         loc_t              *loc;
         fd_t               *fd;
-        dict_t             *xattr_req;
         const char         *linkname;
         struct iobref      *iobref;
         struct iovec       *vector;
         dict_t             *xattr;
         struct iatt        *stbuf;
-        dict_t             *dict;
         loc_t              *oldloc;
         loc_t              *newloc;
         const char         *name;
@@ -165,7 +180,6 @@ typedef struct client_args {
         mode_t              mode;
         dev_t               rdev;
         int32_t             flags;
-        int32_t             wbflags;
         int32_t             count;
         int32_t             datasync;
         entrylk_cmd         cmd_entrylk;
@@ -173,6 +187,9 @@ typedef struct client_args {
         gf_xattrop_flags_t  optype;
         int32_t             valid;
         int32_t             len;
+
+        mode_t              umask;
+        dict_t             *xdata;
 } clnt_args_t;
 
 typedef ssize_t (*gfs_serialize_t) (struct iovec outmsg, void *args);
@@ -195,14 +212,15 @@ int protocol_client_reopendir (xlator_t *this, clnt_fd_ctx_t *fdctx);
 int protocol_client_reopen (xlator_t *this, clnt_fd_ctx_t *fdctx);
 
 int unserialize_rsp_dirent (struct gfs3_readdir_rsp *rsp, gf_dirent_t *entries);
-int unserialize_rsp_direntp (struct gfs3_readdirp_rsp *rsp, gf_dirent_t *entries);
+int unserialize_rsp_direntp (xlator_t *this, fd_t *fd,
+                             struct gfs3_readdirp_rsp *rsp, gf_dirent_t *entries);
 
 int clnt_readdir_rsp_cleanup (gfs3_readdir_rsp *rsp);
 int clnt_readdirp_rsp_cleanup (gfs3_readdirp_rsp *rsp);
 int client_attempt_lock_recovery (xlator_t *this, clnt_fd_ctx_t *fdctx);
-int32_t delete_granted_locks_owner (fd_t *fd, uint64_t owner);
-int client_add_lock_for_recovery (fd_t *fd, struct gf_flock *flock, uint64_t owner,
-                                  int32_t cmd);
+int32_t delete_granted_locks_owner (fd_t *fd, gf_lkowner_t *owner);
+int client_add_lock_for_recovery (fd_t *fd, struct gf_flock *flock,
+                                  gf_lkowner_t *owner, int32_t cmd);
 uint64_t decrement_reopen_fd_count (xlator_t *this, clnt_conf_t *conf);
 int32_t delete_granted_locks_fd (clnt_fd_ctx_t *fdctx);
 int32_t client_cmd_to_gf_cmd (int32_t cmd, int32_t *gf_cmd);
@@ -214,4 +232,13 @@ int32_t client_dump_locks (char *name, inode_t *inode,
                            dict_t *dict);
 int client_fdctx_destroy (xlator_t *this, clnt_fd_ctx_t *fdctx);
 
+uint32_t client_get_lk_ver (clnt_conf_t *conf);
+
+int32_t client_type_to_gf_type (short l_type);
+
+int client_mark_fd_bad (xlator_t *this);
+
+int client_set_lk_version (xlator_t *this);
+
+int client_fd_lk_list_empty (fd_lk_ctx_t *lk_ctx, gf_boolean_t use_try_lock);
 #endif /* !_CLIENT_H */

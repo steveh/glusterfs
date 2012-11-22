@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -46,30 +36,20 @@ int trace_log_level = GF_LOG_INFO;
 static char *
 trace_stat_to_str (struct iatt *buf)
 {
-        char    *statstr           = NULL;
-        char     atime_buf[256]    = {0,};
-        char     mtime_buf[256]    = {0,};
-        char     ctime_buf[256]    = {0,};
-        int      asprint_ret_value = 0;
-        uint64_t ia_time           = 0;
+        char     *statstr           = NULL;
+        char      atime_buf[64]     = {0,};
+        char      mtime_buf[64]     = {0,};
+        char      ctime_buf[64]     = {0,};
+        int       asprint_ret_value = 0;
 
         if (!buf) {
                 statstr = NULL;
                 goto out;
         }
 
-        ia_time = buf->ia_atime;
-        strftime (atime_buf, 256, "[%b %d %H:%M:%S]",
-                  localtime ((time_t *)&ia_time));
-
-        ia_time = buf->ia_mtime;
-        strftime (mtime_buf, 256, "[%b %d %H:%M:%S]",
-                  localtime ((time_t *)&ia_time));
-
-        ia_time = buf->ia_ctime;
-        strftime (ctime_buf, 256, "[%b %d %H:%M:%S]",
-                  localtime ((time_t *)&ia_time));
-
+        gf_time_fmt (atime_buf, sizeof atime_buf, buf->ia_atime, gf_timefmt_bdT);
+        gf_time_fmt (mtime_buf, sizeof mtime_buf, buf->ia_mtime, gf_timefmt_bdT);
+        gf_time_fmt (ctime_buf, sizeof ctime_buf, buf->ia_ctime, gf_timefmt_bdT);
         asprint_ret_value = gf_asprintf (&statstr,
                                          "gfid=%s ino=%"PRIu64", mode=%o, "
                                          "nlink=%"GF_PRI_NLINK", uid=%u, "
@@ -96,7 +76,7 @@ int
 trace_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, fd_t *fd,
                   inode_t *inode, struct iatt *buf,
-                  struct iatt *preparent, struct iatt *postparent)
+                  struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         char  *statstr = NULL;
         char  *preparentstr = NULL;
@@ -115,12 +95,9 @@ trace_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 uuid_utoa (inode->gfid), op_ret, fd,
                                 statstr, preparentstr, postparentstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
-                        if (preparentstr)
-                                GF_FREE (preparentstr);
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (statstr);
+                        GF_FREE (preparentstr);
+                        GF_FREE (postparentstr);
 
                         /* for 'release' log */
                         fd_ctx_set (fd, this, 0);
@@ -133,14 +110,14 @@ trace_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (create, frame, op_ret, op_errno, fd, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
 trace_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                int32_t op_ret, int32_t op_errno, fd_t *fd)
+                int32_t op_ret, int32_t op_errno, fd_t *fd, dict_t *xdata)
 {
 
         if (trace_fop_names[GF_FOP_OPEN].enabled) {
@@ -154,14 +131,14 @@ trace_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 fd_ctx_set (fd, this, 0);
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd);
+        STACK_UNWIND_STRICT (open, frame, op_ret, op_errno, fd, xdata);
         return 0;
 }
 
 
 int
 trace_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                int32_t op_ret, int32_t op_errno, struct iatt *buf, dict_t *xdata)
 {
         char *statstr = NULL;
         if (trace_fop_names[GF_FOP_STAT].enabled) {
@@ -172,8 +149,7 @@ trace_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (frame->local),
                                 op_ret, statstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
+                        GF_FREE (statstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d)",
@@ -182,7 +158,7 @@ trace_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (stat, frame, op_ret, op_errno, buf);
+        STACK_UNWIND_STRICT (stat, frame, op_ret, op_errno, buf, xdata);
         return 0;
 }
 
@@ -190,7 +166,7 @@ trace_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno, struct iovec *vector,
-                 int32_t count, struct iatt *buf, struct iobref *iobref)
+                 int32_t count, struct iatt *buf, struct iobref *iobref, dict_t *xdata)
 {
         char  *statstr = NULL;
 
@@ -202,8 +178,7 @@ trace_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (frame->local),
                                 op_ret, statstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
+                        GF_FREE (statstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d)",
@@ -214,7 +189,7 @@ trace_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (readv, frame, op_ret, op_errno, vector, count,
-                             buf, iobref);
+                             buf, iobref, xdata);
         return 0;
 }
 
@@ -222,7 +197,7 @@ trace_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno,
-                  struct iatt *prebuf, struct iatt *postbuf)
+                  struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
 {
         char  *preopstr = NULL;
         char  *postopstr = NULL;
@@ -238,11 +213,9 @@ trace_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, op_ret,
                                 preopstr, postopstr);
 
-                        if (preopstr)
-                                GF_FREE (preopstr);
+                        GF_FREE (preopstr);
 
-                        if (postopstr)
-                                GF_FREE (postopstr);
+                        GF_FREE (postopstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d",
@@ -252,7 +225,7 @@ trace_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (writev, frame, op_ret, op_errno, prebuf, postbuf, xdata);
         return 0;
 }
 
@@ -260,7 +233,7 @@ trace_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 trace_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                   int32_t op_ret, int32_t op_errno, gf_dirent_t *buf)
+                   int32_t op_ret, int32_t op_errno, gf_dirent_t *buf, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_READDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -269,7 +242,7 @@ trace_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (readdir, frame, op_ret, op_errno, buf);
+        STACK_UNWIND_STRICT (readdir, frame, op_ret, op_errno, buf, xdata);
 
         return 0;
 }
@@ -277,7 +250,7 @@ trace_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 trace_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, gf_dirent_t *buf)
+                    int32_t op_ret, int32_t op_errno, gf_dirent_t *buf, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_READDIRP].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -286,7 +259,7 @@ trace_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (readdirp, frame, op_ret, op_errno, buf);
+        STACK_UNWIND_STRICT (readdirp, frame, op_ret, op_errno, buf, xdata);
 
         return 0;
 }
@@ -295,7 +268,7 @@ trace_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno,
-                 struct iatt *prebuf, struct iatt *postbuf)
+                 struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
 {
         char  *preopstr = NULL;
         char  *postopstr = NULL;
@@ -311,11 +284,9 @@ trace_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, op_ret,
                                 preopstr, postopstr);
 
-                        if (preopstr)
-                                GF_FREE (preopstr);
+                        GF_FREE (preopstr);
 
-                        if (postopstr)
-                                GF_FREE (postopstr);
+                        GF_FREE (postopstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d",
@@ -325,7 +296,7 @@ trace_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (fsync, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (fsync, frame, op_ret, op_errno, prebuf, postbuf, xdata);
 
         return 0;
 }
@@ -334,7 +305,7 @@ trace_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno,
-                   struct iatt *statpre, struct iatt *statpost)
+                   struct iatt *statpre, struct iatt *statpost, dict_t *xdata)
 {
         char  *preopstr = NULL;
         char  *postopstr = NULL;
@@ -350,11 +321,9 @@ trace_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, op_ret,
                                 preopstr, postopstr);
 
-                        if (preopstr)
-                                GF_FREE (preopstr);
+                        GF_FREE (preopstr);
 
-                        if (postopstr)
-                                GF_FREE (postopstr);
+                        GF_FREE (postopstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d)",
@@ -363,7 +332,7 @@ trace_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (setattr, frame, op_ret, op_errno, statpre, statpost);
+        STACK_UNWIND_STRICT (setattr, frame, op_ret, op_errno, statpre, statpost, xdata);
         return 0;
 }
 
@@ -371,7 +340,7 @@ trace_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno,
-                    struct iatt *statpre, struct iatt *statpost)
+                    struct iatt *statpre, struct iatt *statpost, dict_t *xdata)
 {
         char  *preopstr = NULL;
         char  *postopstr = NULL;
@@ -387,11 +356,9 @@ trace_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, op_ret,
                                 preopstr, postopstr);
 
-                        if (preopstr)
-                                GF_FREE (preopstr);
+                        GF_FREE (preopstr);
 
-                        if (postopstr)
-                                GF_FREE (postopstr);
+                        GF_FREE (postopstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d)",
@@ -401,7 +368,7 @@ trace_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (fsetattr, frame, op_ret, op_errno,
-                             statpre, statpost);
+                             statpre, statpost, xdata);
         return 0;
 }
 
@@ -409,7 +376,7 @@ trace_fsetattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno,
-                  struct iatt *preparent, struct iatt *postparent)
+                  struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         char *preparentstr = NULL;
         char *postparentstr = NULL;
@@ -425,11 +392,9 @@ trace_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (frame->local), op_ret, preparentstr,
                                 postparentstr);
 
-                        if (preparentstr)
-                                GF_FREE (preparentstr);
+                        GF_FREE (preparentstr);
 
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (postparentstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d)",
@@ -439,7 +404,7 @@ trace_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (unlink, frame, op_ret, op_errno,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
@@ -448,7 +413,7 @@ int
 trace_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct iatt *buf,
                   struct iatt *preoldparent, struct iatt *postoldparent,
-                  struct iatt *prenewparent, struct iatt *postnewparent)
+                  struct iatt *prenewparent, struct iatt *postnewparent, dict_t *xdata)
 {
         char  *statstr = NULL;
         char  *preoldparentstr = NULL;
@@ -473,17 +438,15 @@ trace_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 preoldparentstr, postoldparentstr,
                                 prenewparentstr, postnewparentstr);
 
-                        if (preoldparentstr)
-                                GF_FREE (preoldparentstr);
+                        GF_FREE (statstr);
 
-                        if (postoldparentstr)
-                                GF_FREE (postoldparentstr);
+                        GF_FREE (preoldparentstr);
 
-                        if (prenewparentstr)
-                                GF_FREE (prenewparentstr);
+                        GF_FREE (postoldparentstr);
 
-                        if (postnewparentstr)
-                                GF_FREE (postnewparentstr);
+                        GF_FREE (prenewparentstr);
+
+                        GF_FREE (postnewparentstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d",
@@ -495,7 +458,7 @@ trace_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         frame->local = NULL;
         STACK_UNWIND_STRICT (rename, frame, op_ret, op_errno, buf,
                              preoldparent, postoldparent,
-                             prenewparent, postnewparent);
+                             prenewparent, postnewparent, xdata);
         return 0;
 }
 
@@ -503,7 +466,7 @@ trace_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_readlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno,
-                    const char *buf, struct iatt *stbuf)
+                    const char *buf, struct iatt *stbuf, dict_t *xdata)
 {
         char *statstr = NULL;
 
@@ -522,12 +485,11 @@ trace_readlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (frame->local),
                                 op_ret, op_errno);
 
-                if (statstr)
-                        GF_FREE (statstr);
+                GF_FREE (statstr);
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (readlink, frame, op_ret, op_errno, buf, stbuf);
+        STACK_UNWIND_STRICT (readlink, frame, op_ret, op_errno, buf, stbuf, xdata);
         return 0;
 }
 
@@ -536,7 +498,7 @@ int
 trace_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno,
                   inode_t *inode, struct iatt *buf,
-                  dict_t *xattr, struct iatt *postparent)
+                  dict_t *xdata, struct iatt *postparent)
 {
         char  *statstr = NULL;
         char  *postparentstr = NULL;
@@ -552,10 +514,8 @@ trace_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (inode->gfid),
                                 op_ret, statstr, postparentstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (statstr);
+                        GF_FREE (postparentstr);
 
                         /* For 'forget' */
                         inode_ctx_put (inode, this, 0);
@@ -569,7 +529,7 @@ trace_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (lookup, frame, op_ret, op_errno, inode, buf,
-                             xattr, postparent);
+                             xdata, postparent);
         return 0;
 }
 
@@ -578,7 +538,7 @@ int
 trace_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno,
                    inode_t *inode, struct iatt *buf,
-                   struct iatt *preparent, struct iatt *postparent)
+                   struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         char  *statstr = NULL;
         char  *preparentstr = NULL;
@@ -597,14 +557,11 @@ trace_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (inode->gfid),
                                 op_ret, statstr, preparentstr, postparentstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
+                        GF_FREE (statstr);
 
-                        if (preparentstr)
-                                GF_FREE (preparentstr);
+                        GF_FREE (preparentstr);
 
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (postparentstr);
 
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
@@ -615,7 +572,7 @@ trace_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (symlink, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
@@ -624,7 +581,7 @@ int
 trace_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno,
                  inode_t *inode, struct iatt *buf,
-                 struct iatt *preparent, struct iatt *postparent)
+                 struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         char *statstr = NULL;
         char *preparentstr = NULL;
@@ -643,14 +600,11 @@ trace_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (inode->gfid),
                                 op_ret, statstr, preparentstr, postparentstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
+                        GF_FREE (statstr);
 
-                        if (preparentstr)
-                                GF_FREE (preparentstr);
+                        GF_FREE (preparentstr);
 
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (postparentstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": (op_ret=%d, op_errno=%d)",
@@ -660,7 +614,7 @@ trace_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (mknod, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
@@ -669,7 +623,7 @@ int
 trace_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno,
                  inode_t *inode, struct iatt *buf,
-                 struct iatt *preparent, struct iatt *postparent)
+                 struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         char  *statstr = NULL;
         char  *preparentstr = NULL;
@@ -688,14 +642,11 @@ trace_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (inode->gfid),
                                 op_ret, statstr, preparentstr, postparentstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
+                        GF_FREE (statstr);
 
-                        if (preparentstr)
-                                GF_FREE (preparentstr);
+                        GF_FREE (preparentstr);
 
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (postparentstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": (op_ret=%d, op_errno=%d)",
@@ -705,7 +656,7 @@ trace_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (mkdir, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
@@ -714,7 +665,7 @@ int
 trace_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 int32_t op_ret, int32_t op_errno,
                 inode_t *inode, struct iatt *buf,
-                struct iatt *preparent, struct iatt *postparent)
+                struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         char  *statstr = NULL;
         char  *preparentstr = NULL;
@@ -732,14 +683,11 @@ trace_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, op_ret,
                                 statstr, preparentstr, postparentstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
+                        GF_FREE (statstr);
 
-                        if (preparentstr)
-                                GF_FREE (preparentstr);
+                        GF_FREE (preparentstr);
 
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (postparentstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d",
@@ -750,14 +698,14 @@ trace_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (link, frame, op_ret, op_errno, inode, buf,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
 
 int
 trace_flush_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                 int32_t op_ret, int32_t op_errno)
+                 int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FLUSH].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -767,14 +715,14 @@ trace_flush_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (flush, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (flush, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
 
 int
 trace_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                   int32_t op_ret, int32_t op_errno, fd_t *fd)
+                   int32_t op_ret, int32_t op_errno, fd_t *fd, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_OPENDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -788,7 +736,7 @@ trace_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 fd_ctx_set (fd, this, 0);
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (opendir, frame, op_ret, op_errno, fd);
+        STACK_UNWIND_STRICT (opendir, frame, op_ret, op_errno, fd, xdata);
         return 0;
 }
 
@@ -796,7 +744,7 @@ trace_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                  int32_t op_ret, int32_t op_errno,
-                 struct iatt *preparent, struct iatt *postparent)
+                 struct iatt *preparent, struct iatt *postparent, dict_t *xdata)
 {
         char  *preparentstr = NULL;
         char  *postparentstr = NULL;
@@ -812,11 +760,9 @@ trace_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (frame->local),
                                 op_ret, preparentstr,  postparentstr);
 
-                        if (preparentstr)
-                                GF_FREE (preparentstr);
+                        GF_FREE (preparentstr);
 
-                        if (postparentstr)
-                                GF_FREE (postparentstr);
+                        GF_FREE (postparentstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d",
@@ -827,7 +773,7 @@ trace_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (rmdir, frame, op_ret, op_errno,
-                             preparent, postparent);
+                             preparent, postparent, xdata);
         return 0;
 }
 
@@ -835,7 +781,7 @@ trace_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno,
-                    struct iatt *prebuf, struct iatt *postbuf)
+                    struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
 {
         char  *preopstr = NULL;
         char  *postopstr = NULL;
@@ -851,11 +797,9 @@ trace_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, op_ret, preopstr,
                                 postopstr);
 
-                        if (preopstr)
-                                GF_FREE (preopstr);
+                        GF_FREE (preopstr);
 
-                        if (postopstr)
-                                GF_FREE (postopstr);
+                        GF_FREE (postopstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d",
@@ -865,14 +809,14 @@ trace_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (truncate, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (truncate, frame, op_ret, op_errno, prebuf, postbuf, xdata);
         return 0;
 }
 
 
 int
 trace_statfs_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                  int32_t op_ret, int32_t op_errno, struct statvfs *buf)
+                  int32_t op_ret, int32_t op_errno, struct statvfs *buf, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_STATFS].enabled) {
                 if (op_ret >= 0) {
@@ -892,14 +836,14 @@ trace_statfs_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (statfs, frame, op_ret, op_errno, buf);
+        STACK_UNWIND_STRICT (statfs, frame, op_ret, op_errno, buf, xdata);
         return 0;
 }
 
 
 int
 trace_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_SETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -909,14 +853,14 @@ trace_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (setxattr, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (setxattr, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
 
 int
 trace_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, dict_t *dict)
+                    int32_t op_ret, int32_t op_errno, dict_t *dict, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_GETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -926,14 +870,14 @@ trace_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict);
+        STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict, xdata);
 
         return 0;
 }
 
 int
 trace_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                     int32_t op_ret, int32_t op_errno)
+                     int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FSETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -943,14 +887,14 @@ trace_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (fsetxattr, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (fsetxattr, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
 
 int
 trace_fgetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                     int32_t op_ret, int32_t op_errno, dict_t *dict)
+                     int32_t op_ret, int32_t op_errno, dict_t *dict, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FGETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -960,14 +904,14 @@ trace_fgetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (fgetxattr, frame, op_ret, op_errno, dict);
+        STACK_UNWIND_STRICT (fgetxattr, frame, op_ret, op_errno, dict, xdata);
 
         return 0;
 }
 
 int
 trace_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                       int32_t op_ret, int32_t op_errno)
+                       int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_REMOVEXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -977,7 +921,7 @@ trace_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (removexattr, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (removexattr, frame, op_ret, op_errno, xdata);
 
         return 0;
 }
@@ -985,7 +929,7 @@ trace_removexattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 trace_fsyncdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FSYNCDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -995,14 +939,14 @@ trace_fsyncdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (fsyncdir, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (fsyncdir, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
 
 int
 trace_access_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                  int32_t op_ret, int32_t op_errno)
+                  int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_ACCESS].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1012,7 +956,7 @@ trace_access_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (access, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (access, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
@@ -1020,7 +964,7 @@ trace_access_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno,
-                     struct iatt *prebuf, struct iatt *postbuf)
+                     struct iatt *prebuf, struct iatt *postbuf, dict_t *xdata)
 {
         char  *prebufstr = NULL;
         char  *postbufstr = NULL;
@@ -1036,11 +980,9 @@ trace_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, op_ret,
                                 prebufstr, postbufstr);
 
-                        if (prebufstr)
-                                GF_FREE (prebufstr);
+                        GF_FREE (prebufstr);
 
-                        if (postbufstr)
-                                GF_FREE (postbufstr);
+                        GF_FREE (postbufstr);
 
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
@@ -1051,14 +993,14 @@ trace_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (ftruncate, frame, op_ret, op_errno, prebuf, postbuf);
+        STACK_UNWIND_STRICT (ftruncate, frame, op_ret, op_errno, prebuf, postbuf, xdata);
         return 0;
 }
 
 
 int
 trace_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                 int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                 int32_t op_ret, int32_t op_errno, struct iatt *buf, dict_t *xdata)
 {
         char *statstr = NULL;
 
@@ -1070,8 +1012,7 @@ trace_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 frame->root->unique, uuid_utoa (frame->local),
                                 op_ret, statstr);
 
-                        if (statstr)
-                                GF_FREE (statstr);
+                        GF_FREE (statstr);
                 } else {
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s op_ret=%d, op_errno=%d",
@@ -1081,14 +1022,14 @@ trace_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (fstat, frame, op_ret, op_errno, buf);
+        STACK_UNWIND_STRICT (fstat, frame, op_ret, op_errno, buf, xdata);
         return 0;
 }
 
 
 int
 trace_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-              int32_t op_ret, int32_t op_errno, struct gf_flock *lock)
+              int32_t op_ret, int32_t op_errno, struct gf_flock *lock, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_LK].enabled) {
                 if (op_ret >= 0) {
@@ -1107,7 +1048,7 @@ trace_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (lk, frame, op_ret, op_errno, lock);
+        STACK_UNWIND_STRICT (lk, frame, op_ret, op_errno, lock, xdata);
         return 0;
 }
 
@@ -1115,7 +1056,7 @@ trace_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int
 trace_entrylk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                   int32_t op_ret, int32_t op_errno)
+                   int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_ENTRYLK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1125,13 +1066,13 @@ trace_entrylk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (entrylk, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (entrylk, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
 int
 trace_fentrylk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FENTRYLK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1141,14 +1082,14 @@ trace_fentrylk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (fentrylk, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (fentrylk, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
 
 int
 trace_xattrop_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                   int32_t op_ret, int32_t op_errno, dict_t *dict)
+                   int32_t op_ret, int32_t op_errno, dict_t *dict, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_XATTROP].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1158,14 +1099,14 @@ trace_xattrop_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (xattrop, frame, op_ret, op_errno, dict);
+        STACK_UNWIND_STRICT (xattrop, frame, op_ret, op_errno, dict, xdata);
         return 0;
 }
 
 
 int
 trace_fxattrop_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, dict_t *dict)
+                    int32_t op_ret, int32_t op_errno, dict_t *dict, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FXATTROP].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1175,14 +1116,14 @@ trace_fxattrop_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (fxattrop, frame, op_ret, op_errno, dict);
+        STACK_UNWIND_STRICT (fxattrop, frame, op_ret, op_errno, dict, xdata);
         return 0;
 }
 
 
 int
 trace_inodelk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                   int32_t op_ret, int32_t op_errno)
+                   int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_INODELK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1192,13 +1133,13 @@ trace_inodelk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (inodelk, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (inodelk, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
 int
 trace_finodelk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FINODELK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1207,7 +1148,7 @@ trace_finodelk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         frame->local = NULL;
-        STACK_UNWIND_STRICT (finodelk, frame, op_ret, op_errno);
+        STACK_UNWIND_STRICT (finodelk, frame, op_ret, op_errno, xdata);
         return 0;
 }
 
@@ -1215,7 +1156,7 @@ trace_finodelk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_rchecksum_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno,
-                     uint32_t weak_checksum, uint8_t *strong_checksum)
+                     uint32_t weak_checksum, uint8_t *strong_checksum, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_RCHECKSUM].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1225,7 +1166,7 @@ trace_rchecksum_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         frame->local = NULL;
         STACK_UNWIND_STRICT (rchecksum, frame, op_ret, op_errno, weak_checksum,
-                             strong_checksum);
+                             strong_checksum, xdata);
 
         return 0;
 }
@@ -1235,7 +1176,7 @@ trace_rchecksum_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 int
 trace_entrylk (call_frame_t *frame, xlator_t *this,
                const char *volume, loc_t *loc, const char *basename,
-               entrylk_cmd cmd, entrylk_type type)
+               entrylk_cmd cmd, entrylk_type type, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_ENTRYLK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1251,14 +1192,14 @@ trace_entrylk (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, trace_entrylk_cbk,
                     FIRST_CHILD (this),
                     FIRST_CHILD (this)->fops->entrylk,
-                    volume, loc, basename, cmd, type);
+                    volume, loc, basename, cmd, type, xdata);
         return 0;
 }
 
 
 int
 trace_inodelk (call_frame_t *frame, xlator_t *this, const char *volume,
-               loc_t *loc, int32_t cmd, struct gf_flock *flock)
+               loc_t *loc, int32_t cmd, struct gf_flock *flock, dict_t *xdata)
 {
         char *cmd_str = NULL;
         char *type_str = NULL;
@@ -1320,14 +1261,14 @@ trace_inodelk (call_frame_t *frame, xlator_t *this, const char *volume,
         STACK_WIND (frame, trace_inodelk_cbk,
                     FIRST_CHILD (this),
                     FIRST_CHILD (this)->fops->inodelk,
-                    volume, loc, cmd, flock);
+                    volume, loc, cmd, flock, xdata);
         return 0;
 }
 
 
 int
 trace_finodelk (call_frame_t *frame, xlator_t *this, const char *volume,
-                fd_t *fd, int32_t cmd, struct gf_flock *flock)
+                fd_t *fd, int32_t cmd, struct gf_flock *flock, dict_t *xdata)
 {
         char *cmd_str = NULL, *type_str = NULL;
 
@@ -1387,14 +1328,14 @@ trace_finodelk (call_frame_t *frame, xlator_t *this, const char *volume,
         STACK_WIND (frame, trace_finodelk_cbk,
                     FIRST_CHILD (this),
                     FIRST_CHILD (this)->fops->finodelk,
-                    volume, fd, cmd, flock);
+                    volume, fd, cmd, flock, xdata);
         return 0;
 }
 
 
 int
 trace_xattrop (call_frame_t *frame, xlator_t *this, loc_t *loc,
-               gf_xattrop_flags_t flags, dict_t *dict)
+               gf_xattrop_flags_t flags, dict_t *dict, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_XATTROP].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1407,7 +1348,7 @@ trace_xattrop (call_frame_t *frame, xlator_t *this, loc_t *loc,
         STACK_WIND (frame, trace_xattrop_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->xattrop,
-                    loc, flags, dict);
+                    loc, flags, dict, xdata);
 
         return 0;
 }
@@ -1415,7 +1356,7 @@ trace_xattrop (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
 int
 trace_fxattrop (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                gf_xattrop_flags_t flags, dict_t *dict)
+                gf_xattrop_flags_t flags, dict_t *dict, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FXATTROP].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1428,7 +1369,7 @@ trace_fxattrop (call_frame_t *frame, xlator_t *this, fd_t *fd,
         STACK_WIND (frame, trace_fxattrop_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fxattrop,
-                    fd, flags, dict);
+                    fd, flags, dict, xdata);
 
         return 0;
 }
@@ -1436,7 +1377,7 @@ trace_fxattrop (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
 int
 trace_lookup (call_frame_t *frame, xlator_t *this,
-              loc_t *loc, dict_t *xattr_req)
+              loc_t *loc, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_LOOKUP].enabled) {
                 /* TODO: print all the keys mentioned in xattr_req */
@@ -1450,14 +1391,14 @@ trace_lookup (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, trace_lookup_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->lookup,
-                    loc, xattr_req);
+                    loc, xdata);
 
         return 0;
 }
 
 
 int
-trace_stat (call_frame_t *frame, xlator_t *this, loc_t *loc)
+trace_stat (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_STAT].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1470,14 +1411,14 @@ trace_stat (call_frame_t *frame, xlator_t *this, loc_t *loc)
         STACK_WIND (frame, trace_stat_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->stat,
-                    loc);
+                    loc, xdata);
 
         return 0;
 }
 
 
 int
-trace_readlink (call_frame_t *frame, xlator_t *this, loc_t *loc, size_t size)
+trace_readlink (call_frame_t *frame, xlator_t *this, loc_t *loc, size_t size, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_READLINK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1490,7 +1431,7 @@ trace_readlink (call_frame_t *frame, xlator_t *this, loc_t *loc, size_t size)
         STACK_WIND (frame, trace_readlink_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->readlink,
-                    loc, size);
+                    loc, size, xdata);
 
         return 0;
 }
@@ -1498,19 +1439,20 @@ trace_readlink (call_frame_t *frame, xlator_t *this, loc_t *loc, size_t size)
 
 int
 trace_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc,
-             mode_t mode, dev_t dev, dict_t *params)
+             mode_t mode, dev_t dev, mode_t umask, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_MKNOD].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s path=%s mode=%d dev=%"GF_PRI_DEV")",
+                        "%"PRId64": gfid=%s path=%s mode=0%o umask=0%o "
+                        "dev=%"GF_PRI_DEV")",
                         frame->root->unique, uuid_utoa (loc->inode->gfid),
-                        loc->path, mode, dev);
+                        loc->path, mode, umask, dev);
         }
 
         STACK_WIND (frame, trace_mknod_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->mknod,
-                    loc, mode, dev, params);
+                    loc, mode, dev, umask, xdata);
 
         return 0;
 }
@@ -1518,44 +1460,46 @@ trace_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
 int
 trace_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
-             dict_t *params)
+             mode_t umask, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_MKDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s path=%s mode=%d",
+                        "%"PRId64": gfid=%s path=%s mode=0%o umask=0%o",
                         frame->root->unique, uuid_utoa (loc->inode->gfid),
-                        loc->path, mode);
+                        loc->path, mode, umask);
         }
 
         STACK_WIND (frame, trace_mkdir_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->mkdir,
-                    loc, mode, params);
+                    loc, mode, umask, xdata);
         return 0;
 }
 
 
 int
-trace_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
+trace_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
+              dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_UNLINK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s path=%s",
+                        "%"PRId64": gfid=%s path=%s flag=%d",
                         frame->root->unique, uuid_utoa (loc->inode->gfid),
-                        loc->path);
+                        loc->path, xflag);
                 frame->local = loc->inode->gfid;
         }
 
         STACK_WIND (frame, trace_unlink_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->unlink,
-                    loc);
+                    loc, xflag, xdata);
         return 0;
 }
 
 
 int
-trace_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags)
+trace_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags,
+             dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_RMDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1568,7 +1512,7 @@ trace_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags)
         STACK_WIND (frame, trace_rmdir_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->rmdir,
-                    loc, flags);
+                    loc, flags, xdata);
 
         return 0;
 }
@@ -1576,26 +1520,27 @@ trace_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags)
 
 int
 trace_symlink (call_frame_t *frame, xlator_t *this, const char *linkpath,
-               loc_t *loc, dict_t *params)
+               loc_t *loc, mode_t umask, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_SYMLINK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s linkpath=%s, path=%s",
+                        "%"PRId64": gfid=%s linkpath=%s, path=%s umask=0%o",
                         frame->root->unique, uuid_utoa (loc->inode->gfid),
-                        linkpath, loc->path);
+                        linkpath, loc->path, umask);
         }
 
         STACK_WIND (frame, trace_symlink_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->symlink,
-                    linkpath, loc, params);
+                    linkpath, loc, umask, xdata);
 
         return 0;
 }
 
 
 int
-trace_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc)
+trace_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc,
+              dict_t *xdata)
 {
         char oldgfid[50] = {0,};
         char newgfid[50] = {0,};
@@ -1618,14 +1563,15 @@ trace_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc)
         STACK_WIND (frame, trace_rename_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->rename,
-                    oldloc, newloc);
+                    oldloc, newloc, xdata);
 
         return 0;
 }
 
 
 int
-trace_link (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc)
+trace_link (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc,
+            dict_t *xdata)
 {
         char oldgfid[50] = {0,};
         char newgfid[50] = {0,};
@@ -1648,18 +1594,17 @@ trace_link (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc)
         STACK_WIND (frame, trace_link_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->link,
-                    oldloc, newloc);
+                    oldloc, newloc, xdata);
         return 0;
 }
 
 
 int
 trace_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
-               struct iatt *stbuf, int32_t valid)
+               struct iatt *stbuf, int32_t valid, dict_t *xdata)
 {
-        uint64_t ia_time          = 0;
-        char     actime_str[256]  = {0,};
-        char     modtime_str[256] = {0,};
+        char      actime_str[64]   = {0,};
+        char      modtime_str[64]  = {0,};
 
         if (trace_fop_names[GF_FOP_SETATTR].enabled) {
                 if (valid & GF_SET_ATTR_MODE) {
@@ -1677,13 +1622,10 @@ trace_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
                 }
 
                 if (valid & (GF_SET_ATTR_ATIME | GF_SET_ATTR_MTIME)) {
-                        ia_time = stbuf->ia_atime;
-                        strftime (actime_str, 256, "[%b %d %H:%M:%S]",
-                                  localtime ((time_t *)&ia_time));
-
-                        ia_time = stbuf->ia_mtime;
-                        strftime (modtime_str, 256, "[%b %d %H:%M:%S]",
-                                  localtime ((time_t *)&ia_time));
+                        gf_time_fmt (actime_str, sizeof actime_str,
+                                     stbuf->ia_atime, gf_timefmt_bdT);
+                        gf_time_fmt (modtime_str, sizeof modtime_str,
+                                     stbuf->ia_mtime, gf_timefmt_bdT);
 
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s path=%s ia_atime=%s, ia_mtime=%s",
@@ -1696,7 +1638,7 @@ trace_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
         STACK_WIND (frame, trace_setattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setattr,
-                    loc, stbuf, valid);
+                    loc, stbuf, valid, xdata);
 
         return 0;
 }
@@ -1704,11 +1646,10 @@ trace_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
 int
 trace_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                struct iatt *stbuf, int32_t valid)
+                struct iatt *stbuf, int32_t valid, dict_t *xdata)
 {
-        uint64_t ia_time          = 0;
-        char     actime_str[256]  = {0,};
-        char     modtime_str[256] = {0,};
+        char      actime_str[64]  = {0,};
+        char      modtime_str[64] = {0,};
 
         if (trace_fop_names[GF_FOP_FSETATTR].enabled) {
                 if (valid & GF_SET_ATTR_MODE) {
@@ -1726,13 +1667,10 @@ trace_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
                 }
 
                 if (valid & (GF_SET_ATTR_ATIME | GF_SET_ATTR_MTIME)) {
-                        ia_time = stbuf->ia_atime;
-                        strftime (actime_str, 256, "[%b %d %H:%M:%S]",
-                                  localtime ((time_t *)&ia_time));
-
-                        ia_time = stbuf->ia_mtime;
-                        strftime (modtime_str, 256, "[%b %d %H:%M:%S]",
-                                  localtime ((time_t *)&ia_time));
+                        gf_time_fmt (actime_str, sizeof actime_str,
+                                     stbuf->ia_atime, gf_timefmt_bdT);
+                        gf_time_fmt (modtime_str, sizeof modtime_str,
+                                     stbuf->ia_mtime, gf_timefmt_bdT);
 
                         gf_log (this->name, GF_LOG_INFO,
                                 "%"PRId64": gfid=%s fd=%p ia_atime=%s, ia_mtime=%s",
@@ -1745,7 +1683,7 @@ trace_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
         STACK_WIND (frame, trace_fsetattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fsetattr,
-                    fd, stbuf, valid);
+                    fd, stbuf, valid, xdata);
 
         return 0;
 }
@@ -1753,7 +1691,7 @@ trace_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
 int
 trace_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc,
-                off_t offset)
+                off_t offset, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_TRUNCATE].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1766,7 +1704,7 @@ trace_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc,
         STACK_WIND (frame, trace_truncate_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->truncate,
-                    loc, offset);
+                    loc, offset, xdata);
 
         return 0;
 }
@@ -1774,58 +1712,63 @@ trace_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
 int
 trace_open (call_frame_t *frame, xlator_t *this, loc_t *loc,
-            int32_t flags, fd_t *fd, int32_t wbflags)
+            int32_t flags, fd_t *fd, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_OPEN].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s path=%s flags=%d fd=%p wbflags=%d",
+                        "%"PRId64": gfid=%s path=%s flags=%d fd=%p",
                         frame->root->unique, uuid_utoa (loc->inode->gfid),
-                        loc->path, flags, fd, wbflags);
+                        loc->path, flags, fd);
                 frame->local = loc->inode->gfid;
         }
 
         STACK_WIND (frame, trace_open_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->open,
-                    loc, flags, fd, wbflags);
+                    loc, flags, fd, xdata);
         return 0;
 }
 
 
 int
 trace_create (call_frame_t *frame, xlator_t *this, loc_t *loc,
-              int32_t flags, mode_t mode, fd_t *fd, dict_t *params)
+              int32_t flags, mode_t mode, mode_t umask, fd_t *fd,
+              dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_CREATE].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s path=%s, fd=%p, flags=0%o mode=0%o",
+                        "%"PRId64": gfid=%s path=%s fd=%p flags=0%o mode=0%o "
+                        "umask=0%o",
                         frame->root->unique, uuid_utoa (loc->inode->gfid),
-                        loc->path, fd, flags, mode);
+                        loc->path, fd, flags, mode, umask);
         }
 
         STACK_WIND (frame, trace_create_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->create,
-                    loc, flags, mode, fd, params);
+                    loc, flags, mode, umask, fd, xdata);
+
         return 0;
 }
 
 
 int
 trace_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
-             size_t size, off_t offset)
+             size_t size, off_t offset, uint32_t flags, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_READ].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s fd=%p, size=%"GF_PRI_SIZET", offset=%"PRId64")",
-                        frame->root->unique, uuid_utoa (fd->inode->gfid), fd, size, offset);
+                        "%"PRId64": gfid=%s fd=%p, size=%"GF_PRI_SIZET", "
+                        "offset=%"PRId64" flags=0%x)",
+                        frame->root->unique, uuid_utoa (fd->inode->gfid),
+                        fd, size, offset, flags);
                 frame->local = fd->inode->gfid;
         }
 
         STACK_WIND (frame, trace_readv_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->readv,
-                    fd, size, offset);
+                    fd, size, offset, flags, xdata);
         return 0;
 }
 
@@ -1833,26 +1776,27 @@ trace_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
 int
 trace_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
               struct iovec *vector, int32_t count,
-              off_t offset, struct iobref *iobref)
+              off_t offset, uint32_t flags, struct iobref *iobref, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_WRITE].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s fd=%p, count=%d, offset=%"PRId64")",
+                        "%"PRId64": gfid=%s fd=%p, count=%d, offset=%"PRId64
+                        " flag=0%x)",
                         frame->root->unique, uuid_utoa (fd->inode->gfid),
-                        fd, count, offset);
+                        fd, count, offset, flags);
                 frame->local = fd->inode->gfid;
         }
 
         STACK_WIND (frame, trace_writev_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->writev,
-                    fd, vector, count, offset, iobref);
+                    fd, vector, count, offset, flags, iobref, xdata);
         return 0;
 }
 
 
 int
-trace_statfs (call_frame_t *frame, xlator_t *this, loc_t *loc)
+trace_statfs (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_STATFS].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1864,13 +1808,13 @@ trace_statfs (call_frame_t *frame, xlator_t *this, loc_t *loc)
         STACK_WIND (frame, trace_statfs_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->statfs,
-                    loc);
+                    loc, xdata);
         return 0;
 }
 
 
 int
-trace_flush (call_frame_t *frame, xlator_t *this, fd_t *fd)
+trace_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FLUSH].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1882,13 +1826,13 @@ trace_flush (call_frame_t *frame, xlator_t *this, fd_t *fd)
         STACK_WIND (frame, trace_flush_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->flush,
-                    fd);
+                    fd, xdata);
         return 0;
 }
 
 
 int
-trace_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags)
+trace_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FSYNC].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1900,14 +1844,14 @@ trace_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags)
         STACK_WIND (frame, trace_fsync_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fsync,
-                    fd, flags);
+                    fd, flags, xdata);
         return 0;
 }
 
 
 int
 trace_setxattr (call_frame_t *frame, xlator_t *this,
-                loc_t *loc, dict_t *dict, int32_t flags)
+                loc_t *loc, dict_t *dict, int32_t flags, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_SETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1920,14 +1864,14 @@ trace_setxattr (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, trace_setxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->setxattr,
-                    loc, dict, flags);
+                    loc, dict, flags, xdata);
         return 0;
 }
 
 
 int
 trace_getxattr (call_frame_t *frame, xlator_t *this,
-                loc_t *loc, const char *name)
+                loc_t *loc, const char *name, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_GETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1940,14 +1884,14 @@ trace_getxattr (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, trace_getxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->getxattr,
-                    loc, name);
+                    loc, name, xdata);
         return 0;
 }
 
 
 int
 trace_removexattr (call_frame_t *frame, xlator_t *this,
-                   loc_t *loc, const char *name)
+                   loc_t *loc, const char *name, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_REMOVEXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1960,14 +1904,14 @@ trace_removexattr (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, trace_removexattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->removexattr,
-                    loc, name);
+                    loc, name, xdata);
 
         return 0;
 }
 
 
 int
-trace_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd)
+trace_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_OPENDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -1980,26 +1924,27 @@ trace_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd)
         STACK_WIND (frame, trace_opendir_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->opendir,
-                    loc, fd);
+                    loc, fd, xdata);
         return 0;
 }
 
 int
 trace_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
-                off_t offset)
+                off_t offset, dict_t *dict)
 {
         if (trace_fop_names[GF_FOP_READDIRP].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": gfid=%s fd=%p, size=%"GF_PRI_SIZET", offset=%"PRId64,
+                        "%"PRId64": gfid=%s fd=%p, size=%"GF_PRI_SIZET", "
+                        "offset=%"PRId64" dict=%p",
                         frame->root->unique, uuid_utoa (fd->inode->gfid),
-                        fd, size, offset);
+                        fd, size, offset, dict);
                 frame->local = fd->inode->gfid;
         }
 
         STACK_WIND (frame, trace_readdirp_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->readdirp,
-                    fd, size, offset);
+                    fd, size, offset, dict);
 
         return 0;
 }
@@ -2007,7 +1952,7 @@ trace_readdirp (call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
 
 int
 trace_readdir (call_frame_t *frame, xlator_t *this, fd_t *fd,
-               size_t size, off_t offset)
+               size_t size, off_t offset, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_READDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2020,7 +1965,7 @@ trace_readdir (call_frame_t *frame, xlator_t *this, fd_t *fd,
         STACK_WIND (frame, trace_readdir_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->readdir,
-                    fd, size, offset);
+                    fd, size, offset, xdata);
 
         return 0;
 }
@@ -2028,7 +1973,7 @@ trace_readdir (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
 int
 trace_fsyncdir (call_frame_t *frame, xlator_t *this,
-                fd_t *fd, int32_t datasync)
+                fd_t *fd, int32_t datasync, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FSYNCDIR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2041,13 +1986,13 @@ trace_fsyncdir (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, trace_fsyncdir_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fsyncdir,
-                    fd, datasync);
+                    fd, datasync, xdata);
         return 0;
 }
 
 
 int
-trace_access (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t mask)
+trace_access (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t mask, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_ACCESS].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2060,14 +2005,14 @@ trace_access (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t mask)
         STACK_WIND (frame, trace_access_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->access,
-                    loc, mask);
+                    loc, mask, xdata);
         return 0;
 }
 
 
 int32_t
 trace_rchecksum (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
-                 int32_t len)
+                 int32_t len, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_RCHECKSUM].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2080,7 +2025,7 @@ trace_rchecksum (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
         STACK_WIND (frame, trace_rchecksum_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->rchecksum,
-                    fd, offset, len);
+                    fd, offset, len, xdata);
 
         return 0;
 
@@ -2089,7 +2034,7 @@ trace_rchecksum (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset,
 int32_t
 trace_fentrylk (call_frame_t *frame, xlator_t *this, const char *volume,
                 fd_t *fd, const char *basename, entrylk_cmd cmd,
-                entrylk_type type)
+                entrylk_type type, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FENTRYLK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2105,14 +2050,14 @@ trace_fentrylk (call_frame_t *frame, xlator_t *this, const char *volume,
         STACK_WIND (frame, trace_fentrylk_cbk,
                     FIRST_CHILD (this),
                     FIRST_CHILD (this)->fops->fentrylk,
-                    volume, fd, basename, cmd, type);
+                    volume, fd, basename, cmd, type, xdata);
         return 0;
 
 }
 
 int32_t
 trace_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                 const char *name)
+                 const char *name, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FGETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2125,13 +2070,13 @@ trace_fgetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
         STACK_WIND (frame, trace_fgetxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fgetxattr,
-                    fd, name);
+                    fd, name, xdata);
         return 0;
 }
 
 int32_t
 trace_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
-                 dict_t *dict, int32_t flags)
+                 dict_t *dict, int32_t flags, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FSETXATTR].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2144,13 +2089,13 @@ trace_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
         STACK_WIND (frame, trace_fsetxattr_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fsetxattr,
-                    fd, dict, flags);
+                    fd, dict, flags, xdata);
         return 0;
 }
 
 int
 trace_ftruncate (call_frame_t *frame, xlator_t *this,
-                 fd_t *fd, off_t offset)
+                 fd_t *fd, off_t offset, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FTRUNCATE].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2163,14 +2108,14 @@ trace_ftruncate (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, trace_ftruncate_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->ftruncate,
-                    fd, offset);
+                    fd, offset, xdata);
 
         return 0;
 }
 
 
 int
-trace_fstat (call_frame_t *frame, xlator_t *this, fd_t *fd)
+trace_fstat (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_FSTAT].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2182,14 +2127,14 @@ trace_fstat (call_frame_t *frame, xlator_t *this, fd_t *fd)
         STACK_WIND (frame, trace_fstat_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->fstat,
-                    fd);
+                    fd, xdata);
         return 0;
 }
 
 
 int
 trace_lk (call_frame_t *frame, xlator_t *this, fd_t *fd,
-          int32_t cmd, struct gf_flock *lock)
+          int32_t cmd, struct gf_flock *lock, dict_t *xdata)
 {
         if (trace_fop_names[GF_FOP_LK].enabled) {
                 gf_log (this->name, GF_LOG_INFO,
@@ -2204,7 +2149,7 @@ trace_lk (call_frame_t *frame, xlator_t *this, fd_t *fd,
         STACK_WIND (frame, trace_lk_cbk,
                     FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->lk,
-                    fd, cmd, lock);
+                    fd, cmd, lock, xdata);
         return 0;
 }
 
@@ -2312,7 +2257,8 @@ init (xlator_t *this)
                 int i;
                 for (i = 0; i < GF_FOP_MAXVALUE; i++) {
                         trace_fop_names[i].name = (gf_fop_list[i] ?
-                                                   gf_fop_list[i] : ":O");
+                                                   (char *)gf_fop_list[i] :
+                                                   ":O");
                         trace_fop_names[i].enabled = 1;
                 }
         }

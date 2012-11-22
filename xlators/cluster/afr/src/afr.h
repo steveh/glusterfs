@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -32,9 +23,11 @@
 #include "afr-self-heal-algorithm.h"
 
 #include "libxlator.h"
+#include "timer.h"
 
 #define AFR_XATTR_PREFIX "trusted.afr"
 #define AFR_PATHINFO_HEADER "REPLICATE:"
+#define AFR_SH_READDIR_SIZE_KEY "self-heal-readdir-size"
 
 struct _pump_private;
 
@@ -43,8 +36,7 @@ typedef int (*afr_expunge_done_cbk_t) (call_frame_t *frame, xlator_t *this,
                                        int32_t op_errno);
 
 typedef int (*afr_impunge_done_cbk_t) (call_frame_t *frame, xlator_t *this,
-                                       int child, int32_t op_error,
-                                       int32_t op_errno);
+                                       int32_t op_error, int32_t op_errno);
 typedef int (*afr_post_remove_call_t) (call_frame_t *frame, xlator_t *this);
 
 typedef int (*afr_lock_cbk_t) (call_frame_t *frame, xlator_t *this);
@@ -56,6 +48,11 @@ typedef enum {
         AFR_POS_LOCAL,
         AFR_POS_REMOTE
 } afr_child_pos_t;
+
+typedef enum {
+        SPLIT_BRAIN = 1,
+        ALL_FOOLS = 2
+} afr_subvol_status_t;
 
 typedef enum {
         AFR_INODE_SET_READ_CTX = 1,
@@ -83,11 +80,24 @@ typedef struct afr_inode_ctx_ {
         int32_t  *fresh_children;//increasing order of latency
 } afr_inode_ctx_t;
 
+typedef enum {
+        NONE,
+        INDEX,
+        FULL,
+} afr_crawl_type_t;
+
 typedef struct afr_self_heald_ {
-        gf_boolean_t    enabled;
-        gf_boolean_t    pending;
-        gf_boolean_t    inprogress;
-        afr_child_pos_t *pos;
+        gf_boolean_t     enabled;
+        gf_boolean_t     iamshd;
+        afr_crawl_type_t *pending;
+        gf_boolean_t     *inprogress;
+        afr_child_pos_t  *pos;
+        gf_timer_t       **timer;
+        eh_t             *healed;
+        eh_t             *heal_failed;
+        eh_t             *split_brain;
+        char             *node_uuid;
+        int              timeout;
 } afr_self_heald_t;
 
 typedef struct _afr_private {
@@ -99,7 +109,6 @@ typedef struct _afr_private {
 
         xlator_t **children;
 
-        gf_lock_t root_inode_lk;
         int first_lookup;
         inode_t *root_inode;
 
@@ -122,12 +131,9 @@ typedef struct _afr_private {
         gf_boolean_t entry_change_log;      /* on/off */
 
         int read_child;               /* read-subvolume */
+        unsigned int hash_mode;       /* for when read_child is not set */
         int favorite_child;  /* subvolume to be preferred in resolving
                                          split-brain cases */
-
-        unsigned int data_lock_server_count;
-        unsigned int metadata_lock_server_count;
-        unsigned int entry_lock_server_count;
 
         gf_boolean_t inodelk_trace;
         gf_boolean_t entrylk_trace;
@@ -144,13 +150,17 @@ typedef struct _afr_private {
 
         pthread_mutex_t  mutex;
         struct list_head saved_fds;   /* list of fds on which locks have succeeded */
-        gf_boolean_t     optimistic_change_log;
-        gf_boolean_t     eager_lock;
-	gf_boolean_t     enforce_quorum;
+        gf_boolean_t      optimistic_change_log;
+        gf_boolean_t      eager_lock;
+	uint32_t          post_op_delay_secs;
+        unsigned int      quorum_count;
 
         char                   vol_uuid[UUID_SIZE + 1];
         int32_t                *last_event;
         afr_self_heald_t       shd;
+        gf_boolean_t           choose_local;
+        gf_boolean_t           did_discovery;
+        uint64_t               sh_readdir_size;
 } afr_private_t;
 
 typedef struct {
@@ -162,6 +172,8 @@ typedef struct {
         gf_boolean_t do_entry_self_heal;
         gf_boolean_t do_gfid_self_heal;
         gf_boolean_t do_missing_entry_self_heal;
+        gf_boolean_t force_confirm_spb; /* Check for split-brains even when
+                                           self-heal is turned off */
 
         gf_boolean_t forced_merge;        /* Is this a self-heal triggered to
                                              forcibly merge the directories? */
@@ -179,7 +191,7 @@ typedef struct {
            background, this function will be called as soon as possible. */
 
         int (*unwind) (call_frame_t *frame, xlator_t *this, int32_t op_ret,
-                       int32_t op_errno);
+                       int32_t op_errno, int32_t sh_failed);
 
         /* End of external interface members */
 
@@ -192,7 +204,6 @@ typedef struct {
 
         afr_expunge_done_cbk_t expunge_done;
         afr_impunge_done_cbk_t impunge_done;
-        int32_t impunge_ret_child;
 
         /* array of xattr's, one for each child */
         dict_t **xattr;
@@ -226,12 +237,12 @@ typedef struct {
         unsigned char *locked_nodes;
         int lock_count;
 
-        mode_t impunging_entry_mode;
         const char *linkname;
         gf_boolean_t entries_skipped;
 
         int   op_failed;
 
+        gf_boolean_t sync_done;
         gf_boolean_t data_lock_held;
         gf_boolean_t eof_reached;
         fd_t  *healing_fd;
@@ -251,6 +262,7 @@ typedef struct {
 
         afr_sh_algo_private_t *private;
 
+        struct afr_sh_algorithm  *algo;
         afr_lock_cbk_t data_lock_success_handler;
         afr_lock_cbk_t data_lock_failure_handler;
         int (*completion_cbk) (call_frame_t *frame, xlator_t *this);
@@ -258,6 +270,8 @@ typedef struct {
         int (*algo_completion_cbk) (call_frame_t *frame, xlator_t *this);
         int (*algo_abort_cbk) (call_frame_t *frame, xlator_t *this);
         void (*gfid_sh_success_cbk) (call_frame_t *sh_frame, xlator_t *this);
+        gf_boolean_t    mdata_spb;
+        gf_boolean_t    data_spb;
 
         call_frame_t *sh_frame;
 } afr_self_heal_t;
@@ -373,7 +387,7 @@ typedef struct _afr_local {
         unsigned char read_child_returned;
         unsigned int first_up_child;
 
-        pid_t saved_pid;
+	gf_lkowner_t  saved_lk_owner;
 
         int32_t op_ret;
         int32_t op_errno;
@@ -406,6 +420,7 @@ typedef struct _afr_local {
 
         dict_t  *dict;
         int      optimistic_change_log;
+	gf_boolean_t      delayed_post_op;
 
         gf_boolean_t    fop_paused;
         int (*fop_call_continue) (call_frame_t *frame, xlator_t *this);
@@ -423,6 +438,7 @@ typedef struct _afr_local {
                 } statfs;
 
                 struct {
+                        uint32_t parent_entrylk;
                         uuid_t  gfid_req;
                         inode_t *inode;
                         struct iatt buf;
@@ -434,11 +450,13 @@ typedef struct _afr_local {
                         int32_t read_child;
                         int32_t *sources;
                         int32_t *success_children;
+                        int32_t **pending_matrix;
+                        gf_boolean_t fresh_lookup;
+                        gf_boolean_t possible_spb;
                 } lookup;
 
                 struct {
                         int32_t flags;
-                        int32_t wbflags;
                 } open;
 
                 struct {
@@ -471,13 +489,14 @@ typedef struct _afr_local {
                 struct {
                         char *name;
                         int last_index;
-                        long pathinfo_len;
+                        long xattr_len;
                 } getxattr;
 
                 struct {
                         size_t size;
                         off_t offset;
                         int last_index;
+                        uint32_t flags;
                 } readv;
 
                 /* dir read */
@@ -495,7 +514,7 @@ typedef struct _afr_local {
                         int32_t op_errno;
                         size_t size;
                         off_t offset;
-
+                        dict_t *dict;
                         gf_boolean_t failed;
                         int last_index;
                 } readdir;
@@ -511,6 +530,7 @@ typedef struct _afr_local {
                         struct iobref *iobref;
                         int32_t count;
                         off_t offset;
+                        uint32_t flags;
                 } writev;
 
                 struct {
@@ -550,91 +570,59 @@ typedef struct _afr_local {
                 } setxattr;
 
                 struct {
+                        dict_t *dict;
+                        int32_t flags;
+                } fsetxattr;
+
+                struct {
                         char *name;
                 } removexattr;
 
+                struct {
+                        dict_t *xattr;
+                } xattrop;
+
+                struct {
+                        dict_t *xattr;
+                } fxattrop;
+
                 /* dir write */
+
+                struct {
+                        inode_t *inode;
+                        struct iatt buf;
+                        struct iatt preparent;
+                        struct iatt postparent;
+                        struct iatt prenewparent;
+                        struct iatt postnewparent;
+                } dir_fop; //common structure for all dir fops
 
                 struct {
                         fd_t *fd;
                         dict_t *params;
                         int32_t flags;
                         mode_t mode;
-                        inode_t *inode;
-                        struct iatt buf;
-                        struct iatt preparent;
-                        struct iatt postparent;
-                        struct iatt read_child_buf;
                 } create;
 
                 struct {
                         dev_t dev;
                         mode_t mode;
                         dict_t *params;
-                        inode_t *inode;
-                        struct iatt buf;
-                        struct iatt preparent;
-                        struct iatt postparent;
-                        struct iatt read_child_buf;
                 } mknod;
 
                 struct {
                         int32_t mode;
                         dict_t *params;
-                        inode_t *inode;
-                        struct iatt buf;
-                        struct iatt read_child_buf;
-                        struct iatt preparent;
-                        struct iatt postparent;
                 } mkdir;
 
                 struct {
-                        int32_t op_ret;
-                        int32_t op_errno;
-                        struct iatt preparent;
-                        struct iatt postparent;
-                } unlink;
-
-                struct {
-                        int   flags;
-                        int32_t op_ret;
-                        int32_t op_errno;
-                        struct iatt preparent;
-                        struct iatt postparent;
+                        int flags;
                 } rmdir;
 
                 struct {
-                        struct iatt buf;
-                        struct iatt read_child_buf;
-                        struct iatt preoldparent;
-                        struct iatt prenewparent;
-                        struct iatt postoldparent;
-                        struct iatt postnewparent;
-                } rename;
-
-                struct {
-                        inode_t *inode;
-                        struct iatt buf;
-                        struct iatt read_child_buf;
-                        struct iatt preparent;
-                        struct iatt postparent;
-                } link;
-
-                struct {
-                        inode_t *inode;
                         dict_t *params;
-                        struct iatt buf;
-                        struct iatt read_child_buf;
                         char *linkpath;
-                        struct iatt preparent;
-                        struct iatt postparent;
                 } symlink;
-
-                struct {
-                        int32_t flags;
-                        dir_entry_t *entries;
-                        int32_t count;
-                } setdents;
         } cont;
 
         struct {
@@ -650,12 +638,7 @@ typedef struct _afr_local {
 
                 afr_transaction_type type;
 
-                int success_count;
-                int erase_pending;
-                int failure_count;
-
-                int last_tried;
-                int32_t *child_errno;
+                int32_t         **txn_changelog;//changelog after pre+post ops
                 unsigned char   *pre_op;
 
                 call_frame_t *main_frame;
@@ -674,6 +657,14 @@ typedef struct _afr_local {
         afr_self_heal_t self_heal;
 
         struct marker_str     marker;
+
+        /* extra data for fops */
+        dict_t         *xdata_req;
+        dict_t         *xdata_rsp;
+
+        mode_t          umask;
+        int             xflag;
+        gf_boolean_t    do_discovery;
 } afr_local_t;
 
 typedef enum {
@@ -696,7 +687,6 @@ typedef struct {
         unsigned int *lock_acquired;
 
         int flags;
-        int32_t wbflags;
         uint64_t up_count;   /* number of CHILD_UPs this fd has seen */
         uint64_t down_count; /* number of CHILD_DOWNs this fd has seen */
 
@@ -708,19 +698,23 @@ typedef struct {
 
         unsigned char *locked_on; /* which subvolumes locks have been successful */
 	struct list_head  paused_calls; /* queued calls while fix_open happens  */
+
+	/* used for delayed-post-op optimization */
+	pthread_mutex_t    delay_lock;
+	gf_timer_t        *delay_timer;
+	call_frame_t      *delay_frame;
 } afr_fd_ctx_t;
 
 
 /* try alloc and if it fails, goto label */
-#define ALLOC_OR_GOTO(var, type, label) do {                    \
-                var = GF_CALLOC (sizeof (type), 1,              \
-                                 gf_afr_mt_##type);             \
-                if (!var) {                                     \
-                        gf_log (this->name, GF_LOG_ERROR,       \
-                                "out of memory :(");            \
-                        op_errno = ENOMEM;                      \
-                        goto label;                             \
-                }                                               \
+#define AFR_LOCAL_ALLOC_OR_GOTO(var, label) do {                    \
+                var = mem_get0 (THIS->local_pool);                  \
+                if (!var) {                                         \
+                        gf_log (this->name, GF_LOG_ERROR,           \
+                                "out of memory :(");                \
+                        op_errno = ENOMEM;                          \
+                        goto label;                                 \
+                }                                                   \
         } while (0);
 
 
@@ -741,8 +735,7 @@ int
 pump_command_reply (call_frame_t *frame, xlator_t *this);
 
 int32_t
-afr_notify (xlator_t *this, int32_t event,
-            void *data, ...);
+afr_notify (xlator_t *this, int32_t event, void *data, void *data2);
 
 int
 afr_attempt_lock_recovery (xlator_t *this, int32_t child_index);
@@ -755,7 +748,7 @@ afr_mark_locked_nodes (xlator_t *this, fd_t *fd,
                        unsigned char *locked_nodes);
 
 void
-afr_set_lk_owner (call_frame_t *frame, xlator_t *this);
+afr_set_lk_owner (call_frame_t *frame, xlator_t *this, void *lk_owner);
 
 int
 afr_set_lock_number (call_frame_t *frame, xlator_t *this);
@@ -786,6 +779,9 @@ afr_lk_transfer_datalock (call_frame_t *dst, call_frame_t *src,
 int pump_start (call_frame_t *frame, xlator_t *this);
 
 int
+__afr_fd_ctx_set (xlator_t *this, fd_t *fd);
+
+int
 afr_fd_ctx_set (xlator_t *this, fd_t *fd);
 
 int32_t
@@ -795,8 +791,8 @@ void
 afr_inode_set_read_ctx (xlator_t *this, inode_t *inode, int32_t read_child,
                         int32_t *fresh_children);
 
-void
-afr_build_parent_loc (loc_t *parent, loc_t *child);
+int
+afr_build_parent_loc (loc_t *parent, loc_t *child, int32_t *op_errno);
 
 unsigned int
 afr_up_children_count (unsigned char *child_up, unsigned int child_count);
@@ -831,7 +827,7 @@ afr_set_split_brain (xlator_t *this, inode_t *inode, gf_boolean_t set);
 
 int
 afr_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
-          fd_t *fd, int32_t wbflags);
+          fd_t *fd, dict_t *xdata);
 
 void
 afr_set_opendir_done (xlator_t *this, inode_t *inode);
@@ -858,22 +854,27 @@ afr_launch_openfd_self_heal (call_frame_t *frame, xlator_t *this, fd_t *fd);
                         frame->local = NULL;                    \
                 }                                               \
                 STACK_UNWIND_STRICT (fop, frame, params);       \
-                afr_local_cleanup (__local, __this);            \
-                GF_FREE (__local);                              \
+                if (__local) {                                  \
+                        afr_local_cleanup (__local, __this);    \
+                        mem_put (__local);                      \
+                }                                               \
+        } while (0)
+
+#define AFR_STACK_DESTROY(frame)                                \
+        do {                                                    \
+                afr_local_t *__local = NULL;                    \
+                xlator_t    *__this = NULL;                     \
+                __local = frame->local;                         \
+                __this = frame->this;                           \
+                frame->local = NULL;                            \
+                STACK_DESTROY (frame->root);                    \
+                if (__local) {                                  \
+                        afr_local_cleanup (__local, __this);    \
+                        mem_put (__local);                      \
+                }                                               \
         } while (0);
 
-#define AFR_STACK_DESTROY(frame)                        \
-        do {                                            \
-                afr_local_t *__local = NULL;            \
-                xlator_t    *__this = NULL;             \
-                __local = frame->local;                 \
-                __this = frame->this;                   \
-                frame->local = NULL;                    \
-                STACK_DESTROY (frame->root);            \
-                afr_local_cleanup (__local, __this);    \
-                GF_FREE (__local);                      \
-        } while (0);
-
+#define AFR_NUM_CHANGE_LOGS            3 /*data + metadata + entry*/
 /* allocate and return a string that is the basename of argument */
 static inline char *
 AFR_BASENAME (const char *str)
@@ -897,7 +898,7 @@ int32_t *
 afr_children_create (int32_t child_count);
 
 int
-AFR_LOCAL_INIT (afr_local_t *local, afr_private_t *priv);
+afr_local_init (afr_local_t *local, afr_private_t *priv, int32_t *op_errno);
 
 int
 afr_internal_lock_init (afr_internal_lock_t *lk, size_t child_count,
@@ -909,12 +910,13 @@ afr_first_up_child (unsigned char *child_up, size_t child_count);
 int
 afr_select_read_child_from_policy (int32_t *fresh_children, int32_t child_count,
                                    int32_t prev_read_child,
-                                   int32_t config_read_child, int32_t *sources);
+                                   int32_t config_read_child, int32_t *sources,
+                                   unsigned int hmode, uuid_t gfid);
 
 void
 afr_set_read_ctx_from_policy (xlator_t *this, inode_t *inode,
                               int32_t *fresh_children, int32_t prev_read_child,
-                              int32_t config_read_child);
+                              int32_t config_read_child, uuid_t gfid);
 
 int32_t
 afr_get_call_child (xlator_t *this, unsigned char *child_up, int32_t read_child,
@@ -970,7 +972,7 @@ int32_t
 afr_resultant_errno_get (int32_t *children,
                          int *child_errno, unsigned int child_count);
 void
-afr_inode_rm_stale_children (xlator_t *this, inode_t *inode, int32_t read_child,
+afr_inode_rm_stale_children (xlator_t *this, inode_t *inode,
                              int32_t *stale_children);
 void
 afr_launch_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode,
@@ -978,7 +980,8 @@ afr_launch_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode,
                       void (*gfid_sh_success_cbk) (call_frame_t *sh_frame,
                                                    xlator_t *this),
                       int (*unwind) (call_frame_t *frame, xlator_t *this,
-                                     int32_t op_ret, int32_t op_errno));
+                                     int32_t op_ret, int32_t op_errno,
+                                     int32_t sh_failed));
 int
 afr_fix_open (call_frame_t *frame, xlator_t *this, afr_fd_ctx_t *fd_ctx,
               int need_open_count, int *need_open);
@@ -1000,22 +1003,33 @@ void
 afr_set_low_priority (call_frame_t *frame);
 int
 afr_child_fd_ctx_set (xlator_t *this, fd_t *fd, int32_t child,
-                      int flags, int32_t wb_flags);
+                      int flags);
 
 gf_boolean_t
 afr_have_quorum (char *logname, afr_private_t *priv);
+
+void
+afr_matrix_cleanup (int32_t **pending, unsigned int m);
+
+int32_t**
+afr_matrix_create (unsigned int m, unsigned int n);
+/*
+ * Special value indicating we should use the "auto" quorum method instead of
+ * a fixed value (including zero to turn off quorum enforcement).
+ */
+#define AFR_QUORUM_AUTO INT_MAX
 
 /*
  * Having this as a macro will make debugging a bit weirder, but does reduce
  * the probability of functions handling this check inconsistently.
  */
 #define QUORUM_CHECK(_func,_label) do {                                  \
-	if (priv->enforce_quorum && !afr_have_quorum(this->name,priv)) { \
-		gf_log(this->name,GF_LOG_WARNING,                        \
-		       "failing "#_func" due to lack of quorum");        \
-		op_errno = EROFS;                                        \
-		goto _label;                                             \
-	}                                                                \
+        if (priv->quorum_count && !afr_have_quorum(this->name,priv)) { \
+                gf_log(this->name,GF_LOG_WARNING,                        \
+                       "failing "#_func" due to lack of quorum");        \
+                op_errno = EROFS;                                        \
+                goto _label;                                             \
+        }                                                                \
 } while (0);
 
 #endif /* __AFR_H__ */

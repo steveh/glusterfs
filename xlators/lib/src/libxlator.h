@@ -1,3 +1,12 @@
+/*
+   Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
+
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
+*/
 #ifndef _LIBXLATOR_H
 #define _LIBXLATOR_H
 
@@ -26,7 +35,8 @@
 
 
 typedef int32_t (*xlator_specf_unwind_t) (call_frame_t *frame,
-                                         int op_ret, int op_errno, dict_t *dict);
+                                          int op_ret, int op_errno,
+                                          dict_t *dict, dict_t *xdata);
 
 
 struct volume_mark {
@@ -56,10 +66,13 @@ struct marker_str {
         xlator_specf_unwind_t  xl_specf_unwind;
         void                  *xl_local;
         char                  *vol_uuid;
+        uint8_t                retval;
 };
 
+typedef struct marker_str xl_marker_local_t;
+
 static inline gf_boolean_t
-marker_has_volinfo (struct marker_str *marker)
+marker_has_volinfo (xl_marker_local_t *marker)
 {
        if (marker->volmark)
                 return _gf_true;
@@ -69,11 +82,11 @@ marker_has_volinfo (struct marker_str *marker)
 
 int32_t
 cluster_markerxtime_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, dict_t *dict);
+                         int op_ret, int op_errno, dict_t *dict, dict_t *xdata);
 
 int32_t
 cluster_markeruuid_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, dict_t *dict);
+                        int op_ret, int op_errno, dict_t *dict, dict_t *xdata);
 
 int32_t
 cluster_getmarkerattr (call_frame_t *frame,xlator_t *this, loc_t *loc,

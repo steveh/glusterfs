@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -81,10 +71,10 @@ out:
         return ret_lock;
 }
 
-static int
+static inline int
 __same_owner_reservelk (posix_lock_t *l1, posix_lock_t *l2)
 {
-        return ((l1->owner == l2->owner));
+        return (is_same_lkowner (&l1->owner, &l2->owner));
 
 }
 
@@ -187,10 +177,10 @@ __lock_reservelk (xlator_t *this, pl_inode_t *pl_inode, posix_lock_t *lock,
                 list_add_tail (&lock->list, &pl_inode->blocked_reservelks);
 
                 gf_log (this->name, GF_LOG_TRACE,
-                        "%s (pid=%d) lk-owner:%"PRIu64" %"PRId64" - %"PRId64" => Blocked",
+                        "%s (pid=%d) lk-owner:%s %"PRId64" - %"PRId64" => Blocked",
                         lock->fl_type == F_UNLCK ? "Unlock" : "Lock",
                         lock->client_pid,
-                        lock->owner,
+                        lkowner_utoa (&lock->owner),
                         lock->user_flock.l_start,
                         lock->user_flock.l_len);
 
@@ -292,14 +282,15 @@ grant_blocked_reserve_locks (xlator_t *this, pl_inode_t *pl_inode)
 
         list_for_each_entry_safe (lock, tmp, &granted, list) {
                 gf_log (this->name, GF_LOG_TRACE,
-                        "%s (pid=%d) (lk-owner=%"PRIu64") %"PRId64" - %"PRId64" => Granted",
+                        "%s (pid=%d) (lk-owner=%s) %"PRId64" - %"PRId64" => Granted",
                         lock->fl_type == F_UNLCK ? "Unlock" : "Lock",
                         lock->client_pid,
-                        lock->owner,
+                        lkowner_utoa (&lock->owner),
                         lock->user_flock.l_start,
                         lock->user_flock.l_len);
 
-                STACK_UNWIND_STRICT (lk, lock->frame, 0, 0, &lock->user_flock);
+                STACK_UNWIND_STRICT (lk, lock->frame, 0, 0, &lock->user_flock,
+                                     NULL);
         }
 
 }
@@ -376,7 +367,9 @@ grant_blocked_lock_calls (xlator_t *this, pl_inode_t *pl_inode)
                                 pl_trace_out (this, lock->frame, fd, NULL, cmd,
                                               &lock->user_flock, -1, EAGAIN, NULL);
                                 pl_update_refkeeper (this, fd->inode);
-                                STACK_UNWIND_STRICT (lk, lock->frame, -1, EAGAIN, &lock->user_flock);
+                                STACK_UNWIND_STRICT (lk, lock->frame, -1,
+                                                     EAGAIN, &lock->user_flock,
+                                                     NULL);
                                 __destroy_lock (lock);
                         }
                 }
@@ -429,18 +422,18 @@ pl_reserve_setlk (xlator_t *this, pl_inode_t *pl_inode, posix_lock_t *lock,
                         ret = __lock_reservelk (this, pl_inode, lock, can_block);
                         if (ret < 0)
                                 gf_log (this->name, GF_LOG_TRACE,
-                                        "%s (pid=%d) (lk-owner=%"PRIu64") %"PRId64" - %"PRId64" => NOK",
+                                        "%s (pid=%d) (lk-owner=%s) %"PRId64" - %"PRId64" => NOK",
                                         lock->fl_type == F_UNLCK ? "Unlock" : "Lock",
                                         lock->client_pid,
-                                        lock->owner,
+                                        lkowner_utoa (&lock->owner),
                                         lock->user_flock.l_start,
                                         lock->user_flock.l_len);
                         else
                                 gf_log (this->name, GF_LOG_TRACE,
-                                        "%s (pid=%d) (lk-owner=%"PRIu64") %"PRId64" - %"PRId64" => OK",
+                                        "%s (pid=%d) (lk-owner=%s) %"PRId64" - %"PRId64" => OK",
                                         lock->fl_type == F_UNLCK ? "Unlock" : "Lock",
                                         lock->client_pid,
-                                        lock->owner,
+                                        lkowner_utoa (&lock->owner),
                                         lock->fl_start,
                                         lock->fl_end);
 

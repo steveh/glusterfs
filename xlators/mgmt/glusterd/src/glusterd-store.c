@@ -1,21 +1,13 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
+
 #ifndef _CONFIG_H
 #define _CONFIG_H
 #include "config.h"
@@ -42,6 +34,7 @@
 #include "glusterd-sm.h"
 #include "glusterd-op-sm.h"
 #include "glusterd-utils.h"
+#include "glusterd-hooks.h"
 #include "glusterd-store.h"
 
 #include "rpc-clnt.h"
@@ -96,13 +89,59 @@ glusterd_store_mkstemp (glusterd_store_handle_t *shandle)
         GF_ASSERT (shandle->path);
 
         snprintf (tmppath, sizeof (tmppath), "%s.tmp", shandle->path);
-        fd = open (tmppath, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        fd = open (tmppath, O_RDWR | O_CREAT | O_TRUNC | O_SYNC, 0600);
         if (fd <= 0) {
                 gf_log ("glusterd", GF_LOG_ERROR, "Failed to open %s, "
                         "error: %s", tmppath, strerror (errno));
         }
 
         return fd;
+}
+
+int
+glusterd_store_sync_direntry (char *path)
+{
+        int             ret     = -1;
+        int             dirfd   = -1;
+        char            *dir    = NULL;
+        char            *pdir   = NULL;
+        xlator_t        *this = NULL;
+
+        this = THIS;
+
+        dir = gf_strdup (path);
+        if (!dir)
+                goto out;
+
+        pdir = dirname (dir);
+        dirfd = open (pdir, O_RDONLY);
+        if (dirfd == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to open directory "
+                        "%s, due to %s", pdir, strerror (errno));
+                goto out;
+        }
+
+        ret = fsync (dirfd);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Failed to fsync %s, due to "
+                        "%s", pdir, strerror (errno));
+                goto out;
+        }
+
+        ret = 0;
+out:
+        if (dirfd >= 0) {
+                ret = close (dirfd);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "Failed to close "
+                                "%s, due to %s", pdir, strerror (errno));
+                }
+        }
+
+        if (dir)
+                GF_FREE (dir);
+
+        return ret;
 }
 
 int32_t
@@ -117,10 +156,13 @@ glusterd_store_rename_tmppath (glusterd_store_handle_t *shandle)
         snprintf (tmppath, sizeof (tmppath), "%s.tmp", shandle->path);
         ret = rename (tmppath, shandle->path);
         if (ret) {
-                gf_log ("glusterd", GF_LOG_ERROR, "Failed to mv %s to %s, "
+                gf_log (THIS->name, GF_LOG_ERROR, "Failed to rename %s to %s, "
                         "error: %s", tmppath, shandle->path, strerror (errno));
+                goto out;
         }
 
+        ret = glusterd_store_sync_direntry (tmppath);
+out:
         return ret;
 }
 
@@ -232,8 +274,9 @@ glusterd_store_is_valid_brickpath (char *volname, char *brick)
         glusterd_brickinfo_t    *brickinfo = NULL;
         glusterd_volinfo_t      *volinfo = NULL;
         int32_t                 ret = 0;
+        size_t                  volname_len = strlen (volname);
 
-        ret = glusterd_brickinfo_from_brick (brick, &brickinfo);
+        ret = glusterd_brickinfo_new_from_brick (brick, &brickinfo);
         if (ret) {
                 gf_log ("", GF_LOG_WARNING, "brick path validation failed");
                 ret = 0;
@@ -245,7 +288,12 @@ glusterd_store_is_valid_brickpath (char *volname, char *brick)
                 ret = 0;
                 goto out;
         }
-        strncpy (volinfo->volname, volname, sizeof (volinfo->volname));
+        if (volname_len >= sizeof (volinfo->volname)) {
+                gf_log ("", GF_LOG_WARNING, "volume name too long");
+                ret = 0;
+                goto out;
+        }
+        memcpy (volinfo->volname, volname, volname_len+1);
         glusterd_store_brickinfopath_set (volinfo, brickinfo, brickpath,
                                                 sizeof (brickpath));
 
@@ -274,6 +322,10 @@ glusterd_store_volinfo_brick_fname_write (int vol_fd,
         glusterd_store_brickinfofname_set (brickinfo, brickfname,
                                         sizeof (brickfname));
         ret = glusterd_store_save_value (vol_fd, key, brickfname);
+        if (ret)
+                goto out;
+
+out:
         return ret;
 }
 
@@ -324,6 +376,8 @@ glusterd_store_brickinfo_write (int fd, glusterd_brickinfo_t *brickinfo)
         snprintf (value, sizeof(value), "%d", brickinfo->decommissioned);
         ret = glusterd_store_save_value (fd, GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED,
                                          value);
+        if (ret)
+                goto out;
 
 out:
         gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
@@ -347,7 +401,6 @@ glusterd_store_perform_brick_store (glusterd_brickinfo_t *brickinfo)
         if (ret)
                 goto out;
 
-        ret = glusterd_store_rename_tmppath (brickinfo->shandle);
 out:
         if (ret && (fd > 0))
                 glusterd_store_unlink_tmppath (brickinfo->shandle);
@@ -489,7 +542,7 @@ out:
         return ret;
 }
 
-static void
+static int
 _storeslaves (dict_t *this, char *key, data_t *value, void *data)
 {
         int32_t                      ret = 0;
@@ -504,12 +557,12 @@ _storeslaves (dict_t *this, char *key, data_t *value, void *data)
         GF_ASSERT (value && value->data);
 
         if ((!shandle) || (shandle->fd <= 0) || (!shandle->path))
-                return;
+                return -1;
 
         if (!key)
-                return;
+                return -1;
         if (!value || !value->data)
-                return;
+                return -1;
 
         gf_log ("", GF_LOG_DEBUG, "Storing in volinfo:key= %s, val=%s",
                 key, value->data);
@@ -518,12 +571,13 @@ _storeslaves (dict_t *this, char *key, data_t *value, void *data)
         if (ret) {
                 gf_log ("", GF_LOG_ERROR, "Unable to write into store"
                                 " handle for path: %s", shandle->path);
-                return;
+                return -1;
         }
+        return 0;
 }
 
 
-void _storeopts (dict_t *this, char *key, data_t *value, void *data)
+int _storeopts (dict_t *this, char *key, data_t *value, void *data)
 {
         int32_t                      ret = 0;
         int32_t                      exists = 0;
@@ -538,34 +592,44 @@ void _storeopts (dict_t *this, char *key, data_t *value, void *data)
         GF_ASSERT (value && value->data);
 
         if ((!shandle) || (shandle->fd <= 0) || (!shandle->path))
-                return;
+                return -1;
 
         if (!key)
-                return;
+                return -1;
         if (!value || !value->data)
-                return;
+                return -1;
 
-        exists = glusterd_check_option_exists (key, NULL);
+        if (is_key_glusterd_hooks_friendly (key)) {
+                exists = 1;
+
+        } else {
+                exists = glusterd_check_option_exists (key, NULL);
+        }
+
         if (1 == exists) {
                 gf_log ("", GF_LOG_DEBUG, "Storing in volinfo:key= %s, val=%s",
                         key, value->data);
+
         } else {
                 gf_log ("", GF_LOG_DEBUG, "Discarding:key= %s, val=%s",
                         key, value->data);
-                return;
+                return 0;
         }
 
         ret = glusterd_store_save_value (shandle->fd, key, (char*)value->data);
         if (ret) {
                 gf_log ("", GF_LOG_ERROR, "Unable to write into store"
                                 " handle for path: %s", shandle->path);
-                return;
+                return -1;
         }
+        return 0;
 }
 
 int32_t
 glusterd_volume_exclude_options_write (int fd, glusterd_volinfo_t *volinfo)
 {
+        char      *str   = NULL;
+
         GF_ASSERT (fd > 0);
         GF_ASSERT (volinfo);
 
@@ -622,6 +686,23 @@ glusterd_volume_exclude_options_write (int fd, glusterd_volinfo_t *volinfo)
         if (ret)
                 goto out;
 
+        str = glusterd_auth_get_username (volinfo);
+        if (str) {
+                ret = glusterd_store_save_value (fd,
+                                                 GLUSTERD_STORE_KEY_USERNAME,
+                                                 str);
+                if (ret)
+                goto out;
+        }
+
+        str = glusterd_auth_get_password (volinfo);
+        if (str) {
+                ret = glusterd_store_save_value (fd,
+                                                 GLUSTERD_STORE_KEY_PASSWORD,
+                                                 str);
+                if (ret)
+                        goto out;
+        }
 out:
         if (ret)
                 gf_log ("", GF_LOG_ERROR, "Unable to write volume values"
@@ -689,7 +770,7 @@ glusterd_store_rbstatepath_set (glusterd_volinfo_t *volinfo, char *rbstatepath,
         char    voldirpath[PATH_MAX] = {0,};
         GF_ASSERT (volinfo);
         GF_ASSERT (rbstatepath);
-        GF_ASSERT (len >= PATH_MAX);
+        GF_ASSERT (len <= PATH_MAX);
 
         glusterd_store_voldirpath_set (volinfo, voldirpath,
                                        sizeof (voldirpath));
@@ -704,11 +785,26 @@ glusterd_store_volfpath_set (glusterd_volinfo_t *volinfo, char *volfpath,
         char    voldirpath[PATH_MAX] = {0,};
         GF_ASSERT (volinfo);
         GF_ASSERT (volfpath);
-        GF_ASSERT (len >= PATH_MAX);
+        GF_ASSERT (len <= PATH_MAX);
 
         glusterd_store_voldirpath_set (volinfo, voldirpath,
                                        sizeof (voldirpath));
         snprintf (volfpath, len, "%s/%s", voldirpath, GLUSTERD_VOLUME_INFO_FILE);
+}
+
+static void
+glusterd_store_node_state_path_set (glusterd_volinfo_t *volinfo,
+                                    char *node_statepath, size_t len)
+{
+        char    voldirpath[PATH_MAX] = {0,};
+        GF_ASSERT (volinfo);
+        GF_ASSERT (node_statepath);
+        GF_ASSERT (len <= PATH_MAX);
+
+        glusterd_store_voldirpath_set (volinfo, voldirpath,
+                                       sizeof (voldirpath));
+        snprintf (node_statepath, len, "%s/%s", voldirpath,
+                  GLUSTERD_NODE_STATE_FILE);
 }
 
 int32_t
@@ -736,6 +832,23 @@ glusterd_store_create_vol_shandle_on_absence (glusterd_volinfo_t *volinfo)
         glusterd_store_volfpath_set (volinfo, volfpath, sizeof (volfpath));
         ret = glusterd_store_handle_create_on_absence (&volinfo->shandle,
                                                        volfpath);
+        return ret;
+}
+
+int32_t
+glusterd_store_create_nodestate_sh_on_absence (glusterd_volinfo_t *volinfo)
+{
+        char            node_state_path[PATH_MAX] = {0};
+        int32_t         ret                   = 0;
+
+        GF_ASSERT (volinfo);
+
+        glusterd_store_node_state_path_set (volinfo, node_state_path,
+                                            sizeof (node_state_path));
+        ret =
+          glusterd_store_handle_create_on_absence (&volinfo->node_state_shandle,
+                                                   node_state_path);
+
         return ret;
 }
 
@@ -817,10 +930,67 @@ glusterd_store_perform_rbstate_store (glusterd_volinfo_t *volinfo)
                 goto out;
 
         ret = glusterd_store_rename_tmppath (volinfo->rb_shandle);
+        if (ret)
+                goto out;
 
 out:
         if (ret && (fd > 0))
                 glusterd_store_unlink_tmppath (volinfo->rb_shandle);
+        if (fd > 0)
+                close (fd);
+        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+}
+
+int32_t
+glusterd_store_node_state_write (int fd, glusterd_volinfo_t *volinfo)
+{
+        int     ret             = -1;
+        char    buf[PATH_MAX]   = {0, };
+
+        GF_ASSERT (fd > 0);
+        GF_ASSERT (volinfo);
+
+        if (volinfo->defrag_cmd == GF_DEFRAG_CMD_STATUS) {
+                ret = 0;
+                goto out;
+        }
+
+        snprintf (buf, sizeof (buf), "%d", volinfo->defrag_cmd);
+        ret = glusterd_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_DEFRAG,
+                                         buf);
+        if (ret)
+                goto out;
+
+out:
+        gf_log (THIS->name, GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+}
+
+int32_t
+glusterd_store_perform_node_state_store (glusterd_volinfo_t *volinfo)
+{
+        int                         fd = -1;
+        int32_t                     ret = -1;
+        GF_ASSERT (volinfo);
+
+        fd = glusterd_store_mkstemp (volinfo->node_state_shandle);
+        if (fd <= 0) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = glusterd_store_node_state_write (fd, volinfo);
+        if (ret)
+                goto out;
+
+        ret = glusterd_store_rename_tmppath (volinfo->node_state_shandle);
+        if (ret)
+                goto out;
+
+out:
+        if (ret && (fd > 0))
+                glusterd_store_unlink_tmppath (volinfo->node_state_shandle);
         if (fd > 0)
                 close (fd);
         gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
@@ -848,7 +1018,6 @@ glusterd_store_perform_volume_store (glusterd_volinfo_t *volinfo)
         if (ret)
                 goto out;
 
-        ret = glusterd_store_rename_tmppath (volinfo->shandle);
 out:
         if (ret && (fd > 0))
                 glusterd_store_unlink_tmppath (volinfo->shandle);
@@ -870,7 +1039,86 @@ glusterd_perform_volinfo_version_action (glusterd_volinfo_t *volinfo,
         case GLUSTERD_VOLINFO_VER_AC_INCREMENT:
                 volinfo->version++;
         break;
+        case GLUSTERD_VOLINFO_VER_AC_DECREMENT:
+                volinfo->version--;
+        break;
         }
+}
+
+void
+glusterd_store_bricks_cleanup_tmp (glusterd_volinfo_t *volinfo)
+{
+        glusterd_brickinfo_t    *brickinfo           = NULL;
+
+        GF_ASSERT (volinfo);
+
+        list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
+                glusterd_store_unlink_tmppath (brickinfo->shandle);
+        }
+}
+
+void
+glusterd_store_volume_cleanup_tmp (glusterd_volinfo_t *volinfo)
+{
+        GF_ASSERT (volinfo);
+
+        glusterd_store_bricks_cleanup_tmp (volinfo);
+
+        glusterd_store_unlink_tmppath (volinfo->shandle);
+
+        glusterd_store_unlink_tmppath (volinfo->rb_shandle);
+
+        glusterd_store_unlink_tmppath (volinfo->node_state_shandle);
+}
+
+int32_t
+glusterd_store_brickinfos_atomic_update (glusterd_volinfo_t *volinfo)
+{
+        int                      ret            = -1;
+        glusterd_brickinfo_t    *brickinfo      = NULL;
+
+        GF_ASSERT (volinfo);
+
+        list_for_each_entry (brickinfo, &volinfo->bricks, brick_list) {
+                ret = glusterd_store_rename_tmppath (brickinfo->shandle);
+                if (ret)
+                        goto out;
+        }
+out:
+        return ret;
+}
+
+int32_t
+glusterd_store_volinfo_atomic_update (glusterd_volinfo_t *volinfo)
+{
+        int ret = -1;
+        GF_ASSERT (volinfo);
+
+        ret = glusterd_store_rename_tmppath (volinfo->shandle);
+        if (ret)
+                goto out;
+
+out:
+        if (ret)
+                gf_log (THIS->name, GF_LOG_ERROR, "Couldn't rename "
+                        "temporary file(s): Reason %s", strerror (errno));
+        return ret;
+}
+
+int32_t
+glusterd_store_volume_atomic_update (glusterd_volinfo_t *volinfo)
+{
+        int ret = -1;
+        GF_ASSERT (volinfo);
+
+        ret = glusterd_store_brickinfos_atomic_update (volinfo);
+        if (ret)
+                goto out;
+
+        ret = glusterd_store_volinfo_atomic_update (volinfo);
+
+out:
+        return ret;
 }
 
 int32_t
@@ -893,11 +1141,26 @@ glusterd_store_volinfo (glusterd_volinfo_t *volinfo, glusterd_volinfo_ver_ac_t a
         if (ret)
                 goto out;
 
+        ret = glusterd_store_create_nodestate_sh_on_absence (volinfo);
+        if (ret)
+                goto out;
+
         ret = glusterd_store_perform_volume_store (volinfo);
         if (ret)
                 goto out;
 
+        ret = glusterd_store_volume_atomic_update (volinfo);
+        if (ret) {
+                glusterd_perform_volinfo_version_action (volinfo,
+                                                         GLUSTERD_VOLINFO_VER_AC_DECREMENT);
+                goto out;
+        }
+
         ret = glusterd_store_perform_rbstate_store (volinfo);
+        if (ret)
+                goto out;
+
+        ret = glusterd_store_perform_node_state_store (volinfo);
         if (ret)
                 goto out;
 
@@ -905,7 +1168,11 @@ glusterd_store_volinfo (glusterd_volinfo_t *volinfo, glusterd_volinfo_ver_ac_t a
         ret = glusterd_volume_compute_cksum (volinfo);
         if (ret)
                 goto out;
+
 out:
+        if (ret)
+                glusterd_store_volume_cleanup_tmp (volinfo);
+
         gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
 
         return ret;
@@ -998,6 +1265,7 @@ glusterd_store_read_and_tokenize (FILE *file, char *str,
                                   glusterd_store_op_errno_t *store_errno)
 {
         int32_t  ret = -1;
+        char *savetok = NULL;
 
         GF_ASSERT (file);
         GF_ASSERT (str);
@@ -1012,14 +1280,14 @@ glusterd_store_read_and_tokenize (FILE *file, char *str,
                 goto out;
         }
 
-        *iter_key = strtok (str, "=");
+        *iter_key = strtok_r (str, "=", &savetok);
         if (*iter_key == NULL) {
                 ret = -1;
                 *store_errno = GD_STORE_KEY_NULL;
                 goto out;
         }
 
-        *iter_val = strtok (NULL, "=");
+        *iter_val = strtok_r (NULL, "=", &savetok);
         if (*iter_key == NULL) {
                 ret = -1;
                 *store_errno = GD_STORE_VALUE_NULL;
@@ -1048,12 +1316,17 @@ glusterd_store_retrieve_value (glusterd_store_handle_t *handle,
 
         handle->fd = open (handle->path, O_RDWR);
 
+        if (handle->fd == -1) {
+                gf_log ("", GF_LOG_ERROR, "Unable to open file %s errno: %s",
+                        handle->path, strerror (errno));
+                goto out;
+        }
         if (!handle->read)
                 handle->read = fdopen (handle->fd, "r");
 
         if (!handle->read) {
-                gf_log ("", GF_LOG_ERROR, "Unable to open file %s errno: %d",
-                        handle->path, errno);
+                gf_log ("", GF_LOG_ERROR, "Unable to open file %s errno: %s",
+                        handle->path, strerror (errno));
                 goto out;
         }
 
@@ -1100,8 +1373,7 @@ out:
                 handle->read = NULL;
         }
 
-        if (free_str)
-                GF_FREE (free_str);
+        GF_FREE (free_str);
 
         return ret;
 }
@@ -1165,28 +1437,28 @@ glusterd_store_handle_new (char *path, glusterd_store_handle_t **handle)
         if (!spath)
                 goto out;
 
-        fd = open (path, O_RDWR | O_CREAT | O_APPEND, 0644);
+        fd = open (path, O_RDWR | O_CREAT | O_APPEND, 0600);
         if (fd <= 0) {
                 gf_log ("glusterd", GF_LOG_ERROR, "Failed to open file: %s, "
                         "error: %s", path, strerror (errno));
                 goto out;
         }
 
+        ret = glusterd_store_sync_direntry (spath);
+        if (ret)
+                goto out;
+
         shandle->path = spath;
         *handle = shandle;
 
         ret = 0;
-
 out:
         if (fd > 0)
                 close (fd);
 
         if (ret == -1) {
-                if (spath)
-                        GF_FREE (spath);
-                if (shandle) {
-                        GF_FREE (shandle);
-                }
+                GF_FREE (spath);
+                GF_FREE (shandle);
         }
 
         gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
@@ -1233,54 +1505,170 @@ out:
         return ret;
 }
 
-int32_t
-glusterd_store_uuid ()
+int
+glusterd_store_global_info (xlator_t *this)
 {
-        glusterd_conf_t *priv = NULL;
-        char            path[PATH_MAX] = {0,};
-        int32_t         ret = -1;
-        glusterd_store_handle_t *handle = NULL;
+        int                     ret                     = -1;
+        glusterd_conf_t         *conf                   = NULL;
+        char                    op_version_str[15]      = {0,};
+        char                    path[PATH_MAX]          = {0,};
+        glusterd_store_handle_t *handle                 = NULL;
+        char                    *uuid_str               = NULL;
 
-        priv = THIS->private;
+        conf = this->private;
 
-        snprintf (path, PATH_MAX, "%s/%s", priv->workdir,
-                  GLUSTERD_INFO_FILE);
+        uuid_str = gf_strdup (uuid_utoa (MY_UUID));
+        if (!uuid_str)
+                goto out;
 
-        if (!priv->handle) {
+        if (!conf->handle) {
+                snprintf (path, PATH_MAX, "%s/%s", conf->workdir,
+                          GLUSTERD_INFO_FILE);
                 ret = glusterd_store_handle_new (path, &handle);
-
                 if (ret) {
-                        gf_log ("", GF_LOG_ERROR, "Unable to get store"
-                                " handle!");
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Unable to get store handle");
                         goto out;
                 }
 
-                priv->handle = handle;
-        } else {
-                handle = priv->handle;
+                conf->handle = handle;
+        } else
+                handle = conf->handle;
+
+        /* These options need to be available for all users */
+        ret = chmod (handle->path, 0644);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "chmod error for %s: %s",
+                        GLUSTERD_INFO_FILE, strerror (errno));
+                goto out;
         }
 
-        handle->fd = open (handle->path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        handle->fd = glusterd_store_mkstemp (handle);
         if (handle->fd <= 0) {
                 ret = -1;
                 goto out;
         }
-        ret = glusterd_store_save_value (handle->fd, GLUSTERD_STORE_UUID_KEY,
-                                         uuid_utoa (priv->uuid));
 
+        ret = glusterd_store_save_value (handle->fd, GLUSTERD_STORE_UUID_KEY,
+                                         uuid_str);
         if (ret) {
-                gf_log ("", GF_LOG_CRITICAL, "Storing uuid failed"
-                        "ret = %d", ret);
+                gf_log (this->name, GF_LOG_CRITICAL,
+                        "Storing uuid failed ret = %d", ret);
                 goto out;
         }
 
+        snprintf (op_version_str, 15, "%d", conf->op_version);
+        ret = glusterd_store_save_value (handle->fd, GD_OP_VERSION_KEY,
+                                         op_version_str);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Storing op-version failed ret = %d", ret);
+                goto out;
+        }
 
+        ret = glusterd_store_rename_tmppath (handle);
 out:
+        if (ret && (handle->fd > 0))
+                glusterd_store_unlink_tmppath (handle);
+
         if (handle->fd > 0) {
                 close (handle->fd);
                 handle->fd = 0;
         }
-        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+
+        if (uuid_str)
+                GF_FREE (uuid_str);
+
+        if (ret)
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to store glusterd global-info");
+
+        return ret;
+}
+
+int
+glusterd_retrieve_op_version (xlator_t *this, int *op_version)
+{
+        char                    *op_version_str = NULL;
+        glusterd_conf_t         *priv           = NULL;
+        int                     ret             = -1;
+        int                     tmp_version     = 0;
+        char                    *tmp            = NULL;
+        char                    path[PATH_MAX]  = {0,};
+        glusterd_store_handle_t *handle         = NULL;
+
+        priv = this->private;
+
+        if (!priv->handle) {
+                snprintf (path, PATH_MAX, "%s/%s", priv->workdir,
+                          GLUSTERD_INFO_FILE);
+                ret = glusterd_store_handle_retrieve (path, &handle);
+
+                if (ret) {
+                        gf_log ("", GF_LOG_ERROR, "Unable to get store "
+                                "handle!");
+                        goto out;
+                }
+
+                priv->handle = handle;
+        }
+
+        ret = glusterd_store_retrieve_value (priv->handle,
+                                             GD_OP_VERSION_KEY,
+                                             &op_version_str);
+        if (ret) {
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "No previous op_version present");
+                goto out;
+        }
+
+        tmp_version = strtol (op_version_str, &tmp, 10);
+        if ((tmp_version <= 0) || (tmp && strlen (tmp) > 1)) {
+                gf_log (this->name, GF_LOG_WARNING, "invalid version number");
+                goto out;
+        }
+
+        *op_version = tmp_version;
+
+        ret = 0;
+out:
+        if (op_version_str)
+                GF_FREE (op_version_str);
+
+        return ret;
+}
+
+static int
+glusterd_restore_op_version (xlator_t *this)
+{
+        glusterd_conf_t *conf = NULL;
+        int ret = 0;
+        int op_version = 0;
+
+        conf = this->private;
+
+        ret = glusterd_retrieve_op_version (this, &op_version);
+        if (!ret) {
+                if ((op_version < GD_OP_VERSION_MIN) ||
+                    (op_version > GD_OP_VERSION_MAX)) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "wrong op-version (%d) retreived", op_version);
+                        ret = -1;
+                        goto out;
+                }
+                conf->op_version = op_version;
+                gf_log ("glusterd", GF_LOG_INFO,
+                        "retrieved op-version: %d", conf->op_version);
+                goto out;
+        }
+
+        gf_log (this->name, GF_LOG_INFO, "op-version not found in store, "
+                "setting it to minimum op-version : %d", GD_OP_VERSION_MIN);
+
+        /* If op-version is missing, set it to  GD_OP_VERSION_MIN */
+        conf->op_version = GD_OP_VERSION_MIN;
+        ret = 0;
+out:
         return ret;
 }
 
@@ -1294,7 +1682,6 @@ glusterd_retrieve_uuid ()
         char            path[PATH_MAX] = {0,};
 
         priv = THIS->private;
-
 
         if (!priv->handle) {
                 snprintf (path, PATH_MAX, "%s/%s", priv->workdir,
@@ -1322,8 +1709,7 @@ glusterd_retrieve_uuid ()
         uuid_parse (uuid_str, priv->uuid);
 
 out:
-        if (uuid_str)
-                GF_FREE (uuid_str);
+        GF_FREE (uuid_str);
         gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
@@ -1366,6 +1752,7 @@ glusterd_store_iter_new (glusterd_store_handle_t  *shandle,
         }
 
         strncpy (tmp_iter->filepath, shandle->path, sizeof (tmp_iter->filepath));
+        tmp_iter->filepath[sizeof (tmp_iter->filepath) - 1] = 0;
         *iter = tmp_iter;
         ret = 0;
 
@@ -1483,8 +1870,7 @@ out:
                         *value = NULL;
                 }
         }
-        if (free_str)
-                GF_FREE (free_str);
+        GF_FREE (free_str);
         if (op_errno)
                 *op_errno = store_errno;
 
@@ -1634,19 +2020,38 @@ glusterd_store_retrieve_bricks (glusterd_volinfo_t *volinfo)
                         } else if (!strncmp (key, GLUSTERD_STORE_KEY_BRICK_PORT,
                                     strlen (GLUSTERD_STORE_KEY_BRICK_PORT))) {
                                 gf_string2int (value, &brickinfo->port);
-                                /* This is required to have proper ports
-                                   assigned to bricks after restart */
-                                pmap = pmap_registry_get (THIS);
-                                if (pmap->last_alloc <= brickinfo->port)
-                                        pmap->last_alloc = brickinfo->port + 1;
+
+                                if (brickinfo->port < GF_IANA_PRIV_PORTS_START){
+                                        /* This is required to adhere to the
+                                           IANA standards */
+                                        brickinfo->port = 0;
+                                } else {
+                                        /* This is required to have proper ports
+                                           assigned to bricks after restart */
+                                        pmap = pmap_registry_get (THIS);
+                                        if (pmap->last_alloc <= brickinfo->port)
+                                                pmap->last_alloc =
+                                                        brickinfo->port + 1;
+                                }
                         } else if (!strncmp (key, GLUSTERD_STORE_KEY_BRICK_RDMA_PORT,
                                     strlen (GLUSTERD_STORE_KEY_BRICK_RDMA_PORT))) {
                                 gf_string2int (value, &brickinfo->rdma_port);
-                                /* This is required to have proper ports
-                                   assigned to bricks after restart */
-                                pmap = pmap_registry_get (THIS);
-                                if (pmap->last_alloc <= brickinfo->rdma_port)
-                                        pmap->last_alloc = brickinfo->rdma_port + 1;
+
+                                if (brickinfo->rdma_port <
+                                    GF_IANA_PRIV_PORTS_START){
+                                        /* This is required to adhere to the
+                                           IANA standards */
+                                        brickinfo->rdma_port = 0;
+                                } else {
+                                        /* This is required to have proper ports
+                                           assigned to bricks after restart */
+                                        pmap = pmap_registry_get (THIS);
+                                        if (pmap->last_alloc <=
+                                            brickinfo->rdma_port)
+                                                pmap->last_alloc =
+                                                        brickinfo->rdma_port +1;
+                                }
+
                         } else if (!strncmp (key, GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED,
                                              strlen (GLUSTERD_STORE_KEY_BRICK_DECOMMISSIONED))) {
                                 gf_string2int (value, &brickinfo->decommissioned);
@@ -1734,13 +2139,13 @@ glusterd_store_retrieve_rbstate (char   *volname)
                 if (volinfo->rb_status > GF_RB_STATUS_NONE) {
                         if (!strncmp (key, GLUSTERD_STORE_KEY_RB_SRC_BRICK,
                                       strlen (GLUSTERD_STORE_KEY_RB_SRC_BRICK))) {
-                                ret = glusterd_brickinfo_from_brick (value,
+                                ret = glusterd_brickinfo_new_from_brick (value,
                                                                      &volinfo->src_brick);
                                 if (ret)
                                         goto out;
                         } else if (!strncmp (key, GLUSTERD_STORE_KEY_RB_DST_BRICK,
                                              strlen (GLUSTERD_STORE_KEY_RB_DST_BRICK))) {
-                                ret = glusterd_brickinfo_from_brick (value,
+                                ret = glusterd_brickinfo_new_from_brick (value,
                                                                      &volinfo->dst_brick);
                                 if (ret)
                                         goto out;
@@ -1755,6 +2160,68 @@ glusterd_store_retrieve_rbstate (char   *volname)
                 ret = glusterd_store_iter_get_next (iter, &key, &value,
                                                     &op_errno);
         }
+
+        if (op_errno != GD_STORE_EOF)
+                goto out;
+
+        ret = glusterd_store_iter_destroy (iter);
+
+        if (ret)
+                goto out;
+
+out:
+        gf_log ("", GF_LOG_DEBUG, "Returning with %d", ret);
+
+        return ret;
+}
+
+int32_t
+glusterd_store_retrieve_node_state (char   *volname)
+{
+        int32_t                   ret                   = -1;
+        glusterd_volinfo_t        *volinfo              = NULL;
+        glusterd_store_iter_t     *iter                 = NULL;
+        char                      *key                  = NULL;
+        char                      *value                = NULL;
+        char                      volpath[PATH_MAX]     = {0,};
+        glusterd_conf_t           *priv                 = NULL;
+        char                      path[PATH_MAX]        = {0,};
+        glusterd_store_op_errno_t op_errno              = GD_STORE_SUCCESS;
+
+        priv = THIS->private;
+
+        ret = glusterd_volinfo_find (volname, &volinfo);
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR, "Couldn't get"
+                        "volinfo for %s.", volname);
+                goto out;
+        }
+
+        GLUSTERD_GET_VOLUME_DIR(volpath, volinfo, priv);
+        snprintf (path, sizeof (path), "%s/%s", volpath,
+                  GLUSTERD_NODE_STATE_FILE);
+
+        ret = glusterd_store_handle_retrieve (path,
+                                              &volinfo->node_state_shandle);
+
+        if (ret)
+                goto out;
+
+        ret = glusterd_store_iter_new (volinfo->node_state_shandle, &iter);
+
+        if (ret)
+                goto out;
+
+        ret = glusterd_store_iter_get_next (iter, &key, &value, &op_errno);
+        if (ret)
+                goto out;
+        if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_DEFRAG,
+                       strlen (GLUSTERD_STORE_KEY_VOL_DEFRAG))) {
+                 volinfo->defrag_cmd = atoi (value);
+        }
+
+        GF_FREE (key);
+        GF_FREE (value);
 
         if (op_errno != GD_STORE_EOF)
                 goto out;
@@ -1850,6 +2317,16 @@ glusterd_store_retrieve_volume (char    *volname)
                                 gf_log ("", GF_LOG_WARNING,
                                         "failed to parse uuid");
 
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_USERNAME,
+                                     strlen (GLUSTERD_STORE_KEY_USERNAME))) {
+
+                        glusterd_auth_set_username (volinfo, value);
+
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_PASSWORD,
+                                     strlen (GLUSTERD_STORE_KEY_PASSWORD))) {
+
+                        glusterd_auth_set_password (volinfo, value);
+
                 } else if (strstr (key, "slave")) {
                         ret = dict_set_dynstr (volinfo->gsync_slaves, key,
                                                 gf_strdup (value));
@@ -1860,28 +2337,39 @@ glusterd_store_retrieve_volume (char    *volname)
                         }
                         gf_log ("", GF_LOG_DEBUG, "Parsed as "GEOREP" "
                                 " slave:key=%s,value:%s", key, value);
-                }
-                else {
-                        exists = glusterd_check_option_exists (key, NULL);
-                        if (exists == -1) {
+
+                } else {
+
+                        if (is_key_glusterd_hooks_friendly (key)) {
+                                exists = 1;
+
+                        } else  {
+                                exists = glusterd_check_option_exists (key,
+                                                                       NULL);
+                        }
+
+                        switch (exists) {
+                        case -1:
                                 ret = -1;
                                 goto out;
-                        }
-                        if (exists) {
+
+                        case 0:
+                                gf_log ("", GF_LOG_ERROR, "Unknown key: %s",
+                                        key);
+                                break;
+
+                        case 1:
                                 ret = dict_set_str(volinfo->dict, key,
-                                                     gf_strdup (value));
+                                                   gf_strdup (value));
                                 if (ret) {
                                         gf_log ("",GF_LOG_ERROR, "Error in "
-                                                        "dict_set_str");
+                                                "dict_set_str");
                                         goto out;
                                 }
                                 gf_log ("", GF_LOG_DEBUG, "Parsed as Volume-"
-                                                "set:key=%s,value:%s",
-                                                                key, value);
+                                        "set:key=%s,value:%s", key, value);
+                                break;
                         }
-                        else
-                                gf_log ("", GF_LOG_ERROR, "Unknown key: %s",
-                                        key);
                 }
 
                 GF_FREE (key);
@@ -1997,6 +2485,18 @@ glusterd_store_retrieve_volumes (xlator_t  *this)
                         ret = glusterd_volinfo_find (entry->d_name, &volinfo);
                         ret = glusterd_store_create_rbstate_shandle_on_absence (volinfo);
                         ret = glusterd_store_perform_rbstate_store (volinfo);
+                }
+
+                ret = glusterd_store_retrieve_node_state (entry->d_name);
+                if (ret) {
+                        /* Backward compatibility */
+                        gf_log ("", GF_LOG_INFO, "Creating a new node_state "
+                                "for volume: %s.", entry->d_name);
+                        ret = glusterd_volinfo_find (entry->d_name, &volinfo);
+                        ret =
+                        glusterd_store_create_nodestate_sh_on_absence (volinfo);
+                        ret = glusterd_store_perform_node_state_store (volinfo);
+
                 }
                 glusterd_for_each_entry (entry, dir);
         }
@@ -2198,6 +2698,9 @@ glusterd_store_peer_write (int fd, glusterd_peerinfo_t *peerinfo)
 
         ret = glusterd_store_save_value (fd, GLUSTERD_STORE_KEY_PEER_HOSTNAME "1",
                                          peerinfo->hostname);
+        if (ret)
+                goto out;
+
 out:
         gf_log ("", GF_LOG_DEBUG, "Returning with %d", ret);
         return ret;
@@ -2339,7 +2842,7 @@ glusterd_store_retrieve_peers (xlator_t *this)
 
                 args.mode = GD_MODE_SWITCH_ON;
                 ret = glusterd_friend_add (hostname, 0, state, &uuid,
-                                           NULL, &peerinfo, 1, &args);
+                                           &peerinfo, 1, &args);
 
                 GF_FREE (hostname);
                 if (ret)
@@ -2395,8 +2898,15 @@ glusterd_restore ()
 
         this = THIS;
 
-        ret = glusterd_store_retrieve_volumes (this);
+        ret = glusterd_restore_op_version (this);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Failed to restore op_version");
+                goto out;
+        }
 
+
+        ret = glusterd_store_retrieve_volumes (this);
         if (ret)
                 goto out;
 

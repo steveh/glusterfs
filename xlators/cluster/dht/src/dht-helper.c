@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -89,7 +80,7 @@ dht_filter_loc_subvol_key (xlator_t *this, loc_t *loc, loc_t *new_loc,
         int            ret       = 0; /* not found */
 
         /* Why do other tasks if first required 'char' itself is not there */
-        if (loc->name && !strchr (loc->name, '@'))
+        if (!new_loc || !loc || !loc->name || !strchr (loc->name, '@'))
                 goto out;
 
         trav = this->children;
@@ -129,10 +120,8 @@ dht_filter_loc_subvol_key (xlator_t *this, loc_t *loc, loc_t *new_loc,
 out:
         if (!ret) {
                 /* !success */
-                if (new_path)
-                        GF_FREE (new_path);
-                if (new_name)
-                        GF_FREE (new_name);
+                GF_FREE (new_path);
+                GF_FREE (new_name);
         }
         return ret;
 }
@@ -215,21 +204,16 @@ dht_local_wipe (xlator_t *this, dht_local_t *local)
                 local->selfheal.layout = NULL;
         }
 
-        if (local->newpath) {
-                GF_FREE (local->newpath);
-        }
+        GF_FREE (local->newpath);
 
-        if (local->key) {
-                GF_FREE (local->key);
-        }
+        GF_FREE (local->key);
 
-        if (local->rebalance.vector)
-                GF_FREE (local->rebalance.vector);
+        GF_FREE (local->rebalance.vector);
 
         if (local->rebalance.iobref)
                 iobref_unref (local->rebalance.iobref);
 
-        GF_FREE (local);
+        mem_put (local);
 }
 
 
@@ -240,8 +224,7 @@ dht_local_init (call_frame_t *frame, loc_t *loc, fd_t *fd, glusterfs_fop_t fop)
         inode_t     *inode = NULL;
         int          ret   = 0;
 
-        /* TODO: use mem-pool */
-        local = GF_CALLOC (1, sizeof (*local), gf_dht_mt_dht_local_t);
+        local = mem_get0 (THIS->local_pool);
         if (!local)
                 goto out;
 
@@ -274,7 +257,7 @@ dht_local_init (call_frame_t *frame, loc_t *loc, fd_t *fd, glusterfs_fop_t fop)
 out:
         if (ret) {
                 if (local)
-                        GF_FREE (local);
+                        mem_put (local);
                 local = NULL;
         }
         return local;
@@ -358,10 +341,16 @@ dht_subvol_get_hashed (xlator_t *this, loc_t *loc)
         dht_layout_t *layout = NULL;
         xlator_t     *subvol = NULL;
 
-        if (is_fs_root (loc)) {
+        GF_VALIDATE_OR_GOTO ("dht", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, loc, out);
+
+        if (__is_root_gfid (loc->gfid)) {
                 subvol = dht_first_up_subvol (this);
                 goto out;
         }
+
+        GF_VALIDATE_OR_GOTO (this->name, loc->parent, out);
+        GF_VALIDATE_OR_GOTO (this->name, loc->name, out);
 
         layout = dht_layout_get (this, loc->parent);
 
@@ -396,6 +385,8 @@ dht_subvol_get_cached (xlator_t *this, inode_t *inode)
         dht_layout_t *layout = NULL;
         xlator_t     *subvol = NULL;
 
+        GF_VALIDATE_OR_GOTO (this->name, this, out);
+        GF_VALIDATE_OR_GOTO (this->name, inode, out);
 
         layout = dht_layout_get (this, inode);
 
@@ -466,6 +457,15 @@ out:
                         (a) = (b);              \
         } while (0)
 
+
+#define set_if_greater_time(a, an, b, bn) do {                          \
+                if (((a) < (b)) || (((a) == (b)) && ((an) < (bn)))){    \
+                        (a) = (b);                                      \
+                        (an) = (bn);                                    \
+                }                                                       \
+        } while (0)                                                     \
+
+
 int
 dht_iatt_merge (xlator_t *this, struct iatt *to,
                 struct iatt *from, xlator_t *subvol)
@@ -489,9 +489,12 @@ dht_iatt_merge (xlator_t *this, struct iatt *to,
         set_if_greater (to->ia_uid, from->ia_uid);
         set_if_greater (to->ia_gid, from->ia_gid);
 
-        set_if_greater (to->ia_atime, from->ia_atime);
-        set_if_greater (to->ia_mtime, from->ia_mtime);
-        set_if_greater (to->ia_ctime, from->ia_ctime);
+        set_if_greater_time(to->ia_atime, to->ia_atime_nsec,
+                            from->ia_atime, from->ia_atime_nsec);
+        set_if_greater_time (to->ia_mtime, to->ia_mtime_nsec,
+                             from->ia_mtime, from->ia_mtime_nsec);
+        set_if_greater_time (to->ia_ctime, to->ia_ctime_nsec,
+                             from->ia_ctime, from->ia_ctime_nsec);
 
         return 0;
 }
@@ -740,8 +743,7 @@ dht_migration_complete_check_task (void *data)
                         tmp_loc.path = path;
                 ret = syncop_open (dst_node, &tmp_loc,
                                    local->fd->flags, local->fd);
-                if (path)
-                        GF_FREE (path);
+                GF_FREE (path);
 
         }
         if (ret == -1) {
@@ -763,11 +765,8 @@ int
 dht_rebalance_complete_check (xlator_t *this, call_frame_t *frame)
 {
         int         ret     = -1;
-        dht_conf_t *conf    = NULL;
 
-        conf = this->private;
-
-        ret = synctask_new (conf->env, dht_migration_complete_check_task,
+        ret = synctask_new (this->ctx->env, dht_migration_complete_check_task,
                             dht_migration_complete_check_done,
                             frame, frame);
         return ret;
@@ -867,8 +866,7 @@ dht_rebalance_inprogress_task (void *data)
                         tmp_loc.path = path;
                 ret = syncop_open (dst_node, &tmp_loc,
                                    local->fd->flags, local->fd);
-                if (path)
-                        GF_FREE (path);
+                GF_FREE (path);
         }
 
         if (ret == -1) {
@@ -896,12 +894,94 @@ dht_rebalance_in_progress_check (xlator_t *this, call_frame_t *frame)
 {
 
         int         ret     = -1;
-        dht_conf_t *conf    = NULL;
 
-        conf = this->private;
-
-        ret = synctask_new (conf->env, dht_rebalance_inprogress_task,
+        ret = synctask_new (this->ctx->env, dht_rebalance_inprogress_task,
                             dht_inprogress_check_done,
                             frame, frame);
+        return ret;
+}
+
+int
+dht_inode_ctx_layout_set (inode_t *inode, xlator_t *this,
+                          dht_layout_t *layout_int)
+{
+        dht_inode_ctx_t         *ctx            = NULL;
+        int                      ret            = -1;
+
+        ret = dht_inode_ctx_get (inode, this, &ctx);
+        if (!ret && ctx) {
+                ctx->layout = layout_int;
+        } else {
+                ctx = GF_CALLOC (1, sizeof (*ctx), gf_dht_mt_inode_ctx_t);
+                if (!ctx)
+                        return ret;
+                ctx->layout = layout_int;
+        }
+
+        ret = dht_inode_ctx_set (inode, this, ctx);
+
+        return ret;
+}
+
+int
+dht_inode_ctx_time_update (inode_t *inode, xlator_t *this, struct iatt *stat,
+                           int32_t post)
+{
+        dht_inode_ctx_t         *ctx            = NULL;
+        dht_stat_time_t         *time           = 0;
+        int                      ret            = -1;
+
+        ret = dht_inode_ctx_get (inode, this, &ctx);
+
+        if (ret) {
+                ctx = GF_CALLOC (1, sizeof (*ctx), gf_dht_mt_inode_ctx_t);
+                if (!ctx)
+                        return -1;
+        }
+
+        time = &ctx->time;
+
+        DHT_UPDATE_TIME(time->mtime, time->mtime_nsec,
+                        stat->ia_mtime, stat->ia_mtime_nsec, inode, post);
+        DHT_UPDATE_TIME(time->ctime, time->ctime_nsec,
+                        stat->ia_ctime, stat->ia_ctime_nsec, inode, post);
+        DHT_UPDATE_TIME(time->atime, time->atime_nsec,
+                        stat->ia_atime, stat->ia_atime_nsec, inode, post);
+
+        return 0;
+}
+
+int
+dht_inode_ctx_get (inode_t *inode, xlator_t *this, dht_inode_ctx_t **ctx)
+{
+        int             ret     = -1;
+        uint64_t        ctx_int = 0;
+
+        GF_VALIDATE_OR_GOTO ("dht", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, inode, out);
+
+        ret = inode_ctx_get (inode, this, &ctx_int);
+
+        if (ret)
+                return ret;
+
+        if (ctx)
+                *ctx = (dht_inode_ctx_t *) ctx_int;
+out:
+        return ret;
+}
+
+int dht_inode_ctx_set (inode_t *inode, xlator_t *this, dht_inode_ctx_t *ctx)
+{
+        int             ret = -1;
+        uint64_t        ctx_int = 0;
+
+        GF_VALIDATE_OR_GOTO ("dht", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, inode, out);
+        GF_VALIDATE_OR_GOTO (this->name, ctx, out);
+
+        ctx_int = (long)ctx;
+        ret = inode_ctx_set (inode, this, &ctx_int);
+out:
         return ret;
 }

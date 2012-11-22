@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _DICT_H
@@ -35,12 +26,47 @@ typedef struct _data data_t;
 typedef struct _dict dict_t;
 typedef struct _data_pair data_pair_t;
 
+
+#define GF_PROTOCOL_DICT_SERIALIZE(this,from_dict,to,len,ope,labl) do { \
+                int    ret     = 0;                                     \
+                                                                        \
+                if (!from_dict)                                         \
+                        break;                                          \
+                                                                        \
+                ret = dict_allocate_and_serialize (from_dict, to, &len);\
+                if (ret < 0) {                                          \
+                        gf_log (this->name, GF_LOG_WARNING,             \
+                                "failed to get serialized dict (%s)",   \
+                                (#from_dict));                          \
+                        ope = EINVAL;                                   \
+                        goto labl;                                      \
+                }                                                       \
+        } while (0)
+
+
+#define GF_PROTOCOL_DICT_UNSERIALIZE(xl,to,buff,len,ret,ope,labl) do {  \
+                if (!len)                                               \
+                        break;                                          \
+                to = dict_new();                                        \
+                GF_VALIDATE_OR_GOTO (xl->name, to, labl);               \
+                                                                        \
+                ret = dict_unserialize (buff, len, &to);                 \
+                if (ret < 0) {                                          \
+                        gf_log (xl->name, GF_LOG_WARNING,               \
+                                "failed to unserialize dictionary (%s)", \
+                                (#to));                                 \
+                                                                        \
+                        ope = EINVAL;                                   \
+                        goto labl;                                      \
+                }                                                       \
+                                                                        \
+        } while (0)
+
 struct _data {
         unsigned char  is_static:1;
         unsigned char  is_const:1;
         unsigned char  is_stdalloc:1;
         int32_t        len;
-        struct iovec  *vec;
         char          *data;
         int32_t        refcount;
         gf_lock_t      lock;
@@ -64,13 +90,20 @@ struct _dict {
         char           *extra_free;
         char           *extra_stdfree;
         gf_lock_t       lock;
+        data_pair_t    *members_internal;
+        data_pair_t     free_pair;
+        gf_boolean_t    free_pair_in_use;
 };
 
 
 int32_t is_data_equal (data_t *one, data_t *two);
 void data_destroy (data_t *data);
 
+/* function to set a key/value pair (overwrite existing if matches the key */
 int32_t dict_set (dict_t *this, char *key, data_t *value);
+/* function to set a new key/value pair (without checking for duplicate) */
+int32_t dict_add (dict_t *this, char *key, data_t *value);
+
 data_t *dict_get (dict_t *this, char *key);
 void dict_del (dict_t *this, char *key);
 int dict_reset (dict_t *dict);
@@ -79,10 +112,7 @@ int32_t dict_serialized_length (dict_t *dict);
 int32_t dict_serialize (dict_t *dict, char *buf);
 int32_t dict_unserialize (char *buf, int32_t size, dict_t **fill);
 
-int32_t dict_allocate_and_serialize (dict_t *this, char **buf, size_t *length);
-
-int32_t dict_iovec_len (dict_t *dict);
-int32_t dict_to_iovec (dict_t *dict, struct iovec *vec, int32_t count);
+int32_t dict_allocate_and_serialize (dict_t *this, char **buf, u_int *length);
 
 void dict_destroy (dict_t *dict);
 void dict_unref (dict_t *dict);
@@ -90,7 +120,7 @@ dict_t *dict_ref (dict_t *dict);
 data_t *data_ref (data_t *data);
 void data_unref (data_t *data);
 
-int32_t dict_lookup  (dict_t *this, char *key, data_pair_t **data);
+int32_t dict_lookup  (dict_t *this, char *key, data_t **data);
 /*
    TODO: provide converts for differnt byte sizes, signedness, and void *
  */
@@ -110,6 +140,7 @@ int8_t data_to_int8 (data_t *data);
 uint64_t data_to_uint64 (data_t *data);
 uint32_t data_to_uint32 (data_t *data);
 uint16_t data_to_uint16 (data_t *data);
+uint8_t data_to_uint8 (data_t *data);
 
 data_t *data_from_ptr (void *value);
 data_t *data_from_static_ptr (void *value);
@@ -132,14 +163,19 @@ data_t * data_copy (data_t *old);
 dict_t *get_new_dict_full (int size_hint);
 dict_t *get_new_dict ();
 
-data_pair_t *get_new_data_pair ();
+int dict_foreach (dict_t *this,
+                  int (*fn)(dict_t *this,
+                            char *key,
+                            data_t *value,
+                            void *data),
+                  void *data);
 
-void dict_foreach (dict_t *this,
-		   void (*fn)(dict_t *this,
-			      char *key,
-			      data_t *value,
-			      void *data),
-		   void *data);
+int dict_foreach_fnmatch (dict_t *dict, char *pattern,
+                          int (*fn)(dict_t *this,
+                                    char *key,
+                                    data_t *value,
+                                    void *data),
+                          void *data);
 
 dict_t *dict_copy (dict_t *this, dict_t *new);
 
@@ -175,6 +211,7 @@ GF_MUST_CHECK int dict_set_double (dict_t *this, char *key, double val);
 
 GF_MUST_CHECK int dict_set_static_ptr (dict_t *this, char *key, void *ptr);
 GF_MUST_CHECK int dict_get_ptr (dict_t *this, char *key, void **ptr);
+GF_MUST_CHECK int dict_get_ptr_and_len (dict_t *this, char *key, void **ptr, int *len);
 GF_MUST_CHECK int dict_set_ptr (dict_t *this, char *key, void *ptr);
 GF_MUST_CHECK int dict_set_dynptr (dict_t *this, char *key, void *ptr, size_t size);
 
@@ -190,4 +227,7 @@ GF_MUST_CHECK int dict_get_str (dict_t *this, char *key, char **str);
 GF_MUST_CHECK int dict_get_str_boolean (dict_t *this, char *key, int default_val);
 GF_MUST_CHECK int dict_serialize_value_with_delim (dict_t *this, char *buf, int32_t *serz_len,
                                                     char delimiter);
+
+void dict_dump (dict_t *dict);
+
 #endif

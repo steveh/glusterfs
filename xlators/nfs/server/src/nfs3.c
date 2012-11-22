@@ -32,6 +32,7 @@
 #include "nfs3.h"
 #include "mem-pool.h"
 #include "logging.h"
+#include "nfs-common.h"
 #include "nfs-fops.h"
 #include "nfs-inodes.h"
 #include "nfs-generics.h"
@@ -216,14 +217,23 @@ out:
 }
 
 
-#define nfs3_map_fh_to_volume(nfs3state, handle, rqst, volume, status, label) \
+#define nfs3_map_fh_to_volume(nfs3state, handle, req, volume, status, label) \
         do {                                                            \
-                char buf[256];                                          \
+                char exportid[256], gfid[256];                          \
+                rpc_transport_t *trans = NULL;                          \
                 volume = nfs3_fh_to_xlator ((nfs3state), handle);       \
                 if (!volume) {                                          \
-                        uuid_unparse (handle->exportid, buf);           \
+                        uuid_unparse (handle->exportid, exportid);      \
+                        uuid_unparse (handle->gfid, gfid);              \
+                        trans = rpcsvc_request_transport (req);         \
                         gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to map " \
-                                "FH to vol, exportid=%s", buf);         \
+                                "FH to vol: client=%s, exportid=%s, gfid=%s",\
+                                trans->peerinfo.identifier, exportid,   \
+                                gfid);                                  \
+                        gf_log (GF_NFS3, GF_LOG_ERROR,                   \
+                                "Stale nfs client %s must be trying to "\
+                                "connect to a deleted volume, please "  \
+                                "unmount it.", trans->peerinfo.identifier);\
                         status = NFS3ERR_STALE;                         \
                         goto label;                                     \
                 } else {                                                \
@@ -248,13 +258,15 @@ out:
 #define nfs3_check_fh_resolve_status(cst, nfstat, erlabl)               \
         do {                                                            \
                 xlator_t *xlatorp = NULL;                               \
-                char buf[256], gfid[256];                                \
+                char buf[256], gfid[256];                               \
+                rpc_transport_t *trans = NULL;                          \
                 if ((cst)->resolve_ret < 0) {                           \
+                        trans = rpcsvc_request_transport (cst->req);    \
                         xlatorp = nfs3_fh_to_xlator (cst->nfs3state,    \
                                                      &cst->resolvefh);  \
-                        uuid_unparse (cst->fh.gfid, gfid);              \
-                        sprintf (buf, "%s : %s", xlatorp ?              \
-                                 xlatorp->name : "ERR", gfid);          \
+                        uuid_unparse (cst->resolvefh.gfid, gfid);       \
+                        sprintf (buf, "(%s) %s : %s", trans->peerinfo.identifier,\
+                        xlatorp ? xlatorp->name : "ERR", gfid);         \
                         gf_log (GF_NFS3, GF_LOG_ERROR, "Unable to resolve FH"\
                                 ": %s", buf);                           \
                         nfstat = nfs3_errno_to_nfsstat3 (cst->resolve_errno);\
@@ -265,14 +277,16 @@ out:
 #define nfs3_check_new_fh_resolve_status(cst, nfstat, erlabl)           \
         do {                                                            \
                 xlator_t *xlatorp = NULL;                               \
-                char buf[256], gfid[256];                                \
+                char buf[256], gfid[256];                               \
+                rpc_transport_t *trans = NULL;                          \
                 if (((cst)->resolve_ret < 0) &&                         \
                     ((cst)->resolve_errno != ENOENT)) {                 \
+                        trans = rpcsvc_request_transport (cst->req);    \
                         xlatorp = nfs3_fh_to_xlator (cst->nfs3state,    \
-                                                     &cst->resolvefh);   \
-                        uuid_unparse (cst->fh.gfid, gfid);             \
-                        sprintf (buf, "%s : %s", xlatorp ?              \
-                                 xlatorp->name : "ERR", gfid);          \
+                                                     &cst->resolvefh);  \
+                        uuid_unparse (cst->resolvefh.gfid, gfid);       \
+                        sprintf (buf, "(%s) %s : %s", trans->peerinfo.identifier,\
+                        xlatorp ? xlatorp->name : "ERR", gfid);         \
                         gf_log (GF_NFS3, GF_LOG_ERROR, "Unable to resolve FH"\
                                 ": %s", buf);                           \
                         nfstat = nfs3_errno_to_nfsstat3 (cs->resolve_errno);\
@@ -435,11 +449,9 @@ nfs3_call_state_wipe (nfs3_call_state_t *cs)
                 fd_unref (cs->fd);
         }
 
-        if (cs->resolventry)
-                GF_FREE (cs->resolventry);
+        GF_FREE (cs->resolventry);
 
-        if (cs->pathname)
-                GF_FREE (cs->pathname);
+        GF_FREE (cs->pathname);
 
         if (!list_empty (&cs->entries.list))
                 gf_dirent_free (&cs->entries);
@@ -450,6 +462,8 @@ nfs3_call_state_wipe (nfs3_call_state_t *cs)
                 iobuf_unref (cs->iob);
         if (cs->iobref)
                 iobref_unref (cs->iobref);
+        if (cs->trans)
+                rpc_transport_unref (cs->trans);
         memset (cs, 0, sizeof (*cs));
         mem_put (cs);
         /* Already refd by fd_lookup, so no need to ref again. */
@@ -487,6 +501,8 @@ nfs3_serialize_reply (rpcsvc_request_t *req, void *arg, nfs3_serializer sfunc,
         /* First, get the io buffer into which the reply in arg will
          * be serialized.
          */
+        /* TODO: get rid of 'sfunc' and use 'xdrproc_t' so we
+           can have 'xdr_sizeof' */
         iob = iobuf_get (nfs3->iobpool);
         if (!iob) {
                 gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to get iobuf");
@@ -677,14 +693,23 @@ nfs3svc_getattr_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         cs = frame->local;
 
+        /*
+         * Somewhat counter-intuitively, we don't need to look for sh-failed
+         * here. Failing this getattr will generate a new lookup from the
+         * client, and nfs_fop_lookup_cbk will detect any self-heal failures.
+         */
+
         if (op_ret == -1) {
                 gf_log (GF_NFS, GF_LOG_WARNING,
                         "%x: %s => -1 (%s)", rpcsvc_request_xid (cs->req),
                         cs->resolvedloc.path, strerror (op_errno));
                 status = nfs3_errno_to_nfsstat3 (op_errno);
         }
+        else {
+                nfs_fix_generation(this,inode);
+        }
 
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "GETATTR",
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_GETATTR,
                              status, op_errno);
 
         nfs3_getattr_reply (cs->req, status, buf);
@@ -696,7 +721,8 @@ nfs3svc_getattr_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int32_t
 nfs3svc_getattr_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                          int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                          int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                          dict_t *xdata)
 {
         nfsstat3                status = NFS3_OK;
         nfs3_call_state_t       *cs = NULL;
@@ -710,7 +736,7 @@ nfs3svc_getattr_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 status = nfs3_errno_to_nfsstat3 (op_errno);
         }
 
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "GETATTR",
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_GETATTR,
                              status, op_errno);
 
         nfs3_getattr_reply (cs->req, status, buf);
@@ -727,6 +753,9 @@ nfs3_getattr_resume (void *carg)
         int                             ret = -EFAULT;
         nfs_user_t                      nfu = {0, };
         nfs3_call_state_t               *cs = NULL;
+        uint64_t                         raw_ctx = 0;
+        struct nfs_inode_ctx            *ictx = NULL;
+        struct nfs_state                *priv = NULL;
 
         if (!carg)
                 return ret;
@@ -739,14 +768,42 @@ nfs3_getattr_resume (void *carg)
          * for the root to have been looked up when the getattr on the root is
          * sent. AND, this causes a problem for stat-prefetch in that it
          * expects even the root inode to have been looked up.
-         */
+
         if (__is_root_gfid (cs->resolvedloc.inode->gfid))
                 ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
                                   nfs3svc_getattr_lookup_cbk, cs);
         else
                 ret = nfs_stat (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                nfs3svc_getattr_stat_cbk, cs);
+        */
 
+	if (cs->hardresolved) {
+		ret = -EFAULT;
+		stat = NFS3_OK;
+		goto nfs3err;
+	}
+
+        /*
+         * If brick state changed, we need to force a proper lookup cycle (as
+         * would happen in native protocol) to do self-heal checks. We detect
+         * this by comparing the generation number for the last successful
+         * creation/lookup on the inode to the current number, so inodes that
+         * haven't been validated since the state change are affected.
+         */
+        if (inode_ctx_get(cs->resolvedloc.inode,cs->nfsx,&raw_ctx) == 0) {
+                ictx = (struct nfs_inode_ctx *)raw_ctx;
+                priv = cs->nfsx->private;
+                if (ictx->generation != priv->generation) {
+                        ret = nfs_lookup (cs->nfsx, cs->vol, &nfu,
+                                          &cs->resolvedloc,
+                                          nfs3svc_getattr_lookup_cbk, cs);
+                        goto check_err;
+                }
+        }
+
+        ret = nfs_stat (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
+                        nfs3svc_getattr_stat_cbk, cs);
+
+check_err:
         if (ret < 0) {
                 gf_log (GF_NFS3, GF_LOG_ERROR, "Stat fop failed: %s: %s",
                         cs->oploc.path, strerror (-ret));
@@ -756,8 +813,8 @@ nfs3_getattr_resume (void *carg)
 nfs3err:
         if (ret < 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "GETATTR", stat, -ret);
-                nfs3_getattr_reply (cs->req, stat, NULL);
+                                     NFS3_GETATTR, stat, -ret);
+                nfs3_getattr_reply (cs->req, stat, &cs->stbuf);
                 nfs3_call_state_wipe (cs);
                 ret = 0;
         }
@@ -791,7 +848,7 @@ nfs3_getattr (rpcsvc_request_t *req, struct nfs3_fh *fh)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "GETATTR",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_GETATTR,
                                      stat, -ret);
                 nfs3_getattr_reply (req, stat, NULL);
                 ret = 0;
@@ -849,7 +906,7 @@ nfs3_setattr_reply (rpcsvc_request_t *req, nfsstat3 stat, struct iatt *preop,
 int32_t
 nfs3svc_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                      struct iatt *postbuf)
+                      struct iatt *postbuf, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         struct iatt             *prestat = NULL;
@@ -875,7 +932,7 @@ nfs3svc_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         stat = NFS3_OK;
 nfs3err:
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "SETATTR", stat,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_SETATTR, stat,
                              op_errno);
         nfs3_setattr_reply (cs->req, stat, prestat, postbuf);
         nfs3_call_state_wipe (cs);
@@ -887,7 +944,7 @@ nfs3err:
 int32_t
 nfs3svc_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, struct iatt *preop,
-                     struct iatt *postop)
+                     struct iatt *postop, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         int                     ret = -1;
@@ -904,18 +961,11 @@ nfs3svc_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 goto nfs3err;
         }
 
-        /* If the first stat was got from the guarded setattr callback, then
-         * we'll need to use that stat instead of the preop returned here.
+        prebuf = preop;
+        /* Store the current preop in case we need to send a truncate,
+         * in which case the preop to be returned will be this one.
          */
-        if (cs->preparent.ia_ino != 0)
-                prebuf = &cs->preparent;
-        else {
-                prebuf = preop;
-                /* Store the current preop in case we need to send a truncate,
-                 * in which case the preop to be returned will be this one.
-                 */
-                cs->preparent = *preop;
-        }
+        cs->preparent = *preop;
 
         /* Only truncate if the size is not already same as the requested
          * truncation and also only if this is not a directory.
@@ -936,7 +986,7 @@ nfs3svc_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 nfs3err:
         if (ret < 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "SETATTR", stat, op_errno);
+                                     NFS3_SETATTR, stat, op_errno);
                 nfs3_setattr_reply (cs->req, stat, prebuf, postop);
                 nfs3_call_state_wipe (cs);
         }
@@ -948,7 +998,8 @@ nfs3err:
 
 int32_t
 nfs3svc_setattr_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                          int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                          int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                          dict_t *xdata)
 {
 
         int                     ret = -EFAULT;
@@ -982,7 +1033,7 @@ nfs3svc_setattr_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 nfs3err:
         if (ret < 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "SETATTR", stat, op_errno);
+                                     NFS3_SETATTR, stat, op_errno);
                 nfs3_setattr_reply (cs->req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
         }
@@ -1005,14 +1056,9 @@ nfs3_setattr_resume (void *carg)
         cs = (nfs3_call_state_t *)carg;
         nfs3_check_fh_resolve_status (cs, stat, nfs3err);
         nfs_request_user_init (&nfu, cs->req);
-        /* If no ctime check is required, head straight to setting the attrs. */
-        if (cs->sattrguardcheck)
-                ret = nfs_stat (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                nfs3svc_setattr_stat_cbk, cs);
-        else
-                ret = nfs_setattr (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                   &cs->stbuf, cs->setattr_valid,
-                                   nfs3svc_setattr_cbk, cs);
+        ret = nfs_setattr (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
+                           &cs->stbuf, cs->setattr_valid,
+                           nfs3svc_setattr_cbk, cs);
 
         if (ret < 0)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
@@ -1020,7 +1066,7 @@ nfs3_setattr_resume (void *carg)
 nfs3err:
         if (ret < 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "SETATTR", stat, -ret);
+                                     NFS3_SETATTR, stat, -ret);
                 nfs3_setattr_reply (cs->req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
         }
@@ -1076,7 +1122,7 @@ nfs3_setattr (rpcsvc_request_t *req, struct nfs3_fh *fh, sattr3 *sattr,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "SETATTR",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_SETATTR,
                                      stat, -ret);
                 nfs3_setattr_reply (req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -1194,7 +1240,7 @@ xmit_res:
                 goto out;
         }
 
-        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "LOOKUP", status,
+        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_LOOKUP, status,
                             op_errno, &newfh);
         nfs3_lookup_reply (cs->req, status, &newfh, buf, postparent);
         nfs3_call_state_wipe (cs);
@@ -1247,7 +1293,7 @@ nfs3svc_lookup_parentdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
 xmit_res:
-        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "LOOKUP", status,
+        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_LOOKUP, status,
                             op_errno, &newfh);
         nfs3_lookup_reply (cs->req, status, &newfh, buf, postparent);
         nfs3_call_state_wipe (cs);
@@ -1297,7 +1343,8 @@ nfs3_lookup_parentdir_resume (void *carg)
         if (!nfs3_fh_is_root_fh (&cs->fh)) {
                 parent = inode_ref (cs->resolvedloc.parent);
                 nfs_loc_wipe (&cs->resolvedloc);
-                ret = nfs_inode_loc_fill (parent, &cs->resolvedloc);
+                ret = nfs_inode_loc_fill (parent, &cs->resolvedloc,
+                                          NFS_RESOLVE_CREATE);
 
                 if (ret < 0) {
                         gf_log (GF_NFS3, GF_LOG_ERROR, "nfs_inode_loc_fill"
@@ -1314,7 +1361,7 @@ errtostat:
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "LOOKUP",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_LOOKUP,
                                      stat, -ret);
                 nfs3_lookup_reply (cs->req, stat, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -1334,13 +1381,21 @@ nfs3_lookup_resume (void *carg)
         int                             ret = -EFAULT;
         nfs_user_t                      nfu = {0, };
         nfs3_call_state_t               *cs = NULL;
+        struct nfs3_fh                  newfh = {{0},};
 
         GF_VALIDATE_OR_GOTO (GF_NFS3, carg, nfs3err);
 
         cs = (nfs3_call_state_t *)carg;
         nfs3_check_fh_resolve_status (cs, stat, nfs3err);
-        nfs_request_user_init (&nfu, cs->req);
         cs->parent = cs->resolvefh;
+
+	if (cs->hardresolved) {
+		stat = NFS3_OK;
+		nfs3_fh_build_child_fh (&cs->parent, &cs->stbuf, &newfh);
+		goto nfs3err;
+	}
+
+        nfs_request_user_init (&nfu, cs->req);
         ret = nfs_lookup (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
                           nfs3svc_lookup_cbk, cs);
         if (ret < 0)
@@ -1348,9 +1403,10 @@ nfs3_lookup_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "LOOKUP",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_LOOKUP,
                                      stat, -ret);
-                nfs3_lookup_reply (cs->req, stat, NULL, NULL, NULL);
+                nfs3_lookup_reply (cs->req, stat, &newfh, &cs->stbuf,
+				   &cs->postparent);
                 nfs3_call_state_wipe (cs);
         }
 
@@ -1384,12 +1440,8 @@ nfs3_lookup (rpcsvc_request_t *req, struct nfs3_fh *fh, int fhlen, char *name)
         nfs3_handle_call_state_init (nfs3, cs, req, vol, stat, nfs3err);
 
         cs->lookuptype = GF_NFS3_REVALIDATE;
-        if (!nfs3_is_parentdir_entry (name))
-                ret = nfs3_fh_resolve_and_resume (cs, fh, name,
-                                                  nfs3_lookup_resume);
-        else
-                ret = nfs3_fh_resolve_and_resume (cs, fh, NULL,
-                                                  nfs3_lookup_parentdir_resume);
+        ret = nfs3_fh_resolve_and_resume (cs, fh, name,
+                                          nfs3_lookup_resume);
 
         if (ret < 0) {
                 gf_log (GF_NFS, GF_LOG_ERROR, "failed to start hard reslove");
@@ -1398,7 +1450,7 @@ nfs3_lookup (rpcsvc_request_t *req, struct nfs3_fh *fh, int fhlen, char *name)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "LOOKUP",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_LOOKUP,
                                      stat,
                                      -ret);
                 nfs3_lookup_reply (req, stat, NULL, NULL, NULL);
@@ -1456,7 +1508,7 @@ nfs3_access_reply (rpcsvc_request_t *req, nfsstat3 status, int32_t accbits)
 
 int32_t
 nfs3svc_access_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         nfsstat3                status = NFS3_OK;
         nfs3_call_state_t       *cs = NULL;
@@ -1469,7 +1521,7 @@ nfs3svc_access_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         cs->resolvedloc.path, strerror (op_errno));
                 status = nfs3_errno_to_nfsstat3 (op_errno);
         }
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "ACCESS", status,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_ACCESS, status,
                              op_errno);
         nfs3_access_reply (cs->req, status, op_errno);
         nfs3_call_state_wipe (cs);
@@ -1498,7 +1550,7 @@ nfs3_access_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "ACCESS",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_ACCESS,
                                      stat, -ret);
                 nfs3_access_reply (cs->req, stat, 0);
                 nfs3_call_state_wipe (cs);
@@ -1534,7 +1586,7 @@ nfs3_access (rpcsvc_request_t *req, struct nfs3_fh *fh, uint32_t accbits)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "ACCESS",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_ACCESS,
                                      stat, -ret);
                 nfs3_access_reply (req, stat, 0);
                 nfs3_call_state_wipe (cs);
@@ -1593,7 +1645,7 @@ nfs3_readlink_reply (rpcsvc_request_t *req, nfsstat3 stat, char *path,
 int32_t
 nfs3svc_readlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno, const char *path,
-                      struct iatt *buf)
+                      struct iatt *buf, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -1641,7 +1693,7 @@ nfs3_readlink_resume (void *carg)
 nfs3err:
         if (ret < 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "READLINK", stat, -ret);
+                                     NFS3_READLINK, stat, -ret);
                 nfs3_readlink_reply (cs->req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
         }
@@ -1677,7 +1729,7 @@ nfs3_readlink (rpcsvc_request_t *req, struct nfs3_fh *fh)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "READLINK",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_READLINK,
                                      stat, -ret);
                 nfs3_readlink_reply (req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -1758,7 +1810,8 @@ nfs3_read_reply (rpcsvc_request_t *req, nfsstat3 stat, count3 count,
 int32_t
 nfs3svc_read_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct iovec *vector,
-                  int32_t count, struct iatt *stbuf, struct iobref *iobref)
+                  int32_t count, struct iatt *stbuf, struct iobref *iobref,
+                  dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         int                     is_eof = 0;
@@ -1808,7 +1861,7 @@ nfs3_read_fd_resume (void *carg)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "READ",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_READ,
                                      stat, -ret);
                 nfs3_read_reply (cs->req, stat, 0, NULL, 0, NULL, NULL, 0);
                 nfs3_call_state_wipe (cs);
@@ -1824,19 +1877,25 @@ nfs3_read_resume (void *carg)
         nfsstat3                        stat = NFS3ERR_SERVERFAULT;
         int                             ret = -EFAULT;
         nfs3_call_state_t               *cs = NULL;
+        fd_t                            *fd = NULL;
 
         if (!carg)
                 return ret;
 
         cs = (nfs3_call_state_t *)carg;
         nfs3_check_fh_resolve_status (cs, stat, nfs3err);
-        ret = nfs3_file_open_and_resume (cs, nfs3_read_fd_resume);
-        if (ret < 0)
-                stat = nfs3_errno_to_nfsstat3 (-ret);
+        fd = fd_anonymous (cs->resolvedloc.inode);
+        if (!fd) {
+                gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to create anonymous fd");
+                goto nfs3err;
+        }
 
+        cs->fd = fd;
+        nfs3_read_fd_resume (cs);
+        ret = 0;
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "READ",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_READ,
                                      stat, -ret);
                 nfs3_read_reply (cs->req, stat, 0, NULL,0, NULL, NULL, 0);
                 nfs3_call_state_wipe (cs);
@@ -1876,7 +1935,7 @@ nfs3_read (rpcsvc_request_t *req, struct nfs3_fh *fh, offset3 offset,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "READ", stat,
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_READ, stat,
                                      -ret);
                 nfs3_read_reply (req, stat, 0, NULL,0, NULL, NULL, 0);
                 nfs3_call_state_wipe (cs);
@@ -1936,7 +1995,7 @@ nfs3_write_reply (rpcsvc_request_t *req, nfsstat3 stat, count3 count,
 int32_t
 nfs3svc_write_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                          int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                         struct iatt *postbuf)
+                         struct iatt *postbuf, dict_t *xdata)
 {
         struct nfs3_state       *nfs3 = NULL;
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
@@ -2032,7 +2091,7 @@ err:
 int32_t
 nfs3svc_write_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                   struct iatt *postbuf)
+                   struct iatt *postbuf, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         int                     ret = -EFAULT;
@@ -2125,19 +2184,26 @@ nfs3_write_resume (void *carg)
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         int                     ret = -EFAULT;
         nfs3_call_state_t       *cs = NULL;
+        fd_t                    *fd = NULL;
 
         if (!carg)
                 return ret;
 
         cs = (nfs3_call_state_t *)carg;
         nfs3_check_fh_resolve_status (cs, stat, nfs3err);
+        fd = fd_anonymous (cs->resolvedloc.inode);
+        if (!fd) {
+                gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to create anonymous fd");
+                goto nfs3err;
+        }
 
+        cs->fd = fd;    /* Gets unrefd when the call state is wiped. */
         ret = __nfs3_write_resume (cs);
         if (ret < 0)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "WRITE",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_WRITE,
                                      stat, -ret);
                 nfs3_write_reply (cs->req, stat, 0, cs->writetype, 0, NULL,
                                   NULL);
@@ -2145,34 +2211,6 @@ nfs3err:
         }
         return ret;
 }
-
-
-int
-nfs3_write_open_resume (void *carg)
-{
-        nfsstat3                stat = NFS3ERR_SERVERFAULT;
-        int                     ret = -EFAULT;
-        nfs3_call_state_t       *cs = NULL;
-
-        if (!carg)
-                return ret;
-
-        cs = (nfs3_call_state_t *)carg;
-        nfs3_check_fh_resolve_status (cs, stat, nfs3err);
-        ret = nfs3_file_open_and_resume (cs, nfs3_write_resume);
-        if (ret < 0)
-                stat = nfs3_errno_to_nfsstat3 (-ret);
-nfs3err:
-        if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "WRITE",
-                                     stat, -ret);
-                nfs3_write_reply (cs->req, stat, 0, cs->writetype, 0, NULL,
-                                  NULL);
-                nfs3_call_state_wipe (cs);
-        }
-        return ret;
-}
-
 
 
 int
@@ -2206,13 +2244,13 @@ nfs3_write (rpcsvc_request_t *req, struct nfs3_fh *fh, offset3 offset,
         cs->datavec = payload;
 
 
-        ret = nfs3_fh_resolve_and_resume (cs, fh, NULL, nfs3_write_open_resume);
+        ret = nfs3_fh_resolve_and_resume (cs, fh, NULL, nfs3_write_resume);
         if (ret < 0)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "WRITE",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_WRITE,
                                      stat, -ret);
                 nfs3_write_reply (req, stat, 0, stable, 0, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -2230,17 +2268,18 @@ out:
 
 
 int
-nfs3svc_write_vecsizer (int state, ssize_t *readsize, char *addr)
+nfs3svc_write_vecsizer (int state, ssize_t *readsize, char *base_addr,
+                        char *curr_addr)
 {
-        int         ret = 0;
-        uint32_t        fhlen = 0;
-        uint32_t        fhlen_n = 0;
+        int      ret     = 0;
+        uint32_t fhlen   = 0;
+        uint32_t fhlen_n = 0;
 
         if (state == 0) {
                 ret = NFS3_VECWRITE_READFHLEN;
                 *readsize = 4;
         } else if (state == NFS3_VECWRITE_READFHLEN) {
-                fhlen_n = *(uint32_t *)(addr - 4);
+                fhlen_n = *(uint32_t *)(curr_addr - 4);
                 fhlen = ntohl (fhlen_n);
                 *readsize = xdr_length_round_up (fhlen, NFS3_FHSIZE);
                 ret = NFS3_VECWRITE_READFH;
@@ -2291,12 +2330,6 @@ rpcerr:
         return ret;
 }
 
-int
-nfs3svc_write_vec (rpcsvc_request_t *req, struct iovec *payload,
-                   int payload_count, struct iobref *iobref)
-{
-        return nfs3svc_write (req);
-}
 
 int
 nfs3_create_reply (rpcsvc_request_t *req, nfsstat3 stat, struct nfs3_fh *newfh,
@@ -2318,7 +2351,7 @@ nfs3_create_reply (rpcsvc_request_t *req, nfsstat3 stat, struct nfs3_fh *newfh,
 int32_t
 nfs3svc_create_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                             int32_t op_ret, int32_t op_errno,
-                            struct iatt *preop, struct iatt *postop)
+                            struct iatt *preop, struct iatt *postop, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -2334,7 +2367,7 @@ nfs3svc_create_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         stat = NFS3_OK;
 nfs3err:
-        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "CREATE", stat,
+        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_CREATE, stat,
                             op_errno, &cs->fh);
         nfs3_create_reply (cs->req, stat, &cs->fh, postop, &cs->preparent,
                            &cs->postparent);
@@ -2348,12 +2381,13 @@ int32_t
 nfs3svc_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, fd_t *fd, inode_t *inode,
                     struct iatt *buf, struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         int                     ret = -EFAULT;
         nfs_user_t              nfu = {0, };
         nfs3_call_state_t       *cs = NULL;
+	inode_t			*oldinode = NULL;
 
         cs = frame->local;
         if (op_ret == -1) {
@@ -2365,6 +2399,8 @@ nfs3svc_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         nfs3_fh_build_child_fh (&cs->parent, buf, &cs->fh);
+        oldinode = inode_link (inode, cs->resolvedloc.parent,
+                               cs->resolvedloc.name, buf);
 
         /* Means no attributes were required to be set. */
         if (!cs->setattr_valid) {
@@ -2376,14 +2412,20 @@ nfs3svc_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         cs->preparent = *preparent;
         cs->postparent = *postparent;
         nfs_request_user_init (&nfu, cs->req);
+        uuid_copy (cs->resolvedloc.gfid, inode->gfid);
         ret = nfs_setattr (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,&cs->stbuf,
                            cs->setattr_valid, nfs3svc_create_setattr_cbk, cs);
         if (ret < 0)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 
 nfs3err:
+        if (oldinode) {
+                inode_lookup (oldinode);
+                inode_unref (oldinode);
+        }
+
         if (ret < 0) {
-                nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "CREATE",
+                nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_CREATE,
                                     stat, op_errno, &cs->fh);
                 nfs3_create_reply (cs->req, stat, &cs->fh, buf, preparent,
                                    postparent);
@@ -2399,16 +2441,30 @@ nfs3_create_common (nfs3_call_state_t *cs)
         int                     ret = -EFAULT;
         int                     flags = 0;
         nfs_user_t              nfu = {0, };
+        uid_t                   uid = 0;
+        gid_t                   gid = 0;
 
         if (!cs)
                 return ret;
 
-        if (cs->createmode == UNCHECKED)
-                flags = O_RDWR;
-        else if (cs->createmode == GUARDED)
+        if (cs->createmode == GUARDED)
                 flags = (O_RDWR | O_EXCL);
+        else
+                flags = O_RDWR;
 
-        nfs_request_user_init (&nfu, cs->req);
+        if (gf_attr_uid_set (cs->setattr_valid)) {
+                uid = cs->stbuf.ia_uid;
+                cs->setattr_valid &= ~GF_SET_ATTR_UID;
+        } else
+                uid = rpcsvc_request_uid (cs->req);
+
+        if (gf_attr_gid_set (cs->setattr_valid)) {
+                gid = cs->stbuf.ia_gid;
+                cs->setattr_valid &= ~GF_SET_ATTR_GID;
+        } else
+                gid = rpcsvc_request_gid (cs->req);
+
+        nfs_request_primary_user_init (&nfu, cs->req, uid, gid);
         /* We can avoid sending the setattr call later if only the mode is
          * required to be set. This is possible because the create fop allows
          * us to specify a mode arg.
@@ -2428,7 +2484,8 @@ nfs3_create_common (nfs3_call_state_t *cs)
 
 int32_t
 nfs3svc_create_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                         int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                         int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                         dict_t *xdata)
 {
         int                     ret = -EFAULT;
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
@@ -2464,7 +2521,7 @@ nfs3svc_create_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "CREATE",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_CREATE,
                                      stat, op_errno);
                 nfs3_create_reply (cs->req, stat, &cs->fh, buf, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -2505,16 +2562,7 @@ nfs3_create_exclusive (nfs3_call_state_t *cs)
                 goto nfs3err;
         }
 
-        if (cs->setattr_valid & GF_SET_ATTR_MODE) {
-                cs->setattr_valid &= ~GF_SET_ATTR_MODE;
-                ret = nfs_create (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                  O_RDWR, cs->mode, nfs3svc_create_cbk, cs);
-        } else
-                ret = nfs_create (cs->nfsx, cs->vol, &nfu, &cs->resolvedloc,
-                                  O_RDWR,
-                                  NFS_DEFAULT_CREATE_MODE, nfs3svc_create_cbk,
-                                  cs);
-
+        ret = nfs3_create_common (cs);
 nfs3err:
         return ret;
 }
@@ -2543,7 +2591,7 @@ nfs3_create_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "CREATE",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_CREATE,
                                      stat, -ret);
                 nfs3_create_reply (cs->req, stat, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -2590,7 +2638,7 @@ nfs3_create (rpcsvc_request_t *req, struct nfs3_fh *dirfh, char *name,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "CREATE",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_CREATE,
                                      stat, -ret);
                 nfs3_create_reply (req, stat, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -2662,7 +2710,7 @@ nfs3_mkdir_reply (rpcsvc_request_t *req, nfsstat3 stat, struct nfs3_fh *fh,
 int32_t
 nfs3svc_mkdir_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                            int32_t op_ret, int32_t op_errno,
-                           struct iatt *preop, struct iatt *postop)
+                           struct iatt *preop, struct iatt *postop, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -2678,7 +2726,7 @@ nfs3svc_mkdir_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         stat = NFS3_OK;
 nfs3err:
-        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "MKDIR", stat,
+        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_MKDIR, stat,
                             op_errno, &cs->fh);
         nfs3_mkdir_reply (cs->req, stat, &cs->fh, postop, &cs->preparent,
                           &cs->postparent);
@@ -2692,7 +2740,7 @@ int32_t
 nfs3svc_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, inode_t *inode,
                    struct iatt *buf, struct iatt *preparent,
-                   struct iatt *postparent)
+                   struct iatt *postparent, dict_t *xdata)
 {
         nfsstat3                        stat = NFS3ERR_SERVERFAULT;
         int                             ret = -EFAULT;
@@ -2726,7 +2774,7 @@ nfs3svc_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "MKDIR",
+                nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_MKDIR,
                                     stat, op_errno, &cs->fh);
                 nfs3_mkdir_reply (cs->req, stat, &cs->fh, buf, preparent,
                                   postparent);
@@ -2765,7 +2813,7 @@ nfs3_mkdir_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "MKDIR",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_MKDIR,
                                      stat, -ret);
                 nfs3_mkdir_reply (cs->req, stat, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -2810,7 +2858,7 @@ nfs3_mkdir (rpcsvc_request_t *req, struct nfs3_fh *dirfh, char *name,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "MKDIR",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_MKDIR,
                                      stat, -ret);
                 nfs3_mkdir_reply (req, stat, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -2872,7 +2920,7 @@ int32_t
 nfs3svc_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, inode_t *inode,
                      struct iatt *buf, struct iatt *preparent,
-                     struct iatt *postparent)
+                     struct iatt *postparent, dict_t *xdata)
 {
         nfsstat3                        stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t               *cs = NULL;
@@ -2890,7 +2938,7 @@ nfs3svc_symlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stat = NFS3_OK;
 
 nfs3err:
-        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "SYMLINK", stat,
+        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_SYMLINK, stat,
                             op_errno, &cs->fh);
         nfs3_symlink_reply (cs->req, stat, &cs->fh, buf, preparent,
                             postparent);
@@ -2921,7 +2969,7 @@ nfs3_symlink_resume (void *carg)
 nfs3err:
         if (ret < 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "SYMLINK", stat, -ret);
+                                     NFS3_SYMLINK, stat, -ret);
                 nfs3_symlink_reply (cs->req, stat, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
         }
@@ -2969,7 +3017,7 @@ nfs3_symlink (rpcsvc_request_t *req, struct nfs3_fh *dirfh, char *name,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "SYMLINK",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_SYMLINK,
                                      stat, -ret);
                 nfs3_symlink_reply (req, stat, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3034,7 +3082,7 @@ nfs3_mknod_reply (rpcsvc_request_t *req, nfsstat3 stat, struct nfs3_fh *fh,
 int32_t
 nfs3svc_mknod_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                            int32_t op_ret, int32_t op_errno,
-                           struct iatt *preop, struct iatt *postop)
+                           struct iatt *preop, struct iatt *postop, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -3050,7 +3098,7 @@ nfs3svc_mknod_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         stat = NFS3_OK;
 nfs3err:
-        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "MKNOD", stat,
+        nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_MKNOD, stat,
                             op_errno, &cs->fh);
         nfs3_mknod_reply (cs->req, stat, &cs->fh, postop, &cs->preparent,
                           &cs->postparent);
@@ -3064,7 +3112,7 @@ int32_t
 nfs3svc_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, inode_t *inode,
                    struct iatt *buf, struct iatt *preparent,
-                   struct iatt *postparent)
+                   struct iatt *postparent, dict_t *xdata)
 {
         nfsstat3                        stat = NFS3ERR_SERVERFAULT;
         int                             ret = -1;
@@ -3098,7 +3146,7 @@ nfs3svc_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 nfs3err:
         if (ret < 0) {
-                nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), "MKNOD",
+                nfs3_log_newfh_res (rpcsvc_request_xid (cs->req), NFS3_MKNOD,
                                     stat,
                                     op_errno, &cs->fh);
                 nfs3_mknod_reply (cs->req, stat, &cs->fh, buf, preparent,
@@ -3197,7 +3245,7 @@ nfs3_mknod_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "MKNOD",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_MKNOD,
                                      stat, -ret);
                 nfs3_mknod_reply (cs->req, stat, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3263,7 +3311,7 @@ nfs3_mknod (rpcsvc_request_t *req, struct nfs3_fh *fh, char *name,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "MKNOD",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_MKNOD,
                                      stat, -ret);
                 nfs3_mknod_reply (req, stat, NULL, NULL, NULL, NULL);
                 /* Ret must be 0 after this so that the caller does not
@@ -3324,12 +3372,10 @@ nfs3_remove_reply (rpcsvc_request_t *req, nfsstat3 stat, struct iatt *preparent
 int32_t
 nfs3svc_remove_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
-        fd_t                    *openfd = NULL;
         nfs3_call_state_t       *cs = NULL;
-        struct nfs3_state       *nfs3 = NULL;
 
         cs = frame->local;
         if (op_ret == -1) {
@@ -3337,21 +3383,12 @@ nfs3svc_remove_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         "%x: %s => -1 (%s)", rpcsvc_request_xid (cs->req),
                         cs->resolvedloc.path, strerror (op_errno));
                 stat = nfs3_errno_to_nfsstat3 (op_errno);
-                goto do_not_unref_cached_fd;
         }
-        stat = NFS3_OK;
-        /* Close any cached fds so that when any currently active write
-         * finishes, the file is finally removed.
-         */
-         openfd = fd_lookup (cs->resolvedloc.inode, 0);
-         nfs3 = rpcsvc_request_program_private (cs->req);
-         if (openfd) {
-                fd_unref (openfd);
-                nfs3_fdcache_remove (nfs3, openfd);
-         }
 
-do_not_unref_cached_fd:
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "REMOVE", stat,
+        if (op_ret == 0)
+                stat = NFS3_OK;
+
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_REMOVE, stat,
                              op_errno);
         nfs3_remove_reply (cs->req, stat, preparent, postparent);
         nfs3_call_state_wipe (cs);
@@ -3400,7 +3437,7 @@ nfs3_remove_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "REMOVE",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_REMOVE,
                                      stat, -ret);
                 nfs3_remove_reply (cs->req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3440,7 +3477,7 @@ nfs3_remove (rpcsvc_request_t *req, struct nfs3_fh *fh, char *name)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "REMOVE",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_REMOVE,
                                      stat, -ret);
                 nfs3_remove_reply (req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3501,7 +3538,7 @@ nfs3_rmdir_reply (rpcsvc_request_t *req, nfsstat3 stat, struct iatt *preparent,
 int32_t
 nfs3svc_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct iatt *preparent,
-                   struct iatt *postparent)
+                   struct iatt *postparent, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -3516,7 +3553,7 @@ nfs3svc_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 stat = NFS3_OK;
         }
 
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "RMDIR", stat,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_RMDIR, stat,
                              op_errno);
         nfs3_rmdir_reply (cs->req, stat, preparent, postparent);
         nfs3_call_state_wipe (cs);
@@ -3545,7 +3582,7 @@ nfs3_rmdir_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "RMDIR",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_RMDIR,
                                      stat, -ret);
                 nfs3_rmdir_reply (cs->req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3586,7 +3623,7 @@ nfs3_rmdir (rpcsvc_request_t *req, struct nfs3_fh *fh, char *name)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "RMDIR",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_RMDIR,
                                      stat, -ret);
                 nfs3_rmdir_reply (req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3653,12 +3690,12 @@ int32_t
 nfs3svc_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, struct iatt *buf,
                     struct iatt *preoldparent, struct iatt *postoldparent,
-                    struct iatt *prenewparent, struct iatt *postnewparent)
+                    struct iatt *prenewparent, struct iatt *postnewparent,
+                    dict_t *xdata)
 {
         int                     ret = -EFAULT;
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
-        fd_t                    *openfd = NULL;
 
         cs = frame->local;
         if (op_ret == -1) {
@@ -3671,20 +3708,8 @@ nfs3svc_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
 
         stat = NFS3_OK;
-        /* Close any cached fds so that when any currently active writes to the
-         * dst finish, the file is finally removed.
-         *
-         * This logic works because we know resolvedloc contains dst, which is
-         * resolved after src
-         */
-        openfd = fd_lookup (cs->resolvedloc.inode, 0);
-        if (openfd) {
-                fd_unref (openfd);
-                nfs3_fdcache_remove (cs->nfs3state, openfd);
-        }
-
 nfs3err:
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "RENAME", stat,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_RENAME, stat,
                              -ret);
         nfs3_rename_reply (cs->req, stat, buf, preoldparent, postoldparent,
                            prenewparent, postnewparent);
@@ -3715,7 +3740,7 @@ nfs3_rename_resume_dst (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "RENAME",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_RENAME,
                                      stat, -ret);
                 nfs3_rename_reply (cs->req, stat, NULL, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3752,7 +3777,7 @@ nfs3_rename_resume_src (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "RENAME",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_RENAME,
                                      stat, -ret);
                 nfs3_rename_reply (cs->req, stat, NULL, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3807,7 +3832,7 @@ nfs3_rename (rpcsvc_request_t *req, struct nfs3_fh *olddirfh, char *oldname,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "RENAME",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_RENAME,
                                      stat, -ret);
                 nfs3_rename_reply (req, stat, NULL, NULL, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3872,7 +3897,7 @@ int32_t
 nfs3svc_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, inode_t *inode,
                   struct iatt *buf, struct iatt *preparent,
-                  struct iatt *postparent)
+                  struct iatt *postparent, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -3887,7 +3912,7 @@ nfs3svc_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         } else
                 stat = NFS3_OK;
 
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "LINK", stat,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_LINK, stat,
                              op_errno);
         nfs3_link_reply (cs->req, stat, buf, preparent, postparent);
         nfs3_call_state_wipe (cs);
@@ -3918,7 +3943,7 @@ nfs3_link_resume_lnk (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "LINK",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_LINK,
                                      stat, -ret);
                 nfs3_link_reply (cs->req, stat, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3949,7 +3974,7 @@ nfs3_link_resume_tgt (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "LINK",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_LINK,
                                      stat, -ret);
                 nfs3_link_reply (cs->req, stat, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -3998,7 +4023,7 @@ nfs3_link (rpcsvc_request_t *req, struct nfs3_fh *targetfh,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "LINK", stat,
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_LINK, stat,
                                      -ret);
                 nfs3_link_reply (req, stat, NULL, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -4081,7 +4106,8 @@ nfs3_readdir_reply (rpcsvc_request_t *req, nfsstat3 stat, struct nfs3_fh *dirfh,
 
 int32_t
 nfs3svc_readdir_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                           int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                           int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                           dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         int                     is_eof = 0;
@@ -4134,7 +4160,8 @@ nfs3err:
 
 int32_t
 nfs3svc_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                     int32_t op_ret, int32_t op_errno, gf_dirent_t *entries)
+                     int32_t op_ret, int32_t op_errno, gf_dirent_t *entries,
+                     dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         int                     ret = -EFAULT;
@@ -4167,11 +4194,11 @@ err:
 
         if (cs->maxcount == 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "READDIR", stat, op_errno);
+                                     NFS3_READDIR, stat, op_errno);
                 nfs3_readdir_reply (cs->req, stat, NULL, 0, NULL, NULL, 0, 0);
         } else {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "READDIRP", stat, op_errno);
+                                     NFS3_READDIRP, stat, op_errno);
                 nfs3_readdirp_reply (cs->req, stat, NULL, 0, NULL, NULL,
                                      0, 0, 0);
         }
@@ -4227,12 +4254,12 @@ nfs3err:
         if (ret < 0) {
                 if (cs->maxcount == 0) {
                         nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                             "READDIR", stat, -ret);
+                                             NFS3_READDIR, stat, -ret);
                         nfs3_readdir_reply (cs->req, stat, NULL, 0, NULL, NULL,
                                             0, 0);
                 } else {
                         nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                             "READDIRP", stat, -ret);
+                                             NFS3_READDIRP, stat, -ret);
                         nfs3_readdirp_reply (cs->req, stat, NULL, 0, NULL, NULL,
                                              0, 0, 0);
                 }
@@ -4255,7 +4282,13 @@ nfs3_readdir_open_resume (void *carg)
 
         cs = (nfs3_call_state_t *)carg;
         nfs3_check_fh_resolve_status (cs, stat, nfs3err);
-        ret = nfs3_dir_open_and_resume (cs, nfs3_readdir_read_resume);
+        cs->fd = fd_anonymous (cs->resolvedloc.inode);
+        if (!cs->fd) {
+                gf_log (GF_NFS3, GF_LOG_ERROR, "Faile to create anonymous fd");
+                goto nfs3err;
+        }
+
+        ret = nfs3_readdir_read_resume (cs);
         if (ret < 0)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 
@@ -4263,12 +4296,12 @@ nfs3err:
         if (ret < 0) {
                 if (cs->maxcount == 0) {
                         nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                             "READDIR", stat, -ret);
+                                             NFS3_READDIR, stat, -ret);
                         nfs3_readdir_reply (cs->req, stat, NULL, 0, NULL, NULL,
                                             0, 0);
                 } else {
                         nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                             "READDIRP", stat, -ret);
+                                             NFS3_READDIRP, stat, -ret);
                         nfs3_readdirp_reply (cs->req, stat, NULL, 0, NULL, NULL,
                                              0, 0, 0);
                 }
@@ -4317,12 +4350,12 @@ nfs3err:
         if (ret < 0) {
                 if (maxcount == 0) {
                         nfs3_log_common_res (rpcsvc_request_xid (req),
-                                             "READDIR", stat, -ret);
+                                             NFS3_READDIR, stat, -ret);
                         nfs3_readdir_reply (req, stat, NULL, 0, NULL, NULL, 0,
                                             0);
                 } else {
                         nfs3_log_common_res (rpcsvc_request_xid (req),
-                                             "READDIRP", stat, -ret);
+                                             NFS3_READDIRP, stat, -ret);
                         nfs3_readdirp_reply (req, stat, NULL, 0, NULL, NULL, 0,
                                              0, 0);
                 }
@@ -4435,7 +4468,8 @@ nfs3_fsstat_reply (rpcsvc_request_t *req, nfsstat3 stat, struct statvfs *fsbuf,
 
 int32_t
 nfs3_fsstat_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                      int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                      dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -4449,7 +4483,7 @@ nfs3_fsstat_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         } else
                 stat = NFS3_OK;
 
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "FSTAT", stat,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_FSSTAT, stat,
                              op_errno);
         nfs3_fsstat_reply (cs->req, stat, &cs->fsstat, buf);
         nfs3_call_state_wipe (cs);
@@ -4459,7 +4493,8 @@ nfs3_fsstat_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 int32_t
 nfs3_fsstat_statfs_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int32_t op_ret, int32_t op_errno, struct statvfs *buf)
+                        int32_t op_ret, int32_t op_errno, struct statvfs *buf,
+                        dict_t *xdata)
 {
         nfs_user_t              nfu = {0, };
         int                     ret = -EFAULT;
@@ -4488,7 +4523,7 @@ nfs3_fsstat_statfs_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "FSTAT",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_FSSTAT,
                                      stat, -ret);
                 nfs3_fsstat_reply (cs->req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -4520,7 +4555,7 @@ nfs3_fsstat_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "FSTAT",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_FSSTAT,
                                      stat, -ret);
                 nfs3_fsstat_reply (cs->req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -4558,7 +4593,7 @@ nfs3_fsstat (rpcsvc_request_t *req, struct nfs3_fh *fh)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "FSTAT",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_FSSTAT,
                                      stat, -ret);
                 nfs3_fsstat_reply (req, stat, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -4619,7 +4654,8 @@ nfs3_fsinfo_reply (rpcsvc_request_t *req, nfsstat3 status, struct iatt *fsroot)
 
 int32_t
 nfs3svc_fsinfo_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                    int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                    dict_t *xdata)
 {
         nfsstat3                status = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -4634,7 +4670,7 @@ nfs3svc_fsinfo_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }else
                 status = NFS3_OK;
 
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "FSINFO", status,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_FSINFO, status,
                              op_errno);
 
         nfs3_fsinfo_reply (cs->req, status, buf);
@@ -4667,7 +4703,7 @@ nfs3_fsinfo_resume (void *carg)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "FSINFO",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_FSINFO,
                                      stat, -ret);
                 nfs3_fsinfo_reply (cs->req, stat, NULL);
                 nfs3_call_state_wipe (cs);
@@ -4704,7 +4740,7 @@ nfs3_fsinfo (rpcsvc_request_t *req, struct nfs3_fh *fh)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "FSINFO",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_FSINFO,
                                      stat, -ret);
                 nfs3_fsinfo_reply (req, stat, NULL);
                 nfs3_call_state_wipe (cs);
@@ -4760,7 +4796,8 @@ nfs3_pathconf_reply (rpcsvc_request_t *req, nfsstat3 stat, struct iatt *buf)
 
 int32_t
 nfs3svc_pathconf_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                      int32_t op_ret, int32_t op_errno, struct iatt *buf)
+                      int32_t op_ret, int32_t op_errno, struct iatt *buf,
+                      dict_t *xdata)
 {
         struct iatt             *sbuf = NULL;
         nfs3_call_state_t       *cs = NULL;
@@ -4780,7 +4817,7 @@ nfs3svc_pathconf_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 stat = NFS3_OK;
         }
 
-        nfs3_log_common_res (rpcsvc_request_xid (cs->req), "PATHCONF", stat,
+        nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_PATHCONF, stat,
                              op_errno);
         nfs3_pathconf_reply (cs->req, stat, sbuf);
         nfs3_call_state_wipe (cs);
@@ -4810,7 +4847,7 @@ nfs3_pathconf_resume (void *carg)
 nfs3err:
         if (ret < 0) {
                 nfs3_log_common_res (rpcsvc_request_xid (cs->req),
-                                     "PATHCONF", stat, -ret);
+                                     NFS3_PATHCONF, stat, -ret);
                 nfs3_pathconf_reply (cs->req, stat, NULL);
                 nfs3_call_state_wipe (cs);
         }
@@ -4845,7 +4882,7 @@ nfs3_pathconf (rpcsvc_request_t *req, struct nfs3_fh *fh)
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "PATHCONF",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_PATHCONF,
                                      stat, -ret);
                 nfs3_pathconf_reply (req, stat, NULL);
                 nfs3_call_state_wipe (cs);
@@ -4904,8 +4941,7 @@ nfs3_commit_reply (rpcsvc_request_t *req, nfsstat3 stat, uint64_t wverf,
 
 int32_t
 nfs3svc_commit_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
-                    struct iatt *postbuf)
+                    int32_t op_ret, int32_t op_errno, dict_t *xdata)
 {
         nfsstat3                stat = NFS3ERR_SERVERFAULT;
         nfs3_call_state_t       *cs = NULL;
@@ -4923,7 +4959,7 @@ nfs3svc_commit_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         nfs3 = rpcsvc_request_program_private (cs->req);
         nfs3_log_commit_res (rpcsvc_request_xid (cs->req), stat, op_errno,
                              nfs3->serverstart);
-        nfs3_commit_reply (cs->req, stat, nfs3->serverstart, prebuf, postbuf);
+        nfs3_commit_reply (cs->req, stat, nfs3->serverstart, NULL, NULL);
         nfs3_call_state_wipe (cs);
 
         return 0;
@@ -4950,14 +4986,14 @@ nfs3_commit_resume (void *carg)
         }
 
         nfs_request_user_init (&nfu, cs->req);
-        ret = nfs_fsync (cs->nfsx, cs->vol, &nfu, cs->fd, 0,
+        ret = nfs_flush (cs->nfsx, cs->vol, &nfu, cs->fd,
                          nfs3svc_commit_cbk, cs);
         if (ret < 0)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "COMMIT",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_COMMIT,
                                      stat, -ret);
                 nfs3_commit_reply (cs->req, stat, cs->nfs3state->serverstart,
                                    NULL, NULL);
@@ -4965,7 +5001,7 @@ nfs3err:
                 ret = 0;
         }
 
-        return ret;
+        return 0;
 }
 
 
@@ -4981,13 +5017,18 @@ nfs3_commit_open_resume (void *carg)
 
         cs = (nfs3_call_state_t *)carg;
         nfs3_check_fh_resolve_status (cs, stat, nfs3err);
+        cs->fd = fd_anonymous (cs->resolvedloc.inode);
+        if (!cs->fd) {
+                gf_log (GF_NFS3, GF_LOG_ERROR, "Failed to create anonymous fd.");
+                goto nfs3err;
+        }
 
-        ret = nfs3_file_open_and_resume (cs, nfs3_commit_resume);
+        ret = nfs3_commit_resume (cs);
         if (ret < 0)
                 stat = nfs3_errno_to_nfsstat3 (-ret);
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (cs->req), "COMMIT",
+                nfs3_log_common_res (rpcsvc_request_xid (cs->req), NFS3_COMMIT,
                                      stat, -ret);
                 nfs3_commit_reply (cs->req, stat, 0, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -5031,7 +5072,7 @@ nfs3_commit (rpcsvc_request_t *req, struct nfs3_fh *fh, offset3 offset,
 
 nfs3err:
         if (ret < 0) {
-                nfs3_log_common_res (rpcsvc_request_xid (req), "COMMIT",
+                nfs3_log_common_res (rpcsvc_request_xid (req), NFS3_COMMIT,
                                      stat, -ret);
                 nfs3_commit_reply (req, stat, 0, NULL, NULL);
                 nfs3_call_state_wipe (cs);
@@ -5072,28 +5113,28 @@ rpcerr:
 
 
 rpcsvc_actor_t          nfs3svc_actors[NFS3_PROC_COUNT] = {
-        {"NULL",        NFS3_NULL,      nfs3svc_null,   NULL,   NULL},
-        {"GETATTR",     NFS3_GETATTR,   nfs3svc_getattr,NULL,   NULL},
-        {"SETATTR",     NFS3_SETATTR,   nfs3svc_setattr,NULL,   NULL},
-        {"LOOKUP",      NFS3_LOOKUP,    nfs3svc_lookup, NULL,   NULL},
-        {"ACCESS",      NFS3_ACCESS,    nfs3svc_access, NULL,   NULL},
-        {"READLINK",    NFS3_READLINK,  nfs3svc_readlink,NULL,  NULL},
-        {"READ",        NFS3_READ,      nfs3svc_read,   NULL,   NULL},
-        {"WRITE",       NFS3_WRITE,     nfs3svc_write, nfs3svc_write_vec, nfs3svc_write_vecsizer},
-        {"CREATE",      NFS3_CREATE,    nfs3svc_create, NULL,   NULL},
-        {"MKDIR",       NFS3_MKDIR,     nfs3svc_mkdir,  NULL,   NULL},
-        {"SYMLINK",     NFS3_SYMLINK,   nfs3svc_symlink,NULL,   NULL},
-        {"MKNOD",       NFS3_MKNOD,     nfs3svc_mknod,  NULL,   NULL},
-        {"REMOVE",      NFS3_REMOVE,    nfs3svc_remove, NULL,   NULL},
-        {"RMDIR",       NFS3_RMDIR,     nfs3svc_rmdir,  NULL,   NULL},
-        {"RENAME",      NFS3_RENAME,    nfs3svc_rename, NULL,   NULL},
-        {"LINK",        NFS3_LINK,      nfs3svc_link,   NULL,   NULL},
-        {"READDIR",     NFS3_READDIR,   nfs3svc_readdir,NULL,   NULL},
-        {"READDIRPLUS", NFS3_READDIRP,  nfs3svc_readdirp,NULL,  NULL},
-        {"FSSTAT",      NFS3_FSSTAT,    nfs3svc_fsstat, NULL,   NULL},
-        {"FSINFO",      NFS3_FSINFO,    nfs3svc_fsinfo, NULL,   NULL},
-        {"PATHCONF",    NFS3_PATHCONF,  nfs3svc_pathconf,NULL,  NULL},
-        {"COMMIT",      NFS3_COMMIT,    nfs3svc_commit, NULL,   NULL}
+        {"NULL",        NFS3_NULL,      nfs3svc_null,   NULL,   0},
+        {"GETATTR",     NFS3_GETATTR,   nfs3svc_getattr,NULL,   0},
+        {"SETATTR",     NFS3_SETATTR,   nfs3svc_setattr,NULL,   0},
+        {"LOOKUP",      NFS3_LOOKUP,    nfs3svc_lookup, NULL,   0},
+        {"ACCESS",      NFS3_ACCESS,    nfs3svc_access, NULL,   0},
+        {"READLINK",    NFS3_READLINK,  nfs3svc_readlink,NULL,  0},
+        {"READ",        NFS3_READ,      nfs3svc_read,   NULL,   0},
+        {"WRITE",       NFS3_WRITE,     nfs3svc_write, nfs3svc_write_vecsizer, 0},
+        {"CREATE",      NFS3_CREATE,    nfs3svc_create, NULL,   0},
+        {"MKDIR",       NFS3_MKDIR,     nfs3svc_mkdir,  NULL,   0},
+        {"SYMLINK",     NFS3_SYMLINK,   nfs3svc_symlink,NULL,   0},
+        {"MKNOD",       NFS3_MKNOD,     nfs3svc_mknod,  NULL,   0},
+        {"REMOVE",      NFS3_REMOVE,    nfs3svc_remove, NULL,   0},
+        {"RMDIR",       NFS3_RMDIR,     nfs3svc_rmdir,  NULL,   0},
+        {"RENAME",      NFS3_RENAME,    nfs3svc_rename, NULL,   0},
+        {"LINK",        NFS3_LINK,      nfs3svc_link,   NULL,   0},
+        {"READDIR",     NFS3_READDIR,   nfs3svc_readdir,NULL,   0},
+        {"READDIRPLUS", NFS3_READDIRP,  nfs3svc_readdirp,NULL,  0},
+        {"FSSTAT",      NFS3_FSSTAT,    nfs3svc_fsstat, NULL,   0},
+        {"FSINFO",      NFS3_FSINFO,    nfs3svc_fsinfo, NULL,   0},
+        {"PATHCONF",    NFS3_PATHCONF,  nfs3svc_pathconf,NULL,  0},
+        {"COMMIT",      NFS3_COMMIT,    nfs3svc_commit, NULL,   0}
 };
 
 
@@ -5490,6 +5531,7 @@ nfs3_init_state (xlator_t *nfsx)
                 goto free_localpool;
         }
 
+        nfs->nfs3state = nfs3;
         ret = 0;
 
 free_localpool:

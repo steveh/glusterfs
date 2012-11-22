@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -241,7 +232,12 @@ sys_statvfs (const char *path, struct statvfs *buf)
 int
 sys_close (int fd)
 {
-        return close (fd);
+        int ret = -1;
+
+        if (fd >= 0)
+                ret = close (fd);
+
+        return ret;
 }
 
 
@@ -357,6 +353,32 @@ sys_fgetxattr (int filedes, const char *name, void *value, size_t size)
         return fgetxattr (filedes, name, value, size, 0, 0);
 #endif
 
+}
+
+
+int
+sys_fremovexattr (int filedes, const char *name)
+{
+
+#if defined(GF_LINUX_HOST_OS) || defined(__NetBSD__)
+        return fremovexattr (filedes, name);
+#endif
+
+        errno = ENOSYS;
+        return -1;
+#if 0 /* TODO: to port to other OSes, fill in each of below */
+#ifdef GF_BSD_HOST_OS
+        return extattr_remove_fd (filedes, EXTATTR_NAMESPACE_USER, name);
+#endif
+
+#ifdef GF_SOLARIS_HOST_OS
+        return solaris_fremovexattr (filedes, name);
+#endif
+
+#ifdef GF_DARWIN_HOST_OS
+        return fremovexattr (filedes, name, 0);
+#endif
+#endif
 }
 
 

@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2006-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -142,15 +132,21 @@ static struct argp_option gf_options[] = {
         {"debug", ARGP_DEBUG_KEY, 0, 0,
          "Run in debug mode.  This option sets --no-daemon, --log-level "
          "to DEBUG and --log-file to console"},
-        {"volume-name", ARGP_VOLUME_NAME_KEY, "VOLUME-NAME", 0,
-         "Volume name to be used for MOUNT-POINT [default: top most volume "
-         "in VOLFILE]"},
-        {"xlator-option", ARGP_XLATOR_OPTION_KEY,"VOLUME-NAME.OPTION=VALUE", 0,
-         "Add/override a translator option for a volume with specified value"},
+        {"volume-name", ARGP_VOLUME_NAME_KEY, "XLATOR-NAME", 0,
+         "Translator name to be used for MOUNT-POINT [default: top most volume "
+         "definition in VOLFILE]"},
+        {"xlator-option", ARGP_XLATOR_OPTION_KEY,"XLATOR-NAME.OPTION=VALUE", 0,
+         "Add/override an option for a translator in volume file with specified"
+         " value"},
         {"read-only", ARGP_READ_ONLY_KEY, 0, 0,
          "Mount the filesystem in 'read-only' mode"},
         {"acl", ARGP_ACL_KEY, 0, 0,
          "Mount the filesystem with POSIX ACL support"},
+        {"selinux", ARGP_SELINUX_KEY, 0, 0,
+         "Enable SELinux label (extened attributes) support on inodes"},
+        {"enable-ino32", ARGP_INODE32_KEY, "BOOL", OPTION_ARG_OPTIONAL,
+         "Use 32-bit inodes when mounting to workaround broken applications"
+         "that don't support 64-bit inodes"},
         {"worm", ARGP_WORM_KEY, 0, 0,
          "Mount the filesystem in 'worm' mode"},
         {"mac-compat", ARGP_MAC_COMPAT_KEY, "BOOL", OPTION_ARG_OPTIONAL,
@@ -165,6 +161,8 @@ static struct argp_option gf_options[] = {
          "Brick name to be registered with Gluster portmapper" },
         {"brick-port", ARGP_BRICK_PORT_KEY, "BRICK-PORT", OPTION_HIDDEN,
          "Brick Port to be registered with Gluster portmapper" },
+	{"fopen-keep-cache", ARGP_FOPEN_KEEP_CACHE_KEY, 0, 0,
+	 "Do not purge the cache on file open"},
 
         {0, 0, 0, 0, "Fuse options:"},
         {"direct-io-mode", ARGP_DIRECT_IO_MODE_KEY, "BOOL", OPTION_ARG_OPTIONAL,
@@ -173,9 +171,20 @@ static struct argp_option gf_options[] = {
          "\"on\" for fds not opened with O_RDONLY]"},
         {"entry-timeout", ARGP_ENTRY_TIMEOUT_KEY, "SECONDS", 0,
          "Set entry timeout to SECONDS in fuse kernel module [default: 1]"},
+        {"negative-timeout", ARGP_NEGATIVE_TIMEOUT_KEY, "SECONDS", 0,
+         "Set negative timeout to SECONDS in fuse kernel module [default: 0]"},
         {"attribute-timeout", ARGP_ATTRIBUTE_TIMEOUT_KEY, "SECONDS", 0,
          "Set attribute timeout to SECONDS for inodes in fuse kernel module "
          "[default: 1]"},
+	{"gid-timeout", ARGP_GID_TIMEOUT_KEY, "SECONDS", 0,
+	 "Set auxilary group list timeout to SECONDS for fuse translator "
+	 "[default: 0]"},
+	{"background-qlen", ARGP_FUSE_BACKGROUND_QLEN_KEY, "N", 0,
+	 "Set fuse module's background queue length to N "
+	 "[default: 64]"},
+	{"congestion-threshold", ARGP_FUSE_CONGESTION_THRESHOLD_KEY, "N", 0,
+	 "Set fuse module's congestion threshold to N "
+	 "[default: 48]"},
         {"client-pid", ARGP_CLIENT_PID_KEY, "PID", OPTION_HIDDEN,
          "client will authenticate itself with process id PID to server"},
         {"user-map-root", ARGP_USER_MAP_ROOT_KEY, "USER", OPTION_HIDDEN,
@@ -184,6 +193,10 @@ static struct argp_option gf_options[] = {
          "Dump fuse traffic to PATH"},
         {"volfile-check", ARGP_VOLFILE_CHECK_KEY, 0, 0,
          "Enable strict volume file checking"},
+        {"mem-accounting", ARGP_MEM_ACCOUNTING_KEY, 0, OPTION_HIDDEN,
+         "Enable internal memory accounting"},
+        {"fuse-mountopts", ARGP_FUSE_MOUNTOPTS_KEY, "OPTIONS", OPTION_HIDDEN,
+         "Extra mount options to pass to FUSE"},
         {0, 0, 0, 0, "Miscellaneous Options:"},
         {0, }
 };
@@ -195,6 +208,241 @@ int glusterfs_pidfile_cleanup (glusterfs_ctx_t *ctx);
 int glusterfs_volumes_init (glusterfs_ctx_t *ctx);
 int glusterfs_mgmt_init (glusterfs_ctx_t *ctx);
 int glusterfs_listener_init (glusterfs_ctx_t *ctx);
+int glusterfs_listener_stop (glusterfs_ctx_t *ctx);
+
+
+static int
+set_fuse_mount_options (glusterfs_ctx_t *ctx, dict_t *options)
+{
+        int              ret = 0;
+        cmd_args_t      *cmd_args = NULL;
+        char            *mount_point = NULL;
+        char            cwd[PATH_MAX] = {0,};
+
+        cmd_args = &ctx->cmd_args;
+
+        /* Check if mount-point is absolute path,
+         * if not convert to absolute path by concating with CWD
+         */
+        if (cmd_args->mount_point[0] != '/') {
+                if (getcwd (cwd, PATH_MAX) != NULL) {
+                        ret = gf_asprintf (&mount_point, "%s/%s", cwd,
+                                           cmd_args->mount_point);
+                        if (ret == -1) {
+                                gf_log ("glusterfsd", GF_LOG_ERROR,
+                                        "Could not create absolute mountpoint "
+                                        "path");
+                                goto err;
+                        }
+                } else {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "Could not get current working directory");
+                        goto err;
+                }
+        } else
+                mount_point = gf_strdup (cmd_args->mount_point);
+
+        ret = dict_set_dynstr (options, ZR_MOUNTPOINT_OPT, mount_point);
+        if (ret < 0) {
+                gf_log ("glusterfsd", GF_LOG_ERROR,
+                        "failed to set mount-point to options dictionary");
+                goto err;
+        }
+
+        if (cmd_args->fuse_attribute_timeout >= 0) {
+                ret = dict_set_double (options, ZR_ATTR_TIMEOUT_OPT,
+                                       cmd_args->fuse_attribute_timeout);
+
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key %s",
+                                ZR_ATTR_TIMEOUT_OPT);
+                        goto err;
+                }
+        }
+
+        if (cmd_args->fuse_entry_timeout >= 0) {
+                ret = dict_set_double (options, ZR_ENTRY_TIMEOUT_OPT,
+                                       cmd_args->fuse_entry_timeout);
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key %s",
+                                ZR_ENTRY_TIMEOUT_OPT);
+                        goto err;
+                }
+        }
+
+        if (cmd_args->fuse_negative_timeout >= 0) {
+                ret = dict_set_double (options, ZR_NEGATIVE_TIMEOUT_OPT,
+                                       cmd_args->fuse_negative_timeout);
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key %s",
+                                ZR_NEGATIVE_TIMEOUT_OPT);
+                        goto err;
+                }
+        }
+
+        if (cmd_args->client_pid_set) {
+                ret = dict_set_int32 (options, "client-pid",
+                                      cmd_args->client_pid);
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key %s",
+                                "client-pid");
+                        goto err;
+                }
+        }
+
+        if (cmd_args->uid_map_root) {
+                ret = dict_set_int32 (options, "uid-map-root",
+                                      cmd_args->uid_map_root);
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key %s",
+                                "uid-map-root");
+                        goto err;
+                }
+        }
+
+        if (cmd_args->volfile_check) {
+                ret = dict_set_int32 (options, ZR_STRICT_VOLFILE_CHECK,
+                                      cmd_args->volfile_check);
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key %s",
+                                ZR_STRICT_VOLFILE_CHECK);
+                        goto err;
+                }
+        }
+
+        if (cmd_args->dump_fuse) {
+                ret = dict_set_static_ptr (options, ZR_DUMP_FUSE,
+                                           cmd_args->dump_fuse);
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key %s",
+                                ZR_DUMP_FUSE);
+                        goto err;
+                }
+        }
+
+        if (cmd_args->acl) {
+                ret = dict_set_static_ptr (options, "acl", "on");
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key acl");
+                        goto err;
+                }
+        }
+
+        if (cmd_args->selinux) {
+                ret = dict_set_static_ptr (options, "selinux", "on");
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key selinux");
+                        goto err;
+                }
+        }
+
+        if (cmd_args->enable_ino32) {
+                ret = dict_set_static_ptr (options, "enable-ino32", "on");
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key enable-ino32");
+                        goto err;
+                }
+        }
+
+        if (cmd_args->read_only) {
+                ret = dict_set_static_ptr (options, "read-only", "on");
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key read-only");
+                        goto err;
+                }
+        }
+
+	if (cmd_args->fopen_keep_cache) {
+		ret = dict_set_static_ptr(options, "fopen-keep-cache",
+			"on");
+		if (ret < 0) {
+			gf_log("glusterfsd", GF_LOG_ERROR,
+				"failed to set dict value for key "
+				"fopen-keep-cache");
+			goto err;
+		}
+	}
+
+	if (cmd_args->gid_timeout) {
+		ret = dict_set_int32(options, "gid-timeout",
+			cmd_args->gid_timeout);
+		if (ret < 0) {
+			gf_log("glusterfsd", GF_LOG_ERROR, "failed to set dict "
+				"value for key gid-timeout");
+			goto err;
+		}
+	}
+	if (cmd_args->background_qlen) {
+		ret = dict_set_int32 (options, "background-qlen",
+                                      cmd_args->background_qlen);
+		if (ret < 0) {
+			gf_log("glusterfsd", GF_LOG_ERROR, "failed to set dict "
+                               "value for key background-qlen");
+			goto err;
+		}
+	}
+	if (cmd_args->congestion_threshold) {
+		ret = dict_set_int32 (options, "congestion-threshold",
+                                      cmd_args->congestion_threshold);
+		if (ret < 0) {
+			gf_log("glusterfsd", GF_LOG_ERROR, "failed to set dict "
+                               "value for key congestion-threshold");
+			goto err;
+		}
+	}
+
+        switch (cmd_args->fuse_direct_io_mode) {
+        case GF_OPTION_DISABLE: /* disable */
+                ret = dict_set_static_ptr (options, ZR_DIRECT_IO_OPT,
+                                           "disable");
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set 'disable' for key %s",
+                                ZR_DIRECT_IO_OPT);
+                        goto err;
+                }
+                break;
+        case GF_OPTION_ENABLE: /* enable */
+                ret = dict_set_static_ptr (options, ZR_DIRECT_IO_OPT,
+                                           "enable");
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set 'enable' for key %s",
+                                ZR_DIRECT_IO_OPT);
+                        goto err;
+                }
+                break;
+        case GF_OPTION_DEFERRED: /* default */
+        default:
+                gf_log ("", GF_LOG_DEBUG, "fuse direct io type %d",
+                        cmd_args->fuse_direct_io_mode);
+                break;
+        }
+
+        if (!cmd_args->no_daemon_mode) {
+                ret = dict_set_static_ptr (options, "sync-to-mount",
+                                           "enable");
+                if (ret < 0) {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "failed to set dict value for key sync-mtab");
+                        goto err;
+                }
+        }
+        ret = 0;
+err:
+        return ret;
+}
 
 int
 create_fuse_mount (glusterfs_ctx_t *ctx)
@@ -238,133 +486,17 @@ create_fuse_mount (glusterfs_ctx_t *ctx)
         if (!master->options)
                 goto err;
 
-        ret = dict_set_static_ptr (master->options, ZR_MOUNTPOINT_OPT,
-                                   cmd_args->mount_point);
-        if (ret < 0) {
-                gf_log ("glusterfsd", GF_LOG_ERROR,
-                        "failed to set mount-point to options dictionary");
+        ret = set_fuse_mount_options (ctx, master->options);
+        if (ret)
                 goto err;
-        }
 
-        if (cmd_args->fuse_attribute_timeout >= 0) {
-                ret = dict_set_double (master->options, ZR_ATTR_TIMEOUT_OPT,
-                                       cmd_args->fuse_attribute_timeout);
-
+        if (cmd_args->fuse_mountopts) {
+                ret = dict_set_static_ptr (master->options, ZR_FUSE_MOUNTOPTS,
+                                           cmd_args->fuse_mountopts);
                 if (ret < 0) {
                         gf_log ("glusterfsd", GF_LOG_ERROR,
                                 "failed to set dict value for key %s",
-                                ZR_ATTR_TIMEOUT_OPT);
-                        goto err;
-                }
-        }
-
-        if (cmd_args->fuse_entry_timeout >= 0) {
-                ret = dict_set_double (master->options, ZR_ENTRY_TIMEOUT_OPT,
-                                       cmd_args->fuse_entry_timeout);
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key %s",
-                                ZR_ENTRY_TIMEOUT_OPT);
-                        goto err;
-                }
-        }
-
-        if (cmd_args->client_pid_set) {
-                ret = dict_set_int32 (master->options, "client-pid",
-                                      cmd_args->client_pid);
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key %s",
-                                "client-pid");
-                        goto err;
-                }
-        }
-
-        if (cmd_args->uid_map_root) {
-                ret = dict_set_int32 (master->options, "uid-map-root",
-                                      cmd_args->uid_map_root);
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key %s",
-                                "uid-map-root");
-                        goto err;
-                }
-        }
-
-        if (cmd_args->volfile_check) {
-                ret = dict_set_int32 (master->options, ZR_STRICT_VOLFILE_CHECK,
-                                      cmd_args->volfile_check);
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key %s",
-                                ZR_STRICT_VOLFILE_CHECK);
-                        goto err;
-                }
-        }
-
-        if (cmd_args->dump_fuse) {
-                ret = dict_set_static_ptr (master->options, ZR_DUMP_FUSE,
-                                           cmd_args->dump_fuse);
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key %s",
-                                ZR_DUMP_FUSE);
-                        goto err;
-                }
-        }
-
-        if (cmd_args->acl) {
-                ret = dict_set_static_ptr (master->options, "acl", "on");
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key acl");
-                        goto err;
-                }
-        }
-
-        if (cmd_args->read_only) {
-                ret = dict_set_static_ptr (master->options, "read-only", "on");
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key read-only");
-                        goto err;
-                }
-        }
-
-        switch (cmd_args->fuse_direct_io_mode) {
-        case GF_OPTION_DISABLE: /* disable */
-                ret = dict_set_static_ptr (master->options, ZR_DIRECT_IO_OPT,
-                                           "disable");
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set 'disable' for key %s",
-                                ZR_DIRECT_IO_OPT);
-                        goto err;
-                }
-                break;
-        case GF_OPTION_ENABLE: /* enable */
-                ret = dict_set_static_ptr (master->options, ZR_DIRECT_IO_OPT,
-                                           "enable");
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set 'enable' for key %s",
-                                ZR_DIRECT_IO_OPT);
-                        goto err;
-                }
-                break;
-        case GF_OPTION_DEFERRED: /* default */
-        default:
-                gf_log ("", GF_LOG_DEBUG, "fuse direct io type %d",
-                        cmd_args->fuse_direct_io_mode);
-                break;
-        }
-
-        if (!cmd_args->no_daemon_mode) {
-                 ret = dict_set_static_ptr (master->options, "sync-mtab",
-                                            "enable");
-                if (ret < 0) {
-                        gf_log ("glusterfsd", GF_LOG_ERROR,
-                                "failed to set dict value for key sync-mtab");
+                                ZR_FUSE_MOUNTOPTS);
                         goto err;
                 }
         }
@@ -384,7 +516,7 @@ err:
                 xlator_destroy (master);
         }
 
-        return -1;
+        return 1;
 }
 
 
@@ -429,7 +561,7 @@ gf_remember_xlator_option (struct list_head *options, char *arg)
         char                    *dot = NULL;
         char                    *equals = NULL;
 
-        ctx = glusterfs_ctx_get ();
+        ctx = glusterfsd_ctx;
         cmd_args = &ctx->cmd_args;
 
         option = GF_CALLOC (1, sizeof (xlator_cmdline_option_t),
@@ -481,12 +613,9 @@ gf_remember_xlator_option (struct list_head *options, char *arg)
 out:
         if (ret == -1) {
                 if (option) {
-                        if (option->volume)
-                                GF_FREE (option->volume);
-                        if (option->key)
-                                GF_FREE (option->key);
-                        if (option->value)
-                                GF_FREE (option->value);
+                        GF_FREE (option->volume);
+                        GF_FREE (option->key);
+                        GF_FREE (option->value);
 
                         GF_FREE (option);
                 }
@@ -535,6 +664,18 @@ parse_opts (int key, char *arg, struct argp_state *state)
 
         case ARGP_ACL_KEY:
                 cmd_args->acl = 1;
+		gf_remember_xlator_option (&cmd_args->xlator_options,
+					   "*-md-cache.cache-posix-acl=true");
+                break;
+
+        case ARGP_SELINUX_KEY:
+                cmd_args->selinux = 1;
+		gf_remember_xlator_option (&cmd_args->xlator_options,
+					   "*-md-cache.cache-selinux=true");
+                break;
+
+        case ARGP_INODE32_KEY:
+                cmd_args->enable_ino32 = 1;
                 break;
 
         case ARGP_WORM_KEY:
@@ -556,8 +697,7 @@ parse_opts (int key, char *arg, struct argp_state *state)
                 break;
 
         case ARGP_VOLUME_FILE_KEY:
-                if (cmd_args->volfile)
-                        GF_FREE (cmd_args->volfile);
+                GF_FREE (cmd_args->volfile);
 
                 if (arg[0] != '/') {
                         pwd = getcwd (NULL, PATH_MAX);
@@ -679,6 +819,18 @@ parse_opts (int key, char *arg, struct argp_state *state)
                 argp_failure (state, -1, 0, "unknown entry timeout %s", arg);
                 break;
 
+        case ARGP_NEGATIVE_TIMEOUT_KEY:
+                d = 0.0;
+
+                gf_string2double (arg, &d);
+                if (!(d < 0.0)) {
+                        cmd_args->fuse_negative_timeout = d;
+                        break;
+                }
+
+                argp_failure (state, -1, 0, "unknown negative timeout %s", arg);
+                break;
+
         case ARGP_ATTRIBUTE_TIMEOUT_KEY:
                 d = 0.0;
 
@@ -762,7 +914,41 @@ parse_opts (int key, char *arg, struct argp_state *state)
                 argp_failure (state, -1, 0,
                               "unknown brick (listen) port %s", arg);
                 break;
-        }
+
+        case ARGP_MEM_ACCOUNTING_KEY:
+                /* TODO: it should have got handled much earlier */
+		//gf_mem_acct_enable_set (THIS->ctx);
+                break;
+
+	case ARGP_FOPEN_KEEP_CACHE_KEY:
+		cmd_args->fopen_keep_cache = 1;
+		break;
+
+	case ARGP_GID_TIMEOUT_KEY:
+		if (!gf_string2int(arg, &cmd_args->gid_timeout))
+			break;
+
+		argp_failure(state, -1, 0, "unknown group list timeout %s", arg);
+		break;
+        case ARGP_FUSE_BACKGROUND_QLEN_KEY:
+                if (!gf_string2int (arg, &cmd_args->background_qlen))
+                        break;
+
+                argp_failure (state, -1, 0,
+                              "unknown background qlen option %s", arg);
+                break;
+        case ARGP_FUSE_CONGESTION_THRESHOLD_KEY:
+                if (!gf_string2int (arg, &cmd_args->congestion_threshold))
+                        break;
+
+                argp_failure (state, -1, 0,
+                              "unknown congestion threshold option %s", arg);
+                break;
+
+        case ARGP_FUSE_MOUNTOPTS_KEY:
+                cmd_args->fuse_mountopts = gf_strdup (arg);
+                break;
+	}
 
         return 0;
 }
@@ -774,7 +960,7 @@ cleanup_and_exit (int signum)
         glusterfs_ctx_t *ctx      = NULL;
         xlator_t        *trav     = NULL;
 
-        ctx = glusterfs_ctx_get ();
+        ctx = glusterfsd_ctx;
 
         if (!ctx)
                 return;
@@ -788,7 +974,7 @@ cleanup_and_exit (int signum)
         ctx->cleanup_started = 1;
         glusterfs_mgmt_pmap_signout (ctx);
         if (ctx->listener) {
-                ctx->listener = NULL;
+                (void) glusterfs_listener_stop (ctx);
         }
 
         /* Call fini() of FUSE xlator first:
@@ -805,8 +991,11 @@ cleanup_and_exit (int signum)
         exit (0);
 #if 0
         /* TODO: Properly do cleanup_and_exit(), with synchronization */
-        if (ctx->mgmt)
+        if (ctx->mgmt) {
+                /* cleanup the saved-frames before last unref */
+                rpc_clnt_connection_cleanup (&ctx->mgmt->conn);
                 rpc_clnt_unref (ctx->mgmt);
+        }
 
         /* call fini() of each xlator */
         trav = NULL;
@@ -830,7 +1019,7 @@ reincarnate (int signum)
         glusterfs_ctx_t    *ctx = NULL;
         cmd_args_t         *cmd_args = NULL;
 
-        ctx = glusterfs_ctx_get ();
+        ctx = glusterfsd_ctx;
         cmd_args = &ctx->cmd_args;
 
         if (cmd_args->volfile_server) {
@@ -838,9 +1027,8 @@ reincarnate (int signum)
                         "Fetching the volume file from server...");
                 ret = glusterfs_volfile_fetch (ctx);
         } else {
-                gf_log ("glusterfsd", GF_LOG_INFO,
-                        "Reloading volfile ...");
-                ret = glusterfs_volumes_init (ctx);
+                gf_log ("glusterfsd", GF_LOG_DEBUG,
+                        "Not reloading volume specification file on SIGHUP");
         }
 
         /* Also, SIGHUP should do logrotate */
@@ -853,36 +1041,16 @@ reincarnate (int signum)
         return;
 }
 
-
-static char *
-generate_uuid ()
+void
+emancipate (glusterfs_ctx_t *ctx, int ret)
 {
-        char           tmp_str[1024] = {0,};
-        char           hostname[256] = {0,};
-        struct timeval tv = {0,};
-        struct tm      now = {0, };
-        char           now_str[32];
-
-        if (gettimeofday (&tv, NULL) == -1) {
-                gf_log ("glusterfsd", GF_LOG_ERROR,
-                        "gettimeofday: failed %s",
-                        strerror (errno));
+        /* break free from the parent */
+        if (ctx->daemon_pipe[1] != -1) {
+                write (ctx->daemon_pipe[1], (void *) &ret, sizeof (ret));
+                close (ctx->daemon_pipe[1]);
+                ctx->daemon_pipe[1] = -1;
         }
-
-        if (gethostname (hostname, 256) == -1) {
-                gf_log ("glusterfsd", GF_LOG_ERROR,
-                        "gethostname: failed %s",
-                        strerror (errno));
-        }
-
-        localtime_r (&tv.tv_sec, &now);
-        strftime (now_str, 32, "%Y/%m/%d-%H:%M:%S", &now);
-        snprintf (tmp_str, 1024, "%s-%d-%s:%" GF_PRI_SUSECONDS,
-                  hostname, getpid(), now_str, tv.tv_usec);
-
-        return gf_strdup (tmp_str);
 }
-
 
 static uint8_t
 gf_get_process_mode (char *exec_name)
@@ -975,30 +1143,31 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
         cmd_args_t    *cmd_args = NULL;
         struct rlimit  lim = {0, };
         call_pool_t   *pool = NULL;
+        int            ret = -1;
 
         xlator_mem_acct_init (THIS, gfd_mt_end);
 
-        ctx->process_uuid = generate_uuid ();
+        ctx->process_uuid = generate_glusterfs_ctx_id ();
         if (!ctx->process_uuid) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs uuid generation failed");
-                return -1;
+                goto out;
         }
 
         ctx->page_size  = 128 * GF_UNIT_KB;
 
-        ctx->iobuf_pool = iobuf_pool_new (8 * GF_UNIT_MB, ctx->page_size);
+        ctx->iobuf_pool = iobuf_pool_new ();
         if (!ctx->iobuf_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs iobuf pool creation failed");
-                return -1;
+                goto out;
         }
 
         ctx->event_pool = event_pool_new (DEFAULT_EVENT_POOL_SIZE);
         if (!ctx->event_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs event pool creation failed");
-                return -1;
+                goto out;
         }
 
         pool = GF_CALLOC (1, sizeof (call_pool_t),
@@ -1006,32 +1175,43 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
         if (!pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs call pool creation failed");
-                return -1;
+                goto out;
         }
 
-        /* frame_mem_pool size 112 * 16k */
-        pool->frame_mem_pool = mem_pool_new (call_frame_t, 16384);
-
+        /* frame_mem_pool size 112 * 4k */
+        pool->frame_mem_pool = mem_pool_new (call_frame_t, 4096);
         if (!pool->frame_mem_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs frame pool creation failed");
-                return -1;
+                goto out;
         }
-        /* stack_mem_pool size 256 * 8k */
-        pool->stack_mem_pool = mem_pool_new (call_stack_t, 8192);
-
+        /* stack_mem_pool size 256 * 1024 */
+        pool->stack_mem_pool = mem_pool_new (call_stack_t, 1024);
         if (!pool->stack_mem_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs stack pool creation failed");
-                return -1;
+                goto out;
         }
 
         ctx->stub_mem_pool = mem_pool_new (call_stub_t, 1024);
         if (!ctx->stub_mem_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs stub pool creation failed");
-                return -1;
+                goto out;
         }
+
+        ctx->dict_pool = mem_pool_new (dict_t, GF_MEMPOOL_COUNT_OF_DICT_T);
+        if (!ctx->dict_pool)
+                return -1;
+
+        ctx->dict_pair_pool = mem_pool_new (data_pair_t,
+                                            GF_MEMPOOL_COUNT_OF_DATA_PAIR_T);
+        if (!ctx->dict_pair_pool)
+                return -1;
+
+        ctx->dict_data_pool = mem_pool_new (data_t, GF_MEMPOOL_COUNT_OF_DATA_T);
+        if (!ctx->dict_data_pool)
+                return -1;
 
         INIT_LIST_HEAD (&pool->all_frames);
         LOCK_INIT (&pool->lock);
@@ -1062,7 +1242,35 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
         lim.rlim_max = RLIM_INFINITY;
         setrlimit (RLIMIT_CORE, &lim);
 
-        return 0;
+        ret = 0;
+out:
+
+        if (ret && pool) {
+
+                if (pool->frame_mem_pool)
+                        mem_pool_destroy (pool->frame_mem_pool);
+
+                if (pool->stack_mem_pool)
+                        mem_pool_destroy (pool->stack_mem_pool);
+
+                GF_FREE (pool);
+        }
+
+        if (ret && ctx) {
+                if (ctx->stub_mem_pool)
+                        mem_pool_destroy (ctx->stub_mem_pool);
+
+                if (ctx->dict_pool)
+                        mem_pool_destroy (ctx->dict_pool);
+
+                if (ctx->dict_data_pool)
+                        mem_pool_destroy (ctx->dict_data_pool);
+
+                if (ctx->dict_pair_pool)
+                        mem_pool_destroy (ctx->dict_pair_pool);
+        }
+
+        return ret;
 }
 
 static int
@@ -1081,7 +1289,7 @@ logging_init (glusterfs_ctx_t *ctx)
                 }
         }
 
-        if (gf_log_init (cmd_args->log_file) == -1) {
+        if (gf_log_init (ctx, cmd_args->log_file) == -1) {
                 fprintf (stderr, "ERROR: failed to open logfile %s\n",
                          cmd_args->log_file);
                 return -1;
@@ -1092,20 +1300,29 @@ logging_init (glusterfs_ctx_t *ctx)
         return 0;
 }
 
+void
+gf_check_and_set_mem_acct (glusterfs_ctx_t *ctx, int argc, char *argv[])
+{
+        int i = 0;
+        for (i = 0; i < argc; i++) {
+                if (strcmp (argv[i], "--mem-accounting") == 0) {
+			gf_mem_acct_enable_set (ctx);
+                        break;
+                }
+        }
+}
 
 int
 parse_cmdline (int argc, char *argv[], glusterfs_ctx_t *ctx)
 {
-        int               process_mode = 0;
-        int               ret = 0;
-        struct stat       stbuf = {0, };
-        struct tm        *tm = NULL;
-        time_t            utime;
-        char              timestr[256];
-        char              tmp_logfile[1024] = { 0 };
-        char              *tmp_logfile_dyn = NULL;
-        char              *tmp_logfilebase = NULL;
-        cmd_args_t        *cmd_args = NULL;
+        int          process_mode = 0;
+        int          ret = 0;
+        struct stat  stbuf = {0, };
+        char         timestr[32];
+        char         tmp_logfile[1024] = { 0 };
+        char        *tmp_logfile_dyn = NULL;
+        char        *tmp_logfilebase = NULL;
+        cmd_args_t  *cmd_args = NULL;
 
         cmd_args = &ctx->cmd_args;
 
@@ -1138,6 +1355,19 @@ parse_cmdline (int argc, char *argv[], glusterfs_ctx_t *ctx)
                         cmd_args->volfile = gf_strdup (DEFAULT_GLUSTERD_VOLFILE);
                 else
                         cmd_args->volfile = gf_strdup (DEFAULT_CLIENT_VOLFILE);
+
+                /* Check if the volfile exists, if not give usage output
+                   and exit */
+                ret = stat (cmd_args->volfile, &stbuf);
+                if (ret) {
+                        gf_log ("glusterfs", GF_LOG_CRITICAL,
+                                "ERROR: parsing the volfile failed (%s)\n",
+                                strerror (errno));
+                        /* argp_usage (argp.) */
+                        fprintf (stderr, "USAGE: %s [options] [mountpoint]\n",
+                                 argv[0]);
+                        goto out;
+                }
         }
 
         if (cmd_args->run_id) {
@@ -1149,8 +1379,8 @@ parse_cmdline (int argc, char *argv[], glusterfs_ctx_t *ctx)
                      (S_ISREG (stbuf.st_mode) || S_ISLNK (stbuf.st_mode))) ||
                     (ret == -1)) {
                         /* Have separate logfile per run */
-                        tm = localtime (&utime);
-                        strftime (timestr, 256, "%Y%m%d.%H%M%S", tm);
+                        gf_time_fmt (timestr, sizeof timestr, time (NULL),
+                                     gf_timefmt_FT);
                         sprintf (tmp_logfile, "%s.%s.%d",
                                  cmd_args->log_file, timestr, getpid ());
 
@@ -1188,7 +1418,7 @@ int
 glusterfs_pidfile_setup (glusterfs_ctx_t *ctx)
 {
         cmd_args_t  *cmd_args = NULL;
-        int          ret = 0;
+        int          ret = -1;
         FILE        *pidfp = NULL;
 
         cmd_args = &ctx->cmd_args;
@@ -1201,7 +1431,7 @@ glusterfs_pidfile_setup (glusterfs_ctx_t *ctx)
                 gf_log ("glusterfsd", GF_LOG_ERROR,
                         "pidfile %s error (%s)",
                         cmd_args->pid_file, strerror (errno));
-                return -1;
+                goto out;
         }
 
         ret = lockf (fileno (pidfp), F_TLOCK, 0);
@@ -1209,7 +1439,7 @@ glusterfs_pidfile_setup (glusterfs_ctx_t *ctx)
                 gf_log ("glusterfsd", GF_LOG_ERROR,
                         "pidfile %s lock error (%s)",
                         cmd_args->pid_file, strerror (errno));
-                return ret;
+                goto out;
         }
 
         gf_log ("glusterfsd", GF_LOG_TRACE,
@@ -1221,12 +1451,17 @@ glusterfs_pidfile_setup (glusterfs_ctx_t *ctx)
                 gf_log ("glusterfsd", GF_LOG_ERROR,
                         "pidfile %s unlock error (%s)",
                         cmd_args->pid_file, strerror (errno));
-                return ret;
+                goto out;
         }
 
         ctx->pidfp = pidfp;
 
-        return 0;
+        ret = 0;
+out:
+        if (ret && pidfp)
+                fclose (pidfp);
+
+        return ret;
 }
 
 
@@ -1339,10 +1574,10 @@ glusterfs_sigwaiter (void *arg)
                         reincarnate (sig);
                         break;
                 case SIGUSR1:
-                        gf_proc_dump_info (sig);
+                        gf_proc_dump_info (sig, glusterfsd_ctx);
                         break;
                 case SIGUSR2:
-                        gf_latency_toggle (sig);
+                        gf_latency_toggle (sig, glusterfsd_ctx);
                         break;
                 default:
 
@@ -1351,6 +1586,13 @@ glusterfs_sigwaiter (void *arg)
         }
 
         return NULL;
+}
+
+
+void
+glusterfsd_print_trace (int signum)
+{
+	gf_print_trace (signum, glusterfsd_ctx);
 }
 
 
@@ -1363,12 +1605,12 @@ glusterfs_signals_setup (glusterfs_ctx_t *ctx)
         sigemptyset (&set);
 
         /* common setting for all threads */
-        signal (SIGSEGV, gf_print_trace);
-        signal (SIGABRT, gf_print_trace);
-        signal (SIGILL, gf_print_trace);
-        signal (SIGTRAP, gf_print_trace);
-        signal (SIGFPE, gf_print_trace);
-        signal (SIGBUS, gf_print_trace);
+        signal (SIGSEGV, glusterfsd_print_trace);
+        signal (SIGABRT, glusterfsd_print_trace);
+        signal (SIGILL, glusterfsd_print_trace);
+        signal (SIGTRAP, glusterfsd_print_trace);
+        signal (SIGFPE, glusterfsd_print_trace);
+        signal (SIGBUS, glusterfsd_print_trace);
         signal (SIGINT, cleanup_and_exit);
         signal (SIGPIPE, SIG_IGN);
 
@@ -1380,7 +1622,7 @@ glusterfs_signals_setup (glusterfs_ctx_t *ctx)
 
         ret = pthread_sigmask (SIG_BLOCK, &set, NULL);
         if (ret) {
-                gf_log ("", GF_LOG_WARNING,
+                gf_log ("glusterfsd", GF_LOG_WARNING,
                         "failed to execute pthread_signmask  %s",
                         strerror (errno));
                 return ret;
@@ -1394,7 +1636,7 @@ glusterfs_signals_setup (glusterfs_ctx_t *ctx)
                   fallback to signals getting handled by other threads.
                   setup the signal handlers
                 */
-                gf_log ("", GF_LOG_WARNING,
+                gf_log ("glusterfsd", GF_LOG_WARNING,
                         "failed to create pthread  %s",
                         strerror (errno));
                 return ret;
@@ -1410,6 +1652,7 @@ daemonize (glusterfs_ctx_t *ctx)
         int            ret = -1;
         cmd_args_t    *cmd_args = NULL;
         int            cstatus = 0;
+        int            err = 0;
 
         cmd_args = &ctx->cmd_args;
 
@@ -1423,24 +1666,48 @@ daemonize (glusterfs_ctx_t *ctx)
         if (cmd_args->debug_mode)
                 goto postfork;
 
+        ret = pipe (ctx->daemon_pipe);
+        if (ret) {
+                /* If pipe() fails, retain daemon_pipe[] = {-1, -1}
+                   and parent will just not wait for child status
+                */
+                ctx->daemon_pipe[0] = -1;
+                ctx->daemon_pipe[1] = -1;
+        }
+
         ret = os_daemon_return (0, 0);
         switch (ret) {
         case -1:
+                if (ctx->daemon_pipe[0] != -1) {
+                        close (ctx->daemon_pipe[0]);
+                        close (ctx->daemon_pipe[1]);
+                }
+
                 gf_log ("daemonize", GF_LOG_ERROR,
                         "Daemonization failed: %s", strerror(errno));
                 goto out;
         case 0:
+                /* child */
+                /* close read */
+                close (ctx->daemon_pipe[0]);
                 break;
         default:
-                if (ctx->mtab_pid > 0) {
-                        ret = waitpid (ctx->mtab_pid, &cstatus, 0);
-                        if (!(ret == ctx->mtab_pid && cstatus == 0)) {
+                /* parent */
+                /* close write */
+                close (ctx->daemon_pipe[1]);
+
+                if (ctx->mnt_pid > 0) {
+                        ret = waitpid (ctx->mnt_pid, &cstatus, 0);
+                        if (!(ret == ctx->mnt_pid && cstatus == 0)) {
                                 gf_log ("daemonize", GF_LOG_ERROR,
-                                        "/etc/mtab update failed");
+                                        "mount failed");
                                 exit (1);
                         }
                 }
-                _exit (0);
+
+                err = 1;
+                read (ctx->daemon_pipe[0], (void *)&err, sizeof (err));
+                _exit (err);
         }
 
 postfork:
@@ -1522,7 +1789,8 @@ glusterfs_volumes_init (glusterfs_ctx_t *ctx)
 
         if (cmd_args->volfile_server) {
                 ret = glusterfs_mgmt_init (ctx);
-                goto out;
+                /* return, do not emancipate() yet */
+                return ret;
         }
 
         fp = get_volfp (ctx);
@@ -1539,26 +1807,41 @@ glusterfs_volumes_init (glusterfs_ctx_t *ctx)
                 goto out;
 
 out:
+        emancipate (ctx, ret);
         return ret;
 }
 
+
+/* This is the only legal global pointer  */
+glusterfs_ctx_t *glusterfsd_ctx;
 
 int
 main (int argc, char *argv[])
 {
         glusterfs_ctx_t  *ctx = NULL;
         int               ret = -1;
+        char              cmdlinestr[PATH_MAX] = {0,};
 
-        ret = glusterfs_globals_init ();
-        if (ret)
-                return ret;
-
-        ctx = glusterfs_ctx_get ();
+	ctx = glusterfs_ctx_new ();
         if (!ctx) {
                 gf_log ("glusterfs", GF_LOG_CRITICAL,
                         "ERROR: glusterfs context not initialized");
                 return ENOMEM;
         }
+	glusterfsd_ctx = ctx;
+
+        gf_mem_acct_enable_set (ctx);
+
+#ifndef DEBUG
+        /* Enable memory accounting on the fly based on argument */
+        gf_check_and_set_mem_acct (ctx, argc, argv);
+#endif
+
+        ret = glusterfs_globals_init (ctx);
+        if (ret)
+                return ret;
+
+	THIS->ctx = ctx;
 
         ret = glusterfs_ctx_defaults_init (ctx);
         if (ret)
@@ -1572,10 +1855,19 @@ main (int argc, char *argv[])
         if (ret)
                 goto out;
 
-        /* log the version of glusterfs running here */
-        gf_log (argv[0], GF_LOG_INFO,
-                "Started running %s version %s",
-                argv[0], PACKAGE_VERSION);
+        /* log the version of glusterfs running here along with the actual
+           command line options. */
+        {
+                int i = 0;
+                strcpy (cmdlinestr, argv[0]);
+                for (i = 1; i < argc; i++) {
+                        strcat (cmdlinestr, " ");
+                        strcat (cmdlinestr, argv[i]);
+                }
+                gf_log (argv[0], GF_LOG_INFO,
+                        "Started running %s version %s (%s)",
+                        argv[0], PACKAGE_VERSION, cmdlinestr);
+        }
 
         gf_proc_dump_init();
 

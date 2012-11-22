@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "xdr-common.h"
@@ -63,7 +54,10 @@ struct gf_proto_flock {
 	u_quad_t start;
 	u_quad_t len;
 	u_int pid;
-	u_quad_t owner;
+	struct {
+		u_int lk_owner_len;
+		char *lk_owner_val;
+	} lk_owner;
 };
 typedef struct gf_proto_flock gf_proto_flock;
 
@@ -90,7 +84,10 @@ typedef struct gf_iatt gf_iatt;
 
 struct gfs3_stat_req {
 	char gfid[16];
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_stat_req gfs3_stat_req;
 
@@ -98,13 +95,20 @@ struct gfs3_stat_rsp {
 	int op_ret;
 	int op_errno;
 	struct gf_iatt stat;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_stat_rsp gfs3_stat_rsp;
 
 struct gfs3_readlink_req {
 	char gfid[16];
 	u_int size;
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_readlink_req gfs3_readlink_req;
 
@@ -113,6 +117,10 @@ struct gfs3_readlink_rsp {
 	int op_errno;
 	struct gf_iatt buf;
 	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_readlink_rsp gfs3_readlink_rsp;
 
@@ -120,12 +128,12 @@ struct gfs3_mknod_req {
 	char pargfid[16];
 	u_quad_t dev;
 	u_int mode;
-	char *path;
+	u_int umask;
 	char *bname;
 	struct {
-		u_int dict_len;
-		char *dict_val;
-	} dict;
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_mknod_req gfs3_mknod_req;
 
@@ -135,18 +143,22 @@ struct gfs3_mknod_rsp {
 	struct gf_iatt stat;
 	struct gf_iatt preparent;
 	struct gf_iatt postparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_mknod_rsp gfs3_mknod_rsp;
 
 struct gfs3_mkdir_req {
 	char pargfid[16];
 	u_int mode;
-	char *path;
+	u_int umask;
 	char *bname;
 	struct {
-		u_int dict_len;
-		char *dict_val;
-	} dict;
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_mkdir_req gfs3_mkdir_req;
 
@@ -156,13 +168,21 @@ struct gfs3_mkdir_rsp {
 	struct gf_iatt stat;
 	struct gf_iatt preparent;
 	struct gf_iatt postparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_mkdir_rsp gfs3_mkdir_rsp;
 
 struct gfs3_unlink_req {
 	char pargfid[16];
-	char *path;
 	char *bname;
+	u_int xflags;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_unlink_req gfs3_unlink_req;
 
@@ -171,14 +191,21 @@ struct gfs3_unlink_rsp {
 	int op_errno;
 	struct gf_iatt preparent;
 	struct gf_iatt postparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_unlink_rsp gfs3_unlink_rsp;
 
 struct gfs3_rmdir_req {
 	char pargfid[16];
-	int flags;
-	char *path;
+	int xflags;
 	char *bname;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_rmdir_req gfs3_rmdir_req;
 
@@ -187,18 +214,22 @@ struct gfs3_rmdir_rsp {
 	int op_errno;
 	struct gf_iatt preparent;
 	struct gf_iatt postparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_rmdir_rsp gfs3_rmdir_rsp;
 
 struct gfs3_symlink_req {
 	char pargfid[16];
-	char *path;
 	char *bname;
+	u_int umask;
 	char *linkname;
 	struct {
-		u_int dict_len;
-		char *dict_val;
-	} dict;
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_symlink_req gfs3_symlink_req;
 
@@ -208,16 +239,22 @@ struct gfs3_symlink_rsp {
 	struct gf_iatt stat;
 	struct gf_iatt preparent;
 	struct gf_iatt postparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_symlink_rsp gfs3_symlink_rsp;
 
 struct gfs3_rename_req {
 	char oldgfid[16];
 	char newgfid[16];
-	char *oldpath;
 	char *oldbname;
-	char *newpath;
 	char *newbname;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_rename_req gfs3_rename_req;
 
@@ -229,15 +266,21 @@ struct gfs3_rename_rsp {
 	struct gf_iatt postoldparent;
 	struct gf_iatt prenewparent;
 	struct gf_iatt postnewparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_rename_rsp gfs3_rename_rsp;
 
 struct gfs3_link_req {
 	char oldgfid[16];
 	char newgfid[16];
-	char *oldpath;
-	char *newpath;
 	char *newbname;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_link_req gfs3_link_req;
 
@@ -247,13 +290,20 @@ struct gfs3_link_rsp {
 	struct gf_iatt stat;
 	struct gf_iatt preparent;
 	struct gf_iatt postparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_link_rsp gfs3_link_rsp;
 
 struct gfs3_truncate_req {
 	char gfid[16];
 	u_quad_t offset;
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_truncate_req gfs3_truncate_req;
 
@@ -262,14 +312,20 @@ struct gfs3_truncate_rsp {
 	int op_errno;
 	struct gf_iatt prestat;
 	struct gf_iatt poststat;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_truncate_rsp gfs3_truncate_rsp;
 
 struct gfs3_open_req {
 	char gfid[16];
 	u_int flags;
-	u_int wbflags;
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_open_req gfs3_open_req;
 
@@ -277,6 +333,10 @@ struct gfs3_open_rsp {
 	int op_ret;
 	int op_errno;
 	quad_t fd;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_open_rsp gfs3_open_rsp;
 
@@ -285,6 +345,11 @@ struct gfs3_read_req {
 	quad_t fd;
 	u_quad_t offset;
 	u_int size;
+	u_int flag;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_read_req gfs3_read_req;
 
@@ -293,6 +358,10 @@ struct gfs3_read_rsp {
 	int op_errno;
 	struct gf_iatt stat;
 	u_int size;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_read_rsp gfs3_read_rsp;
 
@@ -300,12 +369,11 @@ struct gfs3_lookup_req {
 	char gfid[16];
 	char pargfid[16];
 	u_int flags;
-	char *path;
 	char *bname;
 	struct {
-		u_int dict_len;
-		char *dict_val;
-	} dict;
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_lookup_req gfs3_lookup_req;
 
@@ -315,9 +383,9 @@ struct gfs3_lookup_rsp {
 	struct gf_iatt stat;
 	struct gf_iatt postparent;
 	struct {
-		u_int dict_len;
-		char *dict_val;
-	} dict;
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_lookup_rsp gfs3_lookup_rsp;
 
@@ -326,6 +394,11 @@ struct gfs3_write_req {
 	quad_t fd;
 	u_quad_t offset;
 	u_int size;
+	u_int flag;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_write_req gfs3_write_req;
 
@@ -334,12 +407,19 @@ struct gfs3_write_rsp {
 	int op_errno;
 	struct gf_iatt prestat;
 	struct gf_iatt poststat;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_write_rsp gfs3_write_rsp;
 
 struct gfs3_statfs_req {
 	char gfid[16];
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_statfs_req gfs3_statfs_req;
 
@@ -347,6 +427,10 @@ struct gfs3_statfs_rsp {
 	int op_ret;
 	int op_errno;
 	struct gf_statfs statfs;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_statfs_rsp gfs3_statfs_rsp;
 
@@ -356,6 +440,10 @@ struct gfs3_lk_req {
 	u_int cmd;
 	u_int type;
 	struct gf_proto_flock flock;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_lk_req gfs3_lk_req;
 
@@ -363,6 +451,10 @@ struct gfs3_lk_rsp {
 	int op_ret;
 	int op_errno;
 	struct gf_proto_flock flock;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_lk_rsp gfs3_lk_rsp;
 
@@ -371,8 +463,11 @@ struct gfs3_inodelk_req {
 	u_int cmd;
 	u_int type;
 	struct gf_proto_flock flock;
-	char *path;
 	char *volume;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_inodelk_req gfs3_inodelk_req;
 
@@ -383,12 +478,20 @@ struct gfs3_finodelk_req {
 	u_int type;
 	struct gf_proto_flock flock;
 	char *volume;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_finodelk_req gfs3_finodelk_req;
 
 struct gfs3_flush_req {
 	char gfid[16];
 	quad_t fd;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_flush_req gfs3_flush_req;
 
@@ -396,6 +499,10 @@ struct gfs3_fsync_req {
 	char gfid[16];
 	quad_t fd;
 	u_int data;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fsync_req gfs3_fsync_req;
 
@@ -404,6 +511,10 @@ struct gfs3_fsync_rsp {
 	int op_errno;
 	struct gf_iatt prestat;
 	struct gf_iatt poststat;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fsync_rsp gfs3_fsync_rsp;
 
@@ -414,7 +525,10 @@ struct gfs3_setxattr_req {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_setxattr_req gfs3_setxattr_req;
 
@@ -426,6 +540,10 @@ struct gfs3_fsetxattr_req {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fsetxattr_req gfs3_fsetxattr_req;
 
@@ -436,7 +554,10 @@ struct gfs3_xattrop_req {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_xattrop_req gfs3_xattrop_req;
 
@@ -447,6 +568,10 @@ struct gfs3_xattrop_rsp {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_xattrop_rsp gfs3_xattrop_rsp;
 
@@ -458,6 +583,10 @@ struct gfs3_fxattrop_req {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fxattrop_req gfs3_fxattrop_req;
 
@@ -468,14 +597,21 @@ struct gfs3_fxattrop_rsp {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fxattrop_rsp gfs3_fxattrop_rsp;
 
 struct gfs3_getxattr_req {
 	char gfid[16];
 	u_int namelen;
-	char *path;
 	char *name;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_getxattr_req gfs3_getxattr_req;
 
@@ -486,6 +622,10 @@ struct gfs3_getxattr_rsp {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_getxattr_rsp gfs3_getxattr_rsp;
 
@@ -494,6 +634,10 @@ struct gfs3_fgetxattr_req {
 	quad_t fd;
 	u_int namelen;
 	char *name;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fgetxattr_req gfs3_fgetxattr_req;
 
@@ -504,19 +648,40 @@ struct gfs3_fgetxattr_rsp {
 		u_int dict_len;
 		char *dict_val;
 	} dict;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fgetxattr_rsp gfs3_fgetxattr_rsp;
 
 struct gfs3_removexattr_req {
 	char gfid[16];
-	char *path;
 	char *name;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_removexattr_req gfs3_removexattr_req;
 
+struct gfs3_fremovexattr_req {
+	char gfid[16];
+	quad_t fd;
+	char *name;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_fremovexattr_req gfs3_fremovexattr_req;
+
 struct gfs3_opendir_req {
 	char gfid[16];
-	char *path;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_opendir_req gfs3_opendir_req;
 
@@ -524,6 +689,10 @@ struct gfs3_opendir_rsp {
 	int op_ret;
 	int op_errno;
 	quad_t fd;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_opendir_rsp gfs3_opendir_rsp;
 
@@ -531,6 +700,10 @@ struct gfs3_fsyncdir_req {
 	char gfid[16];
 	quad_t fd;
 	int data;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_fsyncdir_req gfs3_fsyncdir_req;
 
@@ -539,6 +712,10 @@ struct gfs3_readdir_req {
 	quad_t fd;
 	u_quad_t offset;
 	u_int size;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_readdir_req gfs3_readdir_req;
 
@@ -547,8 +724,194 @@ struct gfs3_readdirp_req {
 	quad_t fd;
 	u_quad_t offset;
 	u_int size;
+	struct {
+		u_int dict_len;
+		char *dict_val;
+	} dict;
 };
 typedef struct gfs3_readdirp_req gfs3_readdirp_req;
+
+struct gfs3_access_req {
+	char gfid[16];
+	u_int mask;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_access_req gfs3_access_req;
+
+struct gfs3_create_req {
+	char pargfid[16];
+	u_int flags;
+	u_int mode;
+	u_int umask;
+	char *bname;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_create_req gfs3_create_req;
+
+struct gfs3_create_rsp {
+	int op_ret;
+	int op_errno;
+	struct gf_iatt stat;
+	u_quad_t fd;
+	struct gf_iatt preparent;
+	struct gf_iatt postparent;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_create_rsp gfs3_create_rsp;
+
+struct gfs3_ftruncate_req {
+	char gfid[16];
+	quad_t fd;
+	u_quad_t offset;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_ftruncate_req gfs3_ftruncate_req;
+
+struct gfs3_ftruncate_rsp {
+	int op_ret;
+	int op_errno;
+	struct gf_iatt prestat;
+	struct gf_iatt poststat;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_ftruncate_rsp gfs3_ftruncate_rsp;
+
+struct gfs3_fstat_req {
+	char gfid[16];
+	quad_t fd;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_fstat_req gfs3_fstat_req;
+
+struct gfs3_fstat_rsp {
+	int op_ret;
+	int op_errno;
+	struct gf_iatt stat;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_fstat_rsp gfs3_fstat_rsp;
+
+struct gfs3_entrylk_req {
+	char gfid[16];
+	u_int cmd;
+	u_int type;
+	u_quad_t namelen;
+	char *name;
+	char *volume;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_entrylk_req gfs3_entrylk_req;
+
+struct gfs3_fentrylk_req {
+	char gfid[16];
+	quad_t fd;
+	u_int cmd;
+	u_int type;
+	u_quad_t namelen;
+	char *name;
+	char *volume;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_fentrylk_req gfs3_fentrylk_req;
+
+struct gfs3_setattr_req {
+	char gfid[16];
+	struct gf_iatt stbuf;
+	int valid;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_setattr_req gfs3_setattr_req;
+
+struct gfs3_setattr_rsp {
+	int op_ret;
+	int op_errno;
+	struct gf_iatt statpre;
+	struct gf_iatt statpost;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_setattr_rsp gfs3_setattr_rsp;
+
+struct gfs3_fsetattr_req {
+	quad_t fd;
+	struct gf_iatt stbuf;
+	int valid;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_fsetattr_req gfs3_fsetattr_req;
+
+struct gfs3_fsetattr_rsp {
+	int op_ret;
+	int op_errno;
+	struct gf_iatt statpre;
+	struct gf_iatt statpost;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_fsetattr_rsp gfs3_fsetattr_rsp;
+
+struct gfs3_rchecksum_req {
+	quad_t fd;
+	u_quad_t offset;
+	u_int len;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_rchecksum_req gfs3_rchecksum_req;
+
+struct gfs3_rchecksum_rsp {
+	int op_ret;
+	int op_errno;
+	u_int weak_checksum;
+	struct {
+		u_int strong_checksum_len;
+		char *strong_checksum_val;
+	} strong_checksum;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
+};
+typedef struct gfs3_rchecksum_rsp gfs3_rchecksum_rsp;
 
 struct gf_setvolume_req {
 	struct {
@@ -568,138 +931,13 @@ struct gf_setvolume_rsp {
 };
 typedef struct gf_setvolume_rsp gf_setvolume_rsp;
 
-struct gfs3_access_req {
-	char gfid[16];
-	u_int mask;
-	char *path;
-};
-typedef struct gfs3_access_req gfs3_access_req;
-
-struct gfs3_create_req {
-	char pargfid[16];
-	u_int flags;
-	u_int mode;
-	char *path;
-	char *bname;
-	struct {
-		u_int dict_len;
-		char *dict_val;
-	} dict;
-};
-typedef struct gfs3_create_req gfs3_create_req;
-
-struct gfs3_create_rsp {
-	int op_ret;
-	int op_errno;
-	struct gf_iatt stat;
-	u_quad_t fd;
-	struct gf_iatt preparent;
-	struct gf_iatt postparent;
-};
-typedef struct gfs3_create_rsp gfs3_create_rsp;
-
-struct gfs3_ftruncate_req {
-	char gfid[16];
-	quad_t fd;
-	u_quad_t offset;
-};
-typedef struct gfs3_ftruncate_req gfs3_ftruncate_req;
-
-struct gfs3_ftruncate_rsp {
-	int op_ret;
-	int op_errno;
-	struct gf_iatt prestat;
-	struct gf_iatt poststat;
-};
-typedef struct gfs3_ftruncate_rsp gfs3_ftruncate_rsp;
-
-struct gfs3_fstat_req {
-	char gfid[16];
-	quad_t fd;
-};
-typedef struct gfs3_fstat_req gfs3_fstat_req;
-
-struct gfs3_fstat_rsp {
-	int op_ret;
-	int op_errno;
-	struct gf_iatt stat;
-};
-typedef struct gfs3_fstat_rsp gfs3_fstat_rsp;
-
-struct gfs3_entrylk_req {
-	char gfid[16];
-	u_int cmd;
-	u_int type;
-	u_quad_t namelen;
-	char *path;
-	char *name;
-	char *volume;
-};
-typedef struct gfs3_entrylk_req gfs3_entrylk_req;
-
-struct gfs3_fentrylk_req {
-	char gfid[16];
-	quad_t fd;
-	u_int cmd;
-	u_int type;
-	u_quad_t namelen;
-	char *name;
-	char *volume;
-};
-typedef struct gfs3_fentrylk_req gfs3_fentrylk_req;
-
-struct gfs3_setattr_req {
-	char gfid[16];
-	struct gf_iatt stbuf;
-	int valid;
-	char *path;
-};
-typedef struct gfs3_setattr_req gfs3_setattr_req;
-
-struct gfs3_setattr_rsp {
-	int op_ret;
-	int op_errno;
-	struct gf_iatt statpre;
-	struct gf_iatt statpost;
-};
-typedef struct gfs3_setattr_rsp gfs3_setattr_rsp;
-
-struct gfs3_fsetattr_req {
-	quad_t fd;
-	struct gf_iatt stbuf;
-	int valid;
-};
-typedef struct gfs3_fsetattr_req gfs3_fsetattr_req;
-
-struct gfs3_fsetattr_rsp {
-	int op_ret;
-	int op_errno;
-	struct gf_iatt statpre;
-	struct gf_iatt statpost;
-};
-typedef struct gfs3_fsetattr_rsp gfs3_fsetattr_rsp;
-
-struct gfs3_rchecksum_req {
-	quad_t fd;
-	u_quad_t offset;
-	u_int len;
-};
-typedef struct gfs3_rchecksum_req gfs3_rchecksum_req;
-
-struct gfs3_rchecksum_rsp {
-	int op_ret;
-	int op_errno;
-	u_int weak_checksum;
-	struct {
-		u_int strong_checksum_len;
-		char *strong_checksum_val;
-	} strong_checksum;
-};
-typedef struct gfs3_rchecksum_rsp gfs3_rchecksum_rsp;
-
 struct gf_getspec_req {
 	u_int flags;
 	char *key;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gf_getspec_req gf_getspec_req;
 
@@ -707,8 +945,30 @@ struct gf_getspec_rsp {
 	int op_ret;
 	int op_errno;
 	char *spec;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gf_getspec_rsp gf_getspec_rsp;
+
+struct gf_mgmt_hndsk_req {
+	struct {
+		u_int hndsk_len;
+		char *hndsk_val;
+	} hndsk;
+};
+typedef struct gf_mgmt_hndsk_req gf_mgmt_hndsk_req;
+
+struct gf_mgmt_hndsk_rsp {
+	int op_ret;
+	int op_errno;
+	struct {
+		u_int hndsk_len;
+		char *hndsk_val;
+	} hndsk;
+};
+typedef struct gf_mgmt_hndsk_rsp gf_mgmt_hndsk_rsp;
 
 struct gf_log_req {
 	struct {
@@ -721,6 +981,10 @@ typedef struct gf_log_req gf_log_req;
 struct gf_notify_req {
 	u_int flags;
 	char *buf;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gf_notify_req gf_notify_req;
 
@@ -729,24 +993,40 @@ struct gf_notify_rsp {
 	int op_errno;
 	u_int flags;
 	char *buf;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gf_notify_rsp gf_notify_rsp;
 
 struct gfs3_releasedir_req {
 	char gfid[16];
 	quad_t fd;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_releasedir_req gfs3_releasedir_req;
 
 struct gfs3_release_req {
 	char gfid[16];
 	quad_t fd;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_release_req gfs3_release_req;
 
 struct gf_common_rsp {
 	int op_ret;
 	int op_errno;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gf_common_rsp gf_common_rsp;
 
@@ -764,6 +1044,10 @@ struct gfs3_readdir_rsp {
 	int op_ret;
 	int op_errno;
 	struct gfs3_dirlist *reply;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_readdir_rsp gfs3_readdir_rsp;
 
@@ -774,6 +1058,10 @@ struct gfs3_dirplist {
 	u_int d_type;
 	char *name;
 	struct gf_iatt stat;
+	struct {
+		u_int dict_len;
+		char *dict_val;
+	} dict;
 	struct gfs3_dirplist *nextentry;
 };
 typedef struct gfs3_dirplist gfs3_dirplist;
@@ -782,8 +1070,44 @@ struct gfs3_readdirp_rsp {
 	int op_ret;
 	int op_errno;
 	struct gfs3_dirplist *reply;
+	struct {
+		u_int xdata_len;
+		char *xdata_val;
+	} xdata;
 };
 typedef struct gfs3_readdirp_rsp gfs3_readdirp_rsp;
+
+struct gf_set_lk_ver_rsp {
+	int op_ret;
+	int op_errno;
+	int lk_ver;
+};
+typedef struct gf_set_lk_ver_rsp gf_set_lk_ver_rsp;
+
+struct gf_set_lk_ver_req {
+	char *uid;
+	int lk_ver;
+};
+typedef struct gf_set_lk_ver_req gf_set_lk_ver_req;
+
+struct gf_event_notify_req {
+	int op;
+	struct {
+		u_int dict_len;
+		char *dict_val;
+	} dict;
+};
+typedef struct gf_event_notify_req gf_event_notify_req;
+
+struct gf_event_notify_rsp {
+	int op_ret;
+	int op_errno;
+	struct {
+		u_int dict_len;
+		char *dict_val;
+	} dict;
+};
+typedef struct gf_event_notify_rsp gf_event_notify_rsp;
 
 /* the xdr functions */
 
@@ -839,13 +1163,12 @@ extern  bool_t xdr_gfs3_getxattr_rsp (XDR *, gfs3_getxattr_rsp*);
 extern  bool_t xdr_gfs3_fgetxattr_req (XDR *, gfs3_fgetxattr_req*);
 extern  bool_t xdr_gfs3_fgetxattr_rsp (XDR *, gfs3_fgetxattr_rsp*);
 extern  bool_t xdr_gfs3_removexattr_req (XDR *, gfs3_removexattr_req*);
+extern  bool_t xdr_gfs3_fremovexattr_req (XDR *, gfs3_fremovexattr_req*);
 extern  bool_t xdr_gfs3_opendir_req (XDR *, gfs3_opendir_req*);
 extern  bool_t xdr_gfs3_opendir_rsp (XDR *, gfs3_opendir_rsp*);
 extern  bool_t xdr_gfs3_fsyncdir_req (XDR *, gfs3_fsyncdir_req*);
 extern  bool_t xdr_gfs3_readdir_req (XDR *, gfs3_readdir_req*);
 extern  bool_t xdr_gfs3_readdirp_req (XDR *, gfs3_readdirp_req*);
-extern  bool_t xdr_gf_setvolume_req (XDR *, gf_setvolume_req*);
-extern  bool_t xdr_gf_setvolume_rsp (XDR *, gf_setvolume_rsp*);
 extern  bool_t xdr_gfs3_access_req (XDR *, gfs3_access_req*);
 extern  bool_t xdr_gfs3_create_req (XDR *, gfs3_create_req*);
 extern  bool_t xdr_gfs3_create_rsp (XDR *, gfs3_create_rsp*);
@@ -861,8 +1184,12 @@ extern  bool_t xdr_gfs3_fsetattr_req (XDR *, gfs3_fsetattr_req*);
 extern  bool_t xdr_gfs3_fsetattr_rsp (XDR *, gfs3_fsetattr_rsp*);
 extern  bool_t xdr_gfs3_rchecksum_req (XDR *, gfs3_rchecksum_req*);
 extern  bool_t xdr_gfs3_rchecksum_rsp (XDR *, gfs3_rchecksum_rsp*);
+extern  bool_t xdr_gf_setvolume_req (XDR *, gf_setvolume_req*);
+extern  bool_t xdr_gf_setvolume_rsp (XDR *, gf_setvolume_rsp*);
 extern  bool_t xdr_gf_getspec_req (XDR *, gf_getspec_req*);
 extern  bool_t xdr_gf_getspec_rsp (XDR *, gf_getspec_rsp*);
+extern  bool_t xdr_gf_mgmt_hndsk_req (XDR *, gf_mgmt_hndsk_req*);
+extern  bool_t xdr_gf_mgmt_hndsk_rsp (XDR *, gf_mgmt_hndsk_rsp*);
 extern  bool_t xdr_gf_log_req (XDR *, gf_log_req*);
 extern  bool_t xdr_gf_notify_req (XDR *, gf_notify_req*);
 extern  bool_t xdr_gf_notify_rsp (XDR *, gf_notify_rsp*);
@@ -873,6 +1200,10 @@ extern  bool_t xdr_gfs3_dirlist (XDR *, gfs3_dirlist*);
 extern  bool_t xdr_gfs3_readdir_rsp (XDR *, gfs3_readdir_rsp*);
 extern  bool_t xdr_gfs3_dirplist (XDR *, gfs3_dirplist*);
 extern  bool_t xdr_gfs3_readdirp_rsp (XDR *, gfs3_readdirp_rsp*);
+extern  bool_t xdr_gf_set_lk_ver_rsp (XDR *, gf_set_lk_ver_rsp*);
+extern  bool_t xdr_gf_set_lk_ver_req (XDR *, gf_set_lk_ver_req*);
+extern  bool_t xdr_gf_event_notify_req (XDR *, gf_event_notify_req*);
+extern  bool_t xdr_gf_event_notify_rsp (XDR *, gf_event_notify_rsp*);
 
 #else /* K&R C */
 extern bool_t xdr_gf_statfs ();
@@ -926,13 +1257,12 @@ extern bool_t xdr_gfs3_getxattr_rsp ();
 extern bool_t xdr_gfs3_fgetxattr_req ();
 extern bool_t xdr_gfs3_fgetxattr_rsp ();
 extern bool_t xdr_gfs3_removexattr_req ();
+extern bool_t xdr_gfs3_fremovexattr_req ();
 extern bool_t xdr_gfs3_opendir_req ();
 extern bool_t xdr_gfs3_opendir_rsp ();
 extern bool_t xdr_gfs3_fsyncdir_req ();
 extern bool_t xdr_gfs3_readdir_req ();
 extern bool_t xdr_gfs3_readdirp_req ();
-extern bool_t xdr_gf_setvolume_req ();
-extern bool_t xdr_gf_setvolume_rsp ();
 extern bool_t xdr_gfs3_access_req ();
 extern bool_t xdr_gfs3_create_req ();
 extern bool_t xdr_gfs3_create_rsp ();
@@ -948,8 +1278,12 @@ extern bool_t xdr_gfs3_fsetattr_req ();
 extern bool_t xdr_gfs3_fsetattr_rsp ();
 extern bool_t xdr_gfs3_rchecksum_req ();
 extern bool_t xdr_gfs3_rchecksum_rsp ();
+extern bool_t xdr_gf_setvolume_req ();
+extern bool_t xdr_gf_setvolume_rsp ();
 extern bool_t xdr_gf_getspec_req ();
 extern bool_t xdr_gf_getspec_rsp ();
+extern bool_t xdr_gf_mgmt_hndsk_req ();
+extern bool_t xdr_gf_mgmt_hndsk_rsp ();
 extern bool_t xdr_gf_log_req ();
 extern bool_t xdr_gf_notify_req ();
 extern bool_t xdr_gf_notify_rsp ();
@@ -960,6 +1294,10 @@ extern bool_t xdr_gfs3_dirlist ();
 extern bool_t xdr_gfs3_readdir_rsp ();
 extern bool_t xdr_gfs3_dirplist ();
 extern bool_t xdr_gfs3_readdirp_rsp ();
+extern bool_t xdr_gf_set_lk_ver_rsp ();
+extern bool_t xdr_gf_set_lk_ver_req ();
+extern bool_t xdr_gf_event_notify_req ();
+extern bool_t xdr_gf_event_notify_rsp ();
 
 #endif /* K&R C */
 

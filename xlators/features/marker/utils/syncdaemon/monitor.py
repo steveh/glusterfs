@@ -4,7 +4,7 @@ import time
 import signal
 import logging
 from gconf import gconf
-from syncdutils import update_file, select, waitpid
+from syncdutils import update_file, select, waitpid, set_term_handler
 
 class Monitor(object):
     """class which spawns and manages gsyncd workers"""
@@ -75,7 +75,7 @@ class Monitor(object):
             if os.WIFEXITED(s):
                 return os.WEXITSTATUS(s)
             return 1
-        conn_timeout = 60
+        conn_timeout = int(gconf.connection_timeout)
         while ret in (0, 1):
             logging.info('-' * conn_timeout)
             logging.info('starting gsyncd worker')
@@ -103,6 +103,12 @@ class Monitor(object):
             else:
                 logging.debug("worker not confirmed in %d sec, aborting it" % \
                               conn_timeout)
+                # relax one SIGTERM by setting a handler that sets back
+                # standard handler
+                set_term_handler(lambda *a: set_term_handler())
+                # give a chance to graceful exit
+                os.kill(-os.getpid(), signal.SIGTERM)
+                time.sleep(1)
                 os.kill(cpid, signal.SIGKILL)
                 ret = nwait(cpid)
             if ret == None:

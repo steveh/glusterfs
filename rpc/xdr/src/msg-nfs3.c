@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2007-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -62,84 +53,6 @@ xdr_to_mountpath (struct iovec outpath, struct iovec inmsg)
 ret:
         return ret;
 }
-
-/*
-ssize_t
-xdr_serialize_generic (struct iovec outmsg, void *res, xdrproc_t proc)
-{
-        ssize_t ret = -1;
-        XDR     xdr;
-
-        if ((!outmsg.iov_base) || (!res) || (!proc))
-                return -1;
-
-        xdrmem_create (&xdr, outmsg.iov_base, (unsigned int)outmsg.iov_len,
-                       XDR_ENCODE);
-
-        if (!proc (&xdr, res)) {
-                ret = -1;
-                goto ret;
-        }
-
-        ret = xdr_encoded_length (xdr);
-
-ret:
-        return ret;
-}
-
-
-ssize_t
-xdr_to_generic (struct iovec inmsg, void *args, xdrproc_t proc)
-{
-        XDR     xdr;
-        ssize_t ret = -1;
-
-        if ((!inmsg.iov_base) || (!args) || (!proc))
-                return -1;
-
-        xdrmem_create (&xdr, inmsg.iov_base, (unsigned int)inmsg.iov_len,
-                       XDR_DECODE);
-
-        if (!proc (&xdr, args)) {
-                ret  = -1;
-                goto ret;
-        }
-
-        ret = xdr_decoded_length (xdr);
-ret:
-        return ret;
-}
-
-
-ssize_t
-xdr_to_generic_payload (struct iovec inmsg, void *args, xdrproc_t proc,
-                            struct iovec *pendingpayload)
-{
-        XDR     xdr;
-        ssize_t ret = -1;
-
-        if ((!inmsg.iov_base) || (!args) || (!proc))
-                return -1;
-
-        xdrmem_create (&xdr, inmsg.iov_base, (unsigned int)inmsg.iov_len,
-                       XDR_DECODE);
-
-        if (!proc (&xdr, args)) {
-                ret  = -1;
-                goto ret;
-        }
-
-        ret = xdr_decoded_length (xdr);
-
-        if (pendingpayload) {
-                pendingpayload->iov_base = xdr_decoded_remaining_addr (xdr);
-                pendingpayload->iov_len = xdr_decoded_remaining_len (xdr);
-        }
-
-ret:
-        return ret;
-}
-*/
 
 /* Translate the mountres3 structure in res into XDR format into memory
  * referenced by outmsg.iov_base.
@@ -552,4 +465,108 @@ xdr_serialize_nfsstat3 (struct iovec outmsg, nfsstat3 *s)
                                           (xdrproc_t)xdr_nfsstat3);
 }
 
+ssize_t
+xdr_to_nlm4_testargs (struct iovec inmsg, nlm4_testargs *args)
+{
+        return xdr_to_generic (inmsg, (void*)args,
+                               (xdrproc_t)xdr_nlm4_testargs);
+}
+
+ssize_t
+xdr_serialize_nlm4_testres (struct iovec outmsg, nlm4_testres *res)
+{
+        return xdr_serialize_generic (outmsg, (void*)res,
+                                      (xdrproc_t)xdr_nlm4_testres);
+}
+
+ssize_t
+xdr_to_nlm4_lockargs (struct iovec inmsg, nlm4_lockargs *args)
+{
+        return xdr_to_generic (inmsg, (void*)args,
+                               (xdrproc_t)xdr_nlm4_lockargs);
+}
+
+ssize_t
+xdr_serialize_nlm4_res (struct iovec outmsg, nlm4_res *res)
+{
+        return xdr_serialize_generic (outmsg, (void*)res,
+                                      (xdrproc_t)xdr_nlm4_res);
+}
+
+ssize_t
+xdr_to_nlm4_cancelargs (struct iovec inmsg, nlm4_cancargs *args)
+{
+        return xdr_to_generic (inmsg, (void*)args,
+                               (xdrproc_t)xdr_nlm4_cancargs);
+}
+
+ssize_t
+xdr_to_nlm4_unlockargs (struct iovec inmsg, nlm4_unlockargs *args)
+{
+        return xdr_to_generic (inmsg, (void*)args,
+                               (xdrproc_t)xdr_nlm4_unlockargs);
+}
+
+ssize_t
+xdr_to_nlm4_shareargs (struct iovec inmsg, nlm4_shareargs *args)
+{
+        return xdr_to_generic (inmsg, (void*)args,
+                               (xdrproc_t)xdr_nlm4_shareargs);
+}
+
+ssize_t
+xdr_serialize_nlm4_shareres (struct iovec outmsg, nlm4_shareres *res)
+{
+        return xdr_serialize_generic (outmsg, (void *)res,
+                                      (xdrproc_t)xdr_nlm4_shareres);
+}
+
+ssize_t
+xdr_serialize_nlm4_testargs (struct iovec outmsg, nlm4_testargs *args)
+{
+        return xdr_serialize_generic (outmsg, (void*)args,
+                                      (xdrproc_t)xdr_nlm4_testargs);
+}
+
+ssize_t
+xdr_to_nlm4_res (struct iovec inmsg, nlm4_res *args)
+{
+        return xdr_to_generic (inmsg, (void*)args,
+                               (xdrproc_t)xdr_nlm4_res);
+}
+
+ssize_t
+xdr_to_nlm4_freeallargs (struct iovec inmsg, nlm4_freeallargs *args)
+{
+        return xdr_to_generic (inmsg, (void*)args,
+                               (xdrproc_t)xdr_nlm4_freeallargs);
+}
+
+ssize_t
+xdr_to_getaclargs (struct iovec inmsg, getaclargs *args)
+{
+        return xdr_to_generic (inmsg, (void *) args,
+                               (xdrproc_t)xdr_getaclargs);
+}
+
+ssize_t
+xdr_to_setaclargs (struct iovec inmsg, setaclargs *args)
+{
+        return xdr_to_generic (inmsg, (void *) args,
+                               (xdrproc_t)xdr_setaclargs);
+}
+
+ssize_t
+xdr_serialize_getaclreply (struct iovec inmsg, getaclreply *res)
+{
+        return xdr_serialize_generic (inmsg, (void *) res,
+                                      (xdrproc_t)xdr_getaclreply);
+}
+
+ssize_t
+xdr_serialize_setaclreply (struct iovec inmsg, setaclreply *res)
+{
+        return xdr_serialize_generic (inmsg, (void *) res,
+                                      (xdrproc_t)xdr_setaclreply);
+}
 

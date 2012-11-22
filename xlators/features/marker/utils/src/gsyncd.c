@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2011-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 
 #ifndef _CONFIG_H
 #define _CONFIG_H
@@ -27,6 +17,19 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/param.h> /* for PATH_MAX */
+
+/* NOTE (USE_LIBGLUSTERFS):
+ * ------------------------
+ * When USE_LIBGLUSTERFS debugging sumbol is passed; perform
+ * glusterfs translator like initialization so that glusterfs
+ * globals, contexts are valid when glustefs api's are invoked.
+ * We unconditionally pass then while building gsyncd binary.
+ */
+#ifdef USE_LIBGLUSTERFS
+#include "glusterfs.h"
+#include "globals.h"
+#endif
 
 #include "common-utils.h"
 #include "run.h"
@@ -44,12 +47,14 @@ static int
 duplexpand (void **buf, size_t tsiz, size_t *len)
 {
         size_t osiz = tsiz * *len;
-
-        *buf = realloc (*buf, osiz << 1);
-        if (!buf)
+        char *p = realloc (*buf, osiz << 1);
+        if (!p) {
+                free(*buf);
                 return -1;
+        }
 
-        memset ((char *)*buf + osiz, 0, osiz);
+        memset (p + osiz, 0, osiz);
+        *buf = p;
         *len <<= 1;
 
         return 0;
@@ -59,6 +64,7 @@ static int
 str2argv (char *str, char ***argv)
 {
         char *p         = NULL;
+        char *savetok   = NULL;
         int argc        = 0;
         size_t argv_len = 32;
         int ret         = 0;
@@ -72,7 +78,7 @@ str2argv (char *str, char ***argv)
         if (!*argv)
                 goto error;
 
-        while ((p = strtok (str, " "))) {
+        while ((p = strtok_r (str, " ", &savetok))) {
                 str = NULL;
 
                 argc++;
@@ -104,6 +110,7 @@ invoke_gsyncd (int argc, char **argv)
         char *nargv[argc + 4];
 
         if (restricted) {
+                size_t len;
                 /* in restricted mode we forcibly use the system-wide config */
                 runinit (&runner);
                 runner_add_args (&runner, SBIN_DIR"/gluster",
@@ -113,9 +120,10 @@ invoke_gsyncd (int argc, char **argv)
                 if (runner_start (&runner) == 0 &&
                     fgets (config_file, PATH_MAX,
                            runner_chio (&runner, STDOUT_FILENO)) != NULL &&
-                    config_file[strlen (config_file) - 1] == '\n' &&
+                    (len = strlen (config_file)) &&
+                    config_file[len - 1] == '\n' &&
                     runner_end (&runner) == 0)
-                        gluster_workdir_len = strlen (config_file) - 1;
+                        gluster_workdir_len = len - 1;
 
                 if (gluster_workdir_len) {
                         if (gluster_workdir_len + 1 + strlen (GSYNCD_CONF) + 1 >
@@ -159,6 +167,7 @@ static int
 find_gsyncd (pid_t pid, pid_t ppid, char *name, void *data)
 {
         char buf[NAME_MAX * 2] = {0,};
+        char path[PATH_MAX]    = {0,};
         char *p                = NULL;
         int zeros              = 0;
         int ret                = 0;
@@ -168,13 +177,8 @@ find_gsyncd (pid_t pid, pid_t ppid, char *name, void *data)
         if (ppid != pida[0])
                 return 0;
 
-        ret = gf_asprintf (&p, PROC"/%d/cmdline", pid);
-        if (ret == -1) {
-                fprintf (stderr, "out of memory\n");
-                return -1;
-        }
-
-        fd = open (p, O_RDONLY);
+        sprintf (path, PROC"/%d/cmdline", pid);
+        fd = open (path, O_RDONLY);
         if (fd == -1)
                 return 0;
         ret = read (fd, buf, sizeof (buf));
@@ -213,7 +217,7 @@ static int
 invoke_rsync (int argc, char **argv)
 {
         int i                  = 0;
-        char *p                = NULL;
+        char path[PATH_MAX]    = {0,};
         pid_t pid              = -1;
         pid_t ppid             = -1;
         pid_t pida[]           = {-1, -1};
@@ -240,8 +244,11 @@ invoke_rsync (int argc, char **argv)
                         fprintf (stderr, "sshd ancestor not found\n");
                         goto error;
                 }
-                if (strcmp (name, "sshd") == 0)
+                if (strcmp (name, "sshd") == 0) {
+                        GF_FREE (name);
                         break;
+                }
+                GF_FREE (name);
         }
         /* look up "ssh-sibling" gsyncd */
         pida[0] = pid;
@@ -251,15 +258,12 @@ invoke_rsync (int argc, char **argv)
                 goto error;
         }
         /* check if rsync target matches gsyncd target */
-        if (gf_asprintf (&p, PROC"/%d/cwd", pida[1]) == -1) {
-                fprintf (stderr, "out of memory\n");
-                goto error;
-        }
-        ret = readlink (p, buf, sizeof (buf));
+        sprintf (path, PROC"/%d/cwd", pida[1]);
+        ret = readlink (path, buf, sizeof (buf));
         if (ret == -1 || ret == sizeof (buf))
                 goto error;
         if (strcmp (argv[argc - 1], "/") == 0 /* root dir cannot be a target */ ||
-            (strcmp (argv[argc - 1], p) /* match against gluster target */ &&
+            (strcmp (argv[argc - 1], path) /* match against gluster target */ &&
              strcmp (argv[argc - 1], buf) /* match against file target */) != 0) {
                 fprintf (stderr, "rsync target does not match "GEOREP" session\n");
                 goto error;
@@ -296,6 +300,19 @@ main (int argc, char **argv)
         struct invocable *i = NULL;
         char *b             = NULL;
         char *sargv         = NULL;
+
+#ifdef USE_LIBGLUSTERFS
+        glusterfs_ctx_t *ctx = NULL;
+
+        ctx = glusterfs_ctx_new ();
+        if (!ctx)
+                return ENOMEM;
+
+        if (glusterfs_globals_init (ctx))
+                return 1;
+
+        THIS->ctx = ctx;
+#endif
 
         evas = getenv (_GLUSTERD_CALLED_);
         if (evas && strcmp (evas, "1") == 0)

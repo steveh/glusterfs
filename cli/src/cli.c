@@ -1,22 +1,12 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-  This file is part of GlusterFS.
+   Copyright (c) 2010-2012 Red Hat, Inc. <http://www.redhat.com>
+   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+   This file is licensed to you under your choice of the GNU Lesser
+   General Public License, version 3 or any later version (LGPLv3 or
+   later), or the GNU General Public License, version 2 (GPLv2), in all
+   cases as published by the Free Software Foundation.
 */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -99,43 +89,6 @@ rpc_clnt_prog_t *cli_rpc_prog;
 
 extern struct rpc_clnt_program cli_prog;
 
-
-
-
-static char *
-generate_uuid ()
-{
-        char           tmp_str[1024] = {0,};
-        char           hostname[256] = {0,};
-        struct timeval tv = {0,};
-        struct tm      now = {0, };
-        char           now_str[32];
-
-        if (gettimeofday (&tv, NULL) == -1) {
-                gf_log ("glusterfsd", GF_LOG_ERROR,
-                        "gettimeofday: failed %s",
-                        strerror (errno));
-        }
-
-        if (gethostname (hostname, 256) == -1) {
-                gf_log ("glusterfsd", GF_LOG_ERROR,
-                        "gethostname: failed %s",
-                        strerror (errno));
-        }
-
-        localtime_r (&tv.tv_sec, &now);
-        strftime (now_str, 32, "%Y/%m/%d-%H:%M:%S", &now);
-        snprintf (tmp_str, 1024, "%s-%d-%s:%"
-#ifdef GF_DARWIN_HOST_OS
-                  PRId32,
-#else
-                  "ld",
-#endif
-                  hostname, getpid(), now_str, tv.tv_usec);
-
-        return gf_strdup (tmp_str);
-}
-
 static int
 glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 {
@@ -145,13 +98,13 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 
         xlator_mem_acct_init (THIS, cli_mt_end);
 
-        ctx->process_uuid = generate_uuid ();
+        ctx->process_uuid = generate_glusterfs_ctx_id ();
         if (!ctx->process_uuid)
                 return -1;
 
         ctx->page_size  = 128 * GF_UNIT_KB;
 
-        ctx->iobuf_pool = iobuf_pool_new (8 * GF_UNIT_MB, ctx->page_size);
+        ctx->iobuf_pool = iobuf_pool_new ();
         if (!ctx->iobuf_pool)
                 return -1;
 
@@ -164,20 +117,31 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
         if (!pool)
                 return -1;
 
-        /* frame_mem_pool size 112 * 16k */
-        pool->frame_mem_pool = mem_pool_new (call_frame_t, 16384);
-
+        /* frame_mem_pool size 112 * 64 */
+        pool->frame_mem_pool = mem_pool_new (call_frame_t, 32);
         if (!pool->frame_mem_pool)
                 return -1;
 
-        /* stack_mem_pool size 256 * 8k */
-        pool->stack_mem_pool = mem_pool_new (call_stack_t, 8192); 
+        /* stack_mem_pool size 256 * 128 */
+        pool->stack_mem_pool = mem_pool_new (call_stack_t, 16);
 
         if (!pool->stack_mem_pool)
                 return -1;
 
-        ctx->stub_mem_pool = mem_pool_new (call_stub_t, 1024);
+        ctx->stub_mem_pool = mem_pool_new (call_stub_t, 16);
         if (!ctx->stub_mem_pool)
+                return -1;
+
+        ctx->dict_pool = mem_pool_new (dict_t, 32);
+        if (!ctx->dict_pool)
+                return -1;
+
+        ctx->dict_pair_pool = mem_pool_new (data_pair_t, 512);
+        if (!ctx->dict_pair_pool)
+                return -1;
+
+        ctx->dict_data_pool = mem_pool_new (data_t, 512);
+        if (!ctx->dict_data_pool)
                 return -1;
 
         INIT_LIST_HEAD (&pool->all_frames);
@@ -199,12 +163,12 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
 
 
 static int
-logging_init (struct cli_state *state)
+logging_init (glusterfs_ctx_t *ctx, struct cli_state *state)
 {
         char *log_file = state->log_file ? state->log_file :
                          DEFAULT_CLI_LOG_FILE_DIRECTORY "/cli.log";
 
-        if (gf_log_init (log_file) == -1) {
+        if (gf_log_init (ctx, log_file) == -1) {
                 fprintf (stderr, "ERROR: failed to open logfile %s\n",
                          log_file);
                 return -1;
@@ -273,6 +237,8 @@ cli_submit_request (void *req, call_frame_t *frame,
 out:
         if (new_iobref)
                 iobref_unref (iobref);
+        if (iobuf)
+                iobuf_unref (iobuf);
         return ret;
 }
 
@@ -317,14 +283,32 @@ cli_rpc_notify (struct rpc_clnt *rpc, void *mydata, rpc_clnt_event_t event,
         return ret;
 }
 
+
+/*
+ * ret: 0: option successfully processed
+ *      1: signalling end of option list
+ *     -1: unknown option or other issue
+ */
 int
 cli_opt_parse (char *opt, struct cli_state *state)
 {
         char *oarg;
 
+        if (strcmp (opt, "") == 0)
+                return 1;
+
         if (strcmp (opt, "version") == 0) {
                 puts (argp_program_version);
                 exit (0);
+        }
+
+        if (strcmp (opt, "xml") == 0) {
+#if (HAVE_LIB_XML)
+                state->mode |= GLUSTER_MODE_XML;
+#else
+                cli_err ("XML output not supported. Ignoring '--xml' option");
+#endif
+                return 0;
         }
 
         oarg = strtail (opt, "mode=");
@@ -385,6 +369,11 @@ parse_cmdline (int argc, char *argv[], struct cli_state *state)
                         state->argc--;
                         /* argv shifted, next check should be at i again */
                         i--;
+                        if (ret == 1) {
+                                /* end of cli options */
+                                ret = 0;
+                                break;
+                        }
                 }
         }
 
@@ -432,9 +421,33 @@ cli_usage_out (const char *usage)
         if (!usage || usage[0] == '\0')
                 return -1;
 
-        cli_out ("Usage: %s", usage);
+        cli_err ("Usage: %s", usage);
         return 0;
 }
+
+int
+_cli_err (const char *fmt, ...)
+{
+        struct cli_state *state = NULL;
+        va_list           ap;
+        int               ret = 0;
+
+        state = global_state;
+
+        va_start (ap, fmt);
+
+#ifdef HAVE_READLINE
+        if (state->rl_enabled && !state->rl_processing)
+                return cli_rl_err(state, fmt, ap);
+#endif
+
+        ret = vfprintf (stderr, fmt, ap);
+        fprintf (stderr, "\n");
+        va_end (ap);
+
+        return ret;
+}
+
 
 int
 _cli_out (const char *fmt, ...)
@@ -486,11 +499,11 @@ cli_rpc_init (struct cli_state *state)
         if (ret)
                 goto out;
 
-        ret = dict_set_str (options, "transport.address-family", "inet/inet6");
+        ret = dict_set_str (options, "transport.address-family", "inet");
         if (ret)
                 goto out;
 
-        rpc = rpc_clnt_new (options, this->ctx, this->name);
+        rpc = rpc_clnt_new (options, this->ctx, this->name, 16);
 
         if (!rpc)
                 goto out;
@@ -525,74 +538,13 @@ void
 cli_local_wipe (cli_local_t *local)
 {
         if (local) {
+                GF_FREE (local->get_vol.volname);
+                if (local->dict)
+                        dict_unref (local->dict);
                 GF_FREE (local);
         }
 
         return;
-}
-
-/* If the path exists use realpath(3) to handle extra slashes and to resolve
- * symlinks else strip the extra slashes in the path and return */
-
-int
-cli_canonicalize_path (char *path)
-{
-        struct stat     sb = {0};
-        int             ret = -1;
-        char            *tmppath = NULL;
-        char            *dir = NULL;
-        char            *tmpstr = NULL;
-        int             path_len = 0;
-
-        if (!path)
-                return ret;
-
-        ret = stat (path, &sb);
-        if (ret == -1) {
-                /* Strip the extra slashes and return */
-                tmppath = gf_strdup (path);
-                if (tmppath == NULL) {
-                        ret = -1;
-                        gf_log ("cli", GF_LOG_ERROR, "Out of memory.");
-                        goto out;
-                }
-                bzero (path, strlen(path));
-                path[0] = '/';
-                dir = strtok_r(tmppath, "/", &tmpstr);
-                while (dir) {
-                        strncpy ((path + path_len + 1), dir, strlen(dir));
-                        path_len = strlen (path);
-                        dir = strtok_r(NULL, "/", &tmpstr);
-                        if (dir)
-                                strncpy((path + path_len), "/", 1);
-                }
-                if (path_len == 0)
-                        path[1] = '\0';
-                else
-                        path[path_len] = '\0';
-                ret = 0;
-                goto out;
-        } else {
-                tmppath = gf_strdup(path);
-                if (tmppath == NULL) {
-                        ret = -1;
-                        gf_log ("cli", GF_LOG_ERROR, "Out of memory.");
-                        goto out;
-                }
-                if (realpath (tmppath, path) == NULL) {
-                        cli_out ("Path manipulation failed: %s",
-                                 strerror(errno));
-                        gf_log ("cli", GF_LOG_ERROR, "Path manipulation "
-                                 "failed: %s", strerror(errno));
-                        ret = -1;
-                        goto out;
-                }
-                ret = 0;
-        }
-out:
-        if (tmppath)
-                GF_FREE(tmppath);
-        return ret;
 }
 
 struct cli_state *global_state;
@@ -604,13 +556,17 @@ main (int argc, char *argv[])
         int                ret = -1;
         glusterfs_ctx_t   *ctx = NULL;
 
-        ret = glusterfs_globals_init ();
+        ctx = glusterfs_ctx_new ();
+        if (!ctx)
+                return ENOMEM;
+
+        gf_mem_acct_enable_set (ctx);
+
+        ret = glusterfs_globals_init (ctx);
         if (ret)
                 return ret;
 
-        ctx = glusterfs_ctx_get ();
-        if (!ctx)
-                return ENOMEM;
+	THIS->ctx = ctx;
 
         ret = glusterfs_ctx_defaults_init (ctx);
         if (ret)
@@ -627,7 +583,7 @@ main (int argc, char *argv[])
         if (ret)
                 goto out;
 
-        ret = logging_init (&state);
+        ret = logging_init (ctx, &state);
         if (ret)
                 goto out;
 

@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _INODE_H
@@ -28,7 +19,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define DEFAULT_INODE_MEMPOOL_ENTRIES   16384
+#define DEFAULT_INODE_MEMPOOL_ENTRIES   32 * 1024
+#define INODE_PATH_FMT "<gfid:%s>"
 struct _inode_table;
 typedef struct _inode_table inode_table_t;
 
@@ -106,6 +98,10 @@ struct _inode {
 };
 
 
+#define UUID0_STR "00000000-0000-0000-0000-000000000000"
+#define GFID_STR_PFX "<gfid:" UUID0_STR ">"
+#define GFID_STR_PFX_LEN (sizeof (GFID_STR_PFX) - 1)
+
 inode_table_t *
 inode_table_new (size_t lru_limit, xlator_t *xl);
 
@@ -135,12 +131,19 @@ int
 inode_forget (inode_t *inode, uint64_t nlookup);
 
 int
+inode_invalidate(inode_t *inode);
+
+int
 inode_rename (inode_table_t *table, inode_t *olddir, const char *oldname,
 	      inode_t *newdir, const char *newname,
 	      inode_t *inode, struct iatt *stbuf);
 
 inode_t *
 inode_grep (inode_table_t *table, inode_t *parent, const char *name);
+
+int
+inode_grep_for_gfid (inode_table_t *table, inode_t *parent, const char *name,
+                     uuid_t gfid, ia_type_t *type);
 
 inode_t *
 inode_find (inode_table_t *table, uuid_t gfid);
@@ -155,31 +158,46 @@ inode_t *
 inode_from_path (inode_table_t *table, const char *path);
 
 int
-__inode_ctx_put (inode_t *inode, xlator_t *xlator, uint64_t value);
-
+inode_ctx_set2 (inode_t *inode, xlator_t *xlator, uint64_t *value1,
+                uint64_t *value2);
 int
-inode_ctx_put (inode_t *inode, xlator_t *xlator, uint64_t value);
-
-int
-__inode_ctx_get (inode_t *inode, xlator_t *xlator, uint64_t *value);
-
-int
-inode_ctx_get (inode_t *inode, xlator_t *xlator, uint64_t *value);
-
-int
-inode_ctx_del (inode_t *inode, xlator_t *xlator, uint64_t *value);
-
-int
-inode_ctx_put2 (inode_t *inode, xlator_t *xlator, uint64_t value1,
-                uint64_t value2);
+__inode_ctx_set2 (inode_t *inode, xlator_t *xlator, uint64_t *value1,
+                  uint64_t *value2);
 
 int
 inode_ctx_get2 (inode_t *inode, xlator_t *xlator, uint64_t *value1,
                 uint64_t *value2);
+int
+__inode_ctx_get2 (inode_t *inode, xlator_t *xlator, uint64_t *value1,
+                  uint64_t *value2);
 
 int
 inode_ctx_del2 (inode_t *inode, xlator_t *xlator, uint64_t *value1,
                 uint64_t *value2);
+
+inode_t *
+inode_resolve (inode_table_t *table, char *path);
+
+#define __inode_ctx_set(i,x,v_p) __inode_ctx_set2(i,x,v_p,0)
+#define inode_ctx_set(i,x,v_p) inode_ctx_set2(i,x,v_p,0)
+
+static inline int
+__inode_ctx_put(inode_t *inode, xlator_t *this, uint64_t v)
+{
+        return __inode_ctx_set2 (inode, this, &v, 0);
+}
+
+static inline int
+inode_ctx_put(inode_t *inode, xlator_t *this, uint64_t v)
+{
+        return inode_ctx_set2(inode, this, &v, 0);
+}
+
+#define __inode_ctx_get(i,x,v) __inode_ctx_get2(i,x,v,0)
+#define inode_ctx_get(i,x,v) inode_ctx_get2(i,x,v,0)
+
+#define inode_ctx_del(i,x,v) inode_ctx_del2(i,x,v,0)
+
 
 gf_boolean_t
 __is_root_gfid (uuid_t gfid);

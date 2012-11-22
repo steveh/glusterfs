@@ -1,23 +1,15 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
+#include <openssl/md5.h>
 #include "glusterfs.h"
 #include "afr.h"
 #include "xlator.h"
@@ -33,7 +25,6 @@
 #include "compat-errno.h"
 #include "compat.h"
 #include "byte-order.h"
-#include "md5.h"
 
 #include "afr-transaction.h"
 #include "afr-self-heal.h"
@@ -72,8 +63,7 @@ sh_private_cleanup (call_frame_t *frame, xlator_t *this)
         sh    = &local->self_heal;
 
         sh_priv = sh->private;
-        if (sh_priv)
-                GF_FREE (sh_priv);
+        GF_FREE (sh_priv);
 }
 
 static int
@@ -113,7 +103,7 @@ sh_loop_driver_done (call_frame_t *sh_frame, xlator_t *this,
         if (sh->op_failed) {
                 GF_ASSERT (!last_loop_frame);
                 //loop_finish should have happened and the old_loop should be NULL
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "self-heal aborting on %s",
                         local->loc.path);
 
@@ -121,10 +111,10 @@ sh_loop_driver_done (call_frame_t *sh_frame, xlator_t *this,
         } else {
                 GF_ASSERT (last_loop_frame);
                 if (diff_blocks == total_blocks) {
-                        gf_log (this->name, GF_LOG_INFO, "full self-heal "
+                        gf_log (this->name, GF_LOG_DEBUG, "full self-heal "
                                 "completed on %s",local->loc.path);
                 } else {
-                        gf_log (this->name, GF_LOG_INFO,
+                        gf_log (this->name, GF_LOG_DEBUG,
                                 "diff self-heal on %s: completed. "
                                 "(%d blocks of %d were different (%.2f%%))",
                                 local->loc.path, diff_blocks, total_blocks,
@@ -174,7 +164,7 @@ sh_loop_lock_success (call_frame_t *loop_frame, xlator_t *this)
         sh_loop_finish (loop_sh->old_loop_frame, this);
         loop_sh->old_loop_frame = NULL;
 
-        gf_log (this->name, GF_LOG_DEBUG, "Aquired lock for range %"PRIu64
+        gf_log (this->name, GF_LOG_DEBUG, "Acquired lock for range %"PRIu64
                 " %"PRIu64, loop_sh->offset, loop_sh->block_size);
         loop_sh->data_lock_held = _gf_true;
         loop_sh->sh_data_algo_start (loop_frame, this);
@@ -239,7 +229,7 @@ sh_loop_frame_create (call_frame_t *sh_frame, xlator_t *this,
                                                gf_afr_mt_char);
         if (!new_loop_sh->write_needed)
                 goto out;
-        new_loop_sh->checksum = GF_CALLOC (priv->child_count, MD5_DIGEST_LEN,
+        new_loop_sh->checksum = GF_CALLOC (priv->child_count, MD5_DIGEST_LENGTH,
                                            gf_afr_mt_uint8_t);
         if (!new_loop_sh->checksum)
                 goto out;
@@ -410,7 +400,7 @@ sh_loop_return (call_frame_t *sh_frame, xlator_t *this, call_frame_t *loop_frame
 static int
 sh_loop_write_cbk (call_frame_t *loop_frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, struct iatt *buf,
-                   struct iatt *postbuf)
+                   struct iatt *postbuf, dict_t *xdata)
 {
         afr_private_t *             priv        = NULL;
         afr_local_t *               loop_local    = NULL;
@@ -456,12 +446,41 @@ sh_loop_write_cbk (call_frame_t *loop_frame, void *cookie, xlator_t *this,
         return 0;
 }
 
+static void
+sh_prune_writes_needed (call_frame_t *sh_frame, call_frame_t *loop_frame,
+                        afr_private_t *priv)
+{
+        afr_local_t     *sh_local     = NULL;
+        afr_self_heal_t *sh           = NULL;
+        afr_local_t     *loop_local   = NULL;
+        afr_self_heal_t *loop_sh      = NULL;
+        int             i             = 0;
+
+        sh_local   = sh_frame->local;
+        sh         = &sh_local->self_heal;
+
+        if (!strcmp (sh->algo->name, "diff"))
+                return;
+
+        loop_local = loop_frame->local;
+        loop_sh    = &loop_local->self_heal;
+
+        /* full self-heal guarantees there exists atleast 1 file with size 0
+         * That means for other files we can preserve holes that come after
+         * its size before 'trim'
+         */
+        for (i = 0; i < priv->child_count; i++) {
+                if (loop_sh->write_needed[i] &&
+                    ((loop_sh->offset + 1) > sh->buf[i].ia_size))
+                        loop_sh->write_needed[i] = 0;
+        }
+}
 
 static int
 sh_loop_read_cbk (call_frame_t *loop_frame, void *cookie,
                   xlator_t *this, int32_t op_ret, int32_t op_errno,
                   struct iovec *vector, int32_t count, struct iatt *buf,
-                  struct iobref *iobref)
+                  struct iobref *iobref, dict_t *xdata)
 {
         afr_private_t *               priv       = NULL;
         afr_local_t *                 loop_local   = NULL;
@@ -499,16 +518,15 @@ sh_loop_read_cbk (call_frame_t *loop_frame, void *cookie,
                 goto out;
         }
 
-        if (loop_sh->file_has_holes && iov_0filled (vector, count) == 0) {
-                        gf_log (this->name, GF_LOG_DEBUG, "0 filled block");
-                        sh_loop_return (sh_frame, this, loop_frame,
-                                        op_ret, op_errno);
-                        goto out;
-        }
+        if (loop_sh->file_has_holes && iov_0filled (vector, count) == 0)
+                sh_prune_writes_needed (sh_frame, loop_frame, priv);
 
         call_count = sh_number_of_writes_needed (loop_sh->write_needed,
                                                  priv->child_count);
-        GF_ASSERT (call_count > 0);
+        if (call_count == 0) {
+                sh_loop_return (sh_frame, this, loop_frame, 0, 0);
+                goto out;
+        }
         loop_local->call_count = call_count;
 
         for (i = 0; i < priv->child_count; i++) {
@@ -519,7 +537,7 @@ sh_loop_read_cbk (call_frame_t *loop_frame, void *cookie,
                                    priv->children[i],
                                    priv->children[i]->fops->writev,
                                    loop_sh->healing_fd, vector, count,
-                                   loop_sh->offset, iobref);
+                                   loop_sh->offset, 0, iobref, NULL);
 
                 if (!--call_count)
                         break;
@@ -546,7 +564,7 @@ sh_loop_read (call_frame_t *loop_frame, xlator_t *this)
                            priv->children[loop_sh->source],
                            priv->children[loop_sh->source]->fops->readv,
                            loop_sh->healing_fd, loop_sh->block_size,
-                           loop_sh->offset);
+                           loop_sh->offset, 0, NULL);
 
         return 0;
 }
@@ -555,7 +573,8 @@ sh_loop_read (call_frame_t *loop_frame, xlator_t *this)
 static int
 sh_diff_checksum_cbk (call_frame_t *loop_frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno,
-                      uint32_t weak_checksum, uint8_t *strong_checksum)
+                      uint32_t weak_checksum, uint8_t *strong_checksum,
+                      dict_t *xdata)
 {
         afr_private_t                 *priv         = NULL;
         afr_local_t                   *loop_local   = NULL;
@@ -589,8 +608,8 @@ sh_diff_checksum_cbk (call_frame_t *loop_frame, void *cookie, xlator_t *this,
                         strerror (op_errno));
                 sh->op_failed = 1;
         } else {
-                memcpy (loop_sh->checksum + child_index * MD5_DIGEST_LEN,
-                        strong_checksum, MD5_DIGEST_LEN);
+                memcpy (loop_sh->checksum + child_index * MD5_DIGEST_LENGTH,
+                        strong_checksum, MD5_DIGEST_LENGTH);
         }
 
         call_count = afr_frame_return (loop_frame);
@@ -600,9 +619,9 @@ sh_diff_checksum_cbk (call_frame_t *loop_frame, void *cookie, xlator_t *this,
                         if (sh->sources[i] || !sh_local->child_up[i])
                                 continue;
 
-                        if (memcmp (loop_sh->checksum + (i * MD5_DIGEST_LEN),
-                                    loop_sh->checksum + (sh->source * MD5_DIGEST_LEN),
-                                    MD5_DIGEST_LEN)) {
+                        if (memcmp (loop_sh->checksum + (i * MD5_DIGEST_LENGTH),
+                                    loop_sh->checksum + (sh->source * MD5_DIGEST_LENGTH),
+                                    MD5_DIGEST_LENGTH)) {
                                 /*
                                   Checksums differ, so this block
                                   must be written to this sink
@@ -658,7 +677,7 @@ sh_diff_checksum (call_frame_t *loop_frame, xlator_t *this)
                            priv->children[loop_sh->source],
                            priv->children[loop_sh->source]->fops->rchecksum,
                            loop_sh->healing_fd,
-                           loop_sh->offset, loop_sh->block_size);
+                           loop_sh->offset, loop_sh->block_size, NULL);
 
         for (i = 0; i < priv->child_count; i++) {
                 if (loop_sh->sources[i] || !loop_local->child_up[i])
@@ -669,7 +688,7 @@ sh_diff_checksum (call_frame_t *loop_frame, xlator_t *this)
                                    priv->children[i],
                                    priv->children[i]->fops->rchecksum,
                                    loop_sh->healing_fd,
-                                   loop_sh->offset, loop_sh->block_size);
+                                   loop_sh->offset, loop_sh->block_size, NULL);
 
                 if (!--call_count)
                         break;
